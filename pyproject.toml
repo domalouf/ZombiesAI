@@ -6,13 +6,36 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
-    "gymnasium>=1.0",
+    "gymnasium>=1.1",
     "scipy>=1.13",
     "pyyaml>=6.0",
+    "torch>=2.8",
 ]
 
 [dependency-groups]
 dev = ["pytest>=8"]
+# LunarLander, used only to validate the from-scratch algorithms (M2/M3).
+classic = ["gymnasium[box2d]>=1.1"]
+
+[tool.uv]
+default-groups = ["dev", "classic"]
+
+# The RTX 5070 is Blackwell (sm_120) and needs a CUDA 12.8+ build; the default PyPI wheel can't see it.
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cpu", marker = "sys_platform != 'win32'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]

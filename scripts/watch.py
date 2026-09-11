@@ -13,6 +13,7 @@ from zombiesai.viz.replay import record_replay, write_replay_html
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent", choices=("scripted", "random"), default="scripted")
+    parser.add_argument("--checkpoint", type=Path, help="watch a trained PPO policy instead (overrides --agent)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hardness", type=float, default=0.5)
     parser.add_argument("--max-steps", type=int, default=100_000)
@@ -20,7 +21,16 @@ def main() -> None:
     parser.add_argument("--no-open", action="store_true", help="don't open the replay in a browser")
     args = parser.parse_args()
 
-    agent = ScriptedAgent() if args.agent == "scripted" else RandomAgent(args.seed)
+    if args.checkpoint:
+        import torch
+
+        from zombiesai.rl.agent import PolicyAgent
+
+        torch.manual_seed(args.seed)  # the policy samples its actions; same seed, same game
+        agent = PolicyAgent(args.checkpoint)
+        args.agent = "ppo"
+    else:
+        agent = ScriptedAgent() if args.agent == "scripted" else RandomAgent(args.seed)
     env = NachtSim(SimConfig(hardness=args.hardness, max_steps=args.max_steps))
     replay = record_replay(env, agent, seed=args.seed, agent_name=args.agent)
     out = write_replay_html(replay, args.out or Path("runs/replays") / f"{args.agent}-seed{args.seed}.html")

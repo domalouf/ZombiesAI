@@ -199,6 +199,20 @@ def test_latency_delays_actions():
     assert math.isclose((yaw0 - env.yaw) % (2 * math.pi), math.radians(30), abs_tol=1e-9)
 
 
+@pytest.mark.parametrize("through_window", [True, False])
+def test_knife_reaches_through_windows_but_not_walls(through_window):
+    env = deterministic_env()
+    env.reset(seed=0)
+    # Player 0.4 m inside the south wall, facing south; a zombie 0.6 m outside it.
+    x = 4.0 if through_window else 7.0
+    teleport(env, x, 0.4)
+    env.yaw = -math.pi / 2
+    env.z_alive[0], env.z_phase[0], env.z_hp[0], env.z_speed[0] = True, 1, 1e9, 0.0
+    env.z_pos[0] = complex(x, -0.6)
+    env.step(spec.make_action(button="melee"))
+    assert (env.z_hp[0] < 1e9) == through_window
+
+
 @pytest.mark.parametrize("door_open", [True, False])
 def test_zombies_path_through_open_doors_only(door_open):
     env = deterministic_env(max_steps=10**9)

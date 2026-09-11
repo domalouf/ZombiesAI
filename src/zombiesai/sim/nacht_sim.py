@@ -104,6 +104,7 @@ class RoundStats:
     melee_kills: int = 0
     hits: int = 0
     shots: int = 0
+    shot_hits: int = 0  # shots that damaged at least one zombie (knife and grenade hits don't count)
     reloads: int = 0
     repairs: int = 0
     purchases: int = 0
@@ -562,6 +563,7 @@ class NachtSim(gym.Env):
         visible = self.geo.line_of_sight(
             self.open_mask, self.px, self.py, self.z_x[idx[targets]], self.z_y[idx[targets]]
         )
+        self.rs.shot_hits += bool(visible.any())
         for j, t in enumerate(targets):
             if not visible[j]:
                 continue
@@ -606,7 +608,10 @@ class NachtSim(gym.Env):
         ok = (dist <= p.melee_range_m) & (bearing <= math.radians(p.melee_cone_deg))
         if ok.any():
             j = int(np.where(ok, dist, INF).argmin())
-            self._damage_zombie(int(idx[j]), p.melee_damage, "melee")
+            # Windows don't block the knife (knifing through barricades is real); solid walls do.
+            target = idx[j : j + 1]
+            if self.geo.line_of_sight(self.open_mask, self.px, self.py, self.z_x[target], self.z_y[target])[0]:
+                self._damage_zombie(int(idx[j]), p.melee_damage, "melee")
 
     def _throw_grenade(self) -> None:
         if self.grenades <= 0 or self.lock_t > 0.0:

@@ -18,6 +18,7 @@ wandb/
 *.mp4
 .prof/
 .pytest_cache/
+site/
 
 # OS
 .DS_Store

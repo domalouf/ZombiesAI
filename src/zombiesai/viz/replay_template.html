@@ -1,7 +1,9 @@
 <title>NachtSim Film Room</title>
+<!--fonts-->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil+Display:wght@700;800&family=Red+Hat+Mono:wght@400;500&family=Sofia+Sans+Condensed:wght@400;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil+Display:wght@800&family=Red+Hat+Mono:wght@400;500&family=Sofia+Sans+Condensed:wght@400;600;700&display=swap">
+<!--/fonts-->
 <style>
   /* One committed world: chalk on a bunker's slate, like Nacht's chalked wall-buys and red tally marks. */
   :root {
@@ -52,6 +54,9 @@
   }
   .summary b { color: var(--chalk); font-weight: 700; }
   .summary .verdict { color: var(--sanguine); }
+  .site-nav { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13.5px; }
+  .site-nav a { color: var(--chalk-dim); text-decoration: none; border-bottom: 1px solid var(--line); }
+  .site-nav a:hover { color: var(--chalk); border-color: var(--chalk-dim); }
 
   .layout {
     display: grid;
@@ -309,9 +314,10 @@
 </style>
 
 <header class="masthead">
+  <!--site-nav-->
   <div class="brand">
     <h1>NachtSim Film Room</h1>
-    <p class="tagline">One simulated game of Nacht der Untoten, top-down. The agent never sees this map: it gets a 50-number state vector and the HUD, 15 times a second. Everything else here is for you.</p>
+    <p class="tagline"><!--intro-->One simulated game of Nacht der Untoten, top-down. The agent never sees this map: it gets a 50-number state vector and the HUD, 15 times a second. Everything else here is for you.</p>
   </div>
   <p class="summary" id="summary"></p>
 </header>
@@ -1184,7 +1190,7 @@
 
   // ------------------------------------------------------------ summary
   const s = R.summary;
-  const who = { scripted: "Scripted agent", random: "Random agent" }[s.agent] || s.agent;
+  const who = { scripted: "Scripted agent", random: "Random agent", ppo: "PPO agent" }[s.agent] || s.agent;
   const verdict = s.ended === "game_over"
     ? `Survived ${s.rounds_survived} round${s.rounds_survived === 1 ? "" : "s"}`
     : `Reached round ${s.round_reached} before the step cap`;
@@ -1192,7 +1198,7 @@
     [`${who}`, `, seed ${s.seed}`],
     ["", `hardness ${s.hardness}, ${s.latency_steps}-step input lag`],
     [verdict, ` in ${clock(s.game_time_s)} of game time`, "verdict"],
-    ["", `${s.kills} kills, ${s.headshots} headshots${s.knife ? `, ${s.knife} with the knife` : ""}`],
+    ["", `${s.kills} kill${s.kills === 1 ? "" : "s"}, ${s.headshots} headshot${s.headshots === 1 ? "" : "s"}${s.knife ? `, ${s.knife} with the knife` : ""}`],
     ["", s.accuracy === null ? "no shots fired" : `${Math.round(s.accuracy * 100)}% of shots hit`],
     ["", `${s.points_earned.toLocaleString("en-US")} points earned`],
     ["", `spec ${R.spec_version.slice(0, 8)}`],

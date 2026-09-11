@@ -1,6 +1,9 @@
 """Record a NachtSim episode frame by frame and write it as a self-contained HTML replay viewer."""
 
 import json
+import re
+import shutil
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +22,7 @@ from zombiesai.sim.nacht_sim import (
 from zombiesai.sim.params import WEAPONS
 
 TEMPLATE = Path(__file__).with_name("replay_template.html")
+FONTS = Path(__file__).with_name("fonts")
 WEAPON_NAMES = {
     "m1911": "M1911",
     "kar98k": "Kar98k",
@@ -35,7 +39,11 @@ WEAPON_NAMES = {
     "ray_gun": "Ray Gun",
 }
 MAP_NAMES = {"double_barrel": "Double-Barrel", "m1a1_carbine": "M1A1"}
-DOOR_NAMES = {"help_door": "the help room door", "start_debris": "the stairway debris", "upstairs_door": "the upstairs door"}
+DOOR_NAMES = {
+    "help_door": "the help room door",
+    "start_debris": "the stairway debris",
+    "upstairs_door": "the upstairs door",
+}
 ZONE_LABELS = {"start": "Start room", "help": "Help room", "upstairs": "Upstairs"}
 FLAG_ADS, FLAG_SPRINT, FLAG_INTERMISSION, FLAG_RELOADING, FLAG_SWAPPING = (1, 2, 4, 8, 16)
 KILL_BODY, KILL_HEAD, KILL_KNIFE = range(3)
@@ -71,7 +79,7 @@ def _map_payload(geo: Geometry) -> dict:
         "labels": labels,
         "doors": [{"id": d.id, "kind": d.kind, "rect": list(d.rect), "price": d.price} for d in geo.doors],
         "windows": [
-            {"pos": w.pos.tolist(), "normal": w.normal.tolist(), "outside": w.outside.tolist(), "spawn": w.spawn.tolist()}
+            {k: getattr(w, k).tolist() for k in ("pos", "normal", "outside", "spawn")}
             for w in geo.windows
         ],
         "weapons": [
@@ -195,7 +203,8 @@ def record_replay(env: NachtSim, agent, *, seed: int, agent_name: str, options: 
     while not (terminated or truncated):
         hp_before, alive_before = env.z_hp.copy(), env.z_alive.copy()
         rs_before = env.rs
-        counts = (rs_before.shots, rs_before.hits, rs_before.kills, rs_before.headshot_kills, rs_before.melee_kills)
+        fields = ("shots", "shot_hits", "kills", "headshot_kills", "melee_kills")
+        counts = [getattr(rs_before, k) for k in fields]
         player_hp, points = env.hp, env.points
 
         action = np.asarray(agent.act(obs))
@@ -203,11 +212,9 @@ def record_replay(env: NachtSim, agent, *, seed: int, agent_name: str, options: 
 
         # A round can roll over mid-step, so count deltas on the old stats object plus the new one.
         new = env.rs if env.rs is not rs_before else None
-        delta = [
-            getattr(rs_before, k) - c + (getattr(new, k) if new else 0)
-            for k, c in zip(("shots", "hits", "kills", "headshot_kills", "melee_kills"), counts)
-        ]
-        shots, hits_n, kills_n, heads_n, knife_n = delta
+        shots, shot_hits, kills_n, heads_n, knife_n = (
+            getattr(rs_before, k) - c + (getattr(new, k) if new else 0) for k, c in zip(fields, counts)
+        )
         damaged = alive_before & (env.z_hp < hp_before)
         killed = np.flatnonzero(alive_before & ~env.z_alive)
         kinds = [KILL_HEAD] * heads_n + [KILL_KNIFE] * knife_n
@@ -219,7 +226,7 @@ def record_replay(env: NachtSim, agent, *, seed: int, agent_name: str, options: 
 
         t = rec.totals
         t["shots"] += shots
-        t["hits"] += hits_n + kills_n
+        t["hits"] += shot_hits
         t["kills"] += kills_n
         t["headshots"] += heads_n
         t["knife"] += knife_n
@@ -288,17 +295,43 @@ def record_replay(env: NachtSim, agent, *, seed: int, agent_name: str, options: 
     }
 
 
-def write_replay_html(replay: dict, path: str | Path, standalone: bool = True) -> Path:
+def write_replay_html(replay: dict, path: str | Path, standalone: bool = True, head: str = "") -> Path:
     """standalone wraps the page in a full HTML document; without it, the body fragment an Artifact expects."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(replay, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")
     html = TEMPLATE.read_text().replace("/*__REPLAY_DATA__*/null", data, 1)
     if standalone:
+        title = re.search(r"<title>.*?</title>\n", html).group(0)
         html = (
             '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
-            '<meta name="viewport" content="width=device-width, initial-scale=1">\n</head>\n<body>\n'
-            f"{html}\n</body>\n</html>\n"
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">\n{title}{head}</head>\n<body>\n'
+            f"{html.replace(title, '', 1)}\n</body>\n</html>\n"
         )
     path.write_text(html)
     return path
+
+
+def write_site_page(
+    replay: dict,
+    out_dir: str | Path,
+    intro: str,
+    links: list[tuple[str, str]],
+    description: str,
+) -> Path:
+    """The replay as a static directory (index.html + fonts/) that makes no external requests, for a strict CSP."""
+    out_dir = Path(out_dir)
+    head = f'<meta name="description" content="{escape(description)}">\n<meta name="color-scheme" content="dark">\n'
+    index = write_replay_html(replay, out_dir / "index.html", head=head)
+    html = index.read_text()
+    fonts_css = (FONTS / "fonts.css").read_text()
+    html = re.sub(r"<!--fonts-->.*?<!--/fonts-->", lambda _: f"<style>\n{fonts_css}</style>", html, count=1, flags=re.S)
+    nav = "".join(f'<a href="{escape(href)}">{escape(label)}</a>' for label, href in links)
+    html = html.replace("<!--site-nav-->", f'<nav class="site-nav" aria-label="Site">{nav}</nav>', 1)
+    html = re.sub(r"<!--intro-->.*?</p>", lambda _: f"{escape(intro)}</p>", html, count=1, flags=re.S)
+    index.write_text(html)
+    (out_dir / "fonts").mkdir(exist_ok=True)
+    for f in FONTS.iterdir():
+        if f.suffix in (".woff2", ".txt"):
+            shutil.copy2(f, out_dir / "fonts" / f.name)
+    return index

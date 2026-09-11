@@ -5,7 +5,7 @@ of Duty: World at War's Nazi Zombies map — by screen capture and synthetic
 keyboard/mouse input only, the way a person would. No mod tools, no memory
 reading, no game scripting.
 
-## Status: M1 (spec + simulator skeleton) in progress
+## Status: M2 (from-scratch PPO) in progress
 
 The full plan, including architecture, environment spec, reward design, the
 milestone ladder (M0–M7), and ranked risks, is in [`PLAN.md`](./PLAN.md), and
@@ -24,14 +24,27 @@ Built so far (all Linux, no game needed):
   cap, novelty gating, and repair cap.
 - `src/zombiesai/store/` — the episode store (crash-tolerant, spec-checked).
 - `src/zombiesai/agents/` — random and scripted baselines.
+- `src/zombiesai/rl/` — **PPO from scratch**: GAE with correct truncation
+  bootstrapping, the clipped surrogate, a factored policy with one categorical
+  per action head, and checkpoints stamped with `SPEC_VERSION`.
 
 ```sh
-uv sync                                  # Python env + deps
+uv sync                                  # Python 3.13 env + deps (PyTorch: CPU on Linux, CUDA 12.8 on Windows)
 uv run pytest                            # test suite
 uv run python scripts/bench_sim.py       # steps/s and multi-process scaling
 uv run python scripts/eval_baselines.py  # scripted vs random, 100 episodes each
 uv run python scripts/watch.py --seed 1  # play a game and open its replay in your browser
+
+uv run python scripts/train_ppo.py cartpole     # PPO correctness check (solves in ~5 min on CPU)
+uv run python scripts/train_ppo.py lunarlander  # the harder check
+uv run python scripts/train_ppo.py nacht-state  # the real thing: PPO on NachtSim's state vector
+uv run python scripts/curve.py runs/<run>                      # learning curve so far
+uv run python scripts/eval_policy.py runs/<run>/checkpoint.pt
+uv run python scripts/watch.py --checkpoint runs/<run>/checkpoint.pt
 ```
+
+Training runs write `config.json`, `metrics.jsonl` (one line per update), and
+`checkpoint.pt` to `runs/<run>/`.
 
 `watch.py` writes a self-contained replay to `runs/replays/`: a top-down map with
 play/pause, speed, scrubbing, what the agent could and couldn't see, its action
