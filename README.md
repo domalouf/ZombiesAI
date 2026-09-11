@@ -5,12 +5,38 @@ of Duty: World at War's Nazi Zombies map — by screen capture and synthetic
 keyboard/mouse input only, the way a person would. No mod tools, no memory
 reading, no game scripting.
 
-## Status: planning
+## Status: M1 (spec + simulator skeleton) in progress
 
-No code yet — this repo currently holds the implementation plan. The full
-plan, including architecture, environment spec, reward design, the milestone
-ladder (M0–M7), and ranked risks, is in [`PLAN.md`](./PLAN.md), and as a
-formatted page: **[Undead Loop](https://claude.ai/code/artifact/9feeeb1c-8561-4347-912f-2fb98c9c441b)**.
+The full plan, including architecture, environment spec, reward design, the
+milestone ladder (M0–M7), and ranked risks, is in [`PLAN.md`](./PLAN.md), and
+as a formatted page: **[Undead Loop](https://claude.ai/code/artifact/9feeeb1c-8561-4347-912f-2fb98c9c441b)**.
+
+Built so far (all Linux, no game needed):
+
+- `src/zombiesai/spec.py` — the versioned contract: factored action space, the
+  48-action compact profile, HUD/state layouts, and a `SPEC_VERSION` hash that
+  every checkpoint and episode is stamped with.
+- `src/zombiesai/sim/` — **NachtSim** in state mode: ground-truth round
+  mechanics from the game script, domain-randomized guesses for everything
+  else, latency/action-repeat/dropout randomization, and HUD noise. What it
+  gets wrong is listed in [`docs/sim_lies.md`](./docs/sim_lies.md).
+- `src/zombiesai/reward.py` — the shaped reward, term by term, with the gain
+  cap, novelty gating, and repair cap.
+- `src/zombiesai/store/` — the episode store (crash-tolerant, spec-checked).
+- `src/zombiesai/agents/` — random and scripted baselines.
+
+```sh
+uv sync                                  # Python env + deps
+uv run pytest                            # test suite
+uv run python scripts/bench_sim.py       # steps/s and multi-process scaling
+uv run python scripts/eval_baselines.py  # scripted vs random, 100 episodes each
+uv run python scripts/watch.py --seed 1  # play a game and open its replay in your browser
+```
+
+`watch.py` writes a self-contained replay to `runs/replays/`: a top-down map with
+play/pause, speed, scrubbing, what the agent could and couldn't see, its action
+each step, and a clickable match log. Add `#t=90` to the file's URL to open it at
+90 seconds in. `--agent random` shows the baseline dying.
 
 ## The shape of it
 

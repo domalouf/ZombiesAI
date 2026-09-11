@@ -16,6 +16,8 @@ checkpoints/
 *.ckpt
 wandb/
 *.mp4
+.prof/
+.pytest_cache/
 
 # OS
 .DS_Store

@@ -1,0 +1,1213 @@
+<title>NachtSim Film Room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil+Display:wght@700;800&family=Red+Hat+Mono:wght@400;500&family=Sofia+Sans+Condensed:wght@400;600;700&display=swap">
+<style>
+  /* One committed world: chalk on a bunker's slate, like Nacht's chalked wall-buys and red tally marks. */
+  :root {
+    --ground: #1a211f;
+    --panel: #212a27;
+    --floor: #2a3430;
+    --line: #37423d;
+    --chalk: #e8e4d8;
+    --chalk-dim: #9aa39b;
+    --sanguine: #d0593f;
+    --amber: #ddb04d;
+    --wood: #a27a4d;
+    --player: #8fc6d8;
+    --display: "Big Shoulders Stencil Display", Impact, "Arial Narrow", sans-serif;
+    --ui: "Sofia Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+    --mono: "Red Hat Mono", ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--ground); }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--chalk);
+    font: 15px/1.45 var(--ui);
+    padding-inline: clamp(16px, 3vw, 36px);
+    padding-block: 22px 48px;
+  }
+  .masthead, .layout { max-width: 1360px; margin-inline: auto; }
+  .masthead { display: grid; gap: 12px; margin-bottom: 18px; }
+  .brand { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; }
+  h1 {
+    margin: 0;
+    font: 800 clamp(30px, 4vw, 44px)/0.95 var(--display);
+    letter-spacing: 0.01em;
+    text-transform: uppercase;
+    text-wrap: balance;
+  }
+  .tagline { margin: 0; max-width: 64ch; color: var(--chalk-dim); font-size: 14.5px; }
+  .summary {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 20px;
+    font-size: 14.5px;
+    color: var(--chalk-dim);
+  }
+  .summary b { color: var(--chalk); font-weight: 700; }
+  .summary .verdict { color: var(--sanguine); }
+
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 330px;
+    gap: 22px;
+    align-items: start;
+  }
+  @media (max-width: 980px) { .layout { grid-template-columns: minmax(0, 1fr); } }
+  .stage { display: grid; gap: 12px; min-width: 0; }
+
+  .map-wrap {
+    position: relative;
+    width: min(100%, calc(74vh * var(--map-ratio, 1)));
+    margin-inline: auto;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+    background: var(--ground);
+  }
+  #map { display: block; width: 100%; max-width: 100%; }
+  .banner {
+    position: absolute;
+    left: 50%;
+    top: 44%;
+    transform: translate(-50%, -50%);
+    font: 800 clamp(32px, 5vw, 60px)/1 var(--display);
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--sanguine);
+    text-shadow: 0 2px 12px rgba(12, 16, 15, 0.9);
+    pointer-events: none;
+    white-space: nowrap;
+    opacity: 0;
+  }
+  .prompt {
+    position: absolute;
+    left: 50%;
+    bottom: 5%;
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: 92%;
+    padding: 6px 12px;
+    border-radius: 3px;
+    background: rgba(12, 16, 15, 0.8);
+    font: 600 14px/1.35 var(--ui);
+    text-align: center;
+  }
+  kbd {
+    font: 500 12px var(--mono);
+    border: 1px solid var(--chalk-dim);
+    border-bottom-width: 2px;
+    border-radius: 3px;
+    padding: 0 5px;
+    margin-inline: 2px;
+  }
+  .scale {
+    position: absolute;
+    left: 12px;
+    bottom: 10px;
+    display: flex;
+    align-items: flex-end;
+    gap: 6px;
+    font: 500 11px var(--mono);
+    color: var(--chalk-dim);
+    pointer-events: none;
+  }
+  .scale i { display: block; width: var(--scale-w, 120px); height: 6px; border: 1.5px solid var(--chalk-dim); border-top: 0; }
+
+  .transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+  .stepper { display: flex; flex-wrap: wrap; gap: 6px; }
+  button, select {
+    font: 600 14px/1 var(--ui);
+    color: var(--chalk);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 8px 12px;
+    cursor: pointer;
+  }
+  button:hover, select:hover { border-color: var(--chalk-dim); }
+  :focus-visible { outline: 2px solid var(--player); outline-offset: 2px; }
+  .play {
+    min-width: 96px;
+    background: var(--chalk);
+    border-color: var(--chalk);
+    color: var(--ground);
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .play:hover { border-color: var(--chalk); background: #fffaf0; }
+  .speed { display: flex; align-items: center; gap: 8px; font-size: 13.5px; color: var(--chalk-dim); }
+  .clock {
+    margin-left: auto;
+    font: 500 13.5px var(--mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--chalk-dim);
+  }
+
+  .timeline { display: grid; gap: 4px; }
+  #timeline { display: block; width: 100%; height: 44px; border-radius: 3px; cursor: pointer; touch-action: none; }
+  #scrub { width: 100%; margin: 0; accent-color: var(--amber); }
+  .tl-key { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--chalk-dim); }
+  .tl-key span { display: inline-flex; align-items: center; gap: 6px; }
+  .tl-key i { display: inline-block; width: 3px; height: 12px; }
+
+  .options { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13.5px; color: var(--chalk-dim); }
+  .options label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+  .options input { width: 16px; height: 16px; accent-color: var(--player); }
+
+  .legend {
+    list-style: none;
+    margin: 0;
+    padding: 12px 0 0;
+    border-top: 1px solid var(--line);
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 8px 18px;
+    font-size: 13px;
+    color: var(--chalk-dim);
+  }
+  .legend li { display: flex; align-items: center; gap: 10px; }
+  .legend svg { flex: none; width: 28px; height: 18px; overflow: visible; }
+  .sw-player { fill: var(--player); }
+  .sw-cone { fill: var(--player); opacity: 0.3; }
+  .sw-z { fill: none; stroke: var(--sanguine); stroke-width: 1.6; }
+  .sw-z-fill { fill: var(--sanguine); }
+  .sw-wood { fill: var(--wood); }
+  .sw-gap { fill: none; stroke: var(--chalk-dim); stroke-width: 0.8; opacity: 0.6; }
+  .sw-hit { stroke: var(--sanguine); stroke-width: 2; }
+  .sw-kill { stroke: var(--amber); stroke-width: 2.2; stroke-linecap: round; }
+  .sw-door { fill: var(--ground); stroke: var(--wood); stroke-width: 1; }
+
+  .panel {
+    display: grid;
+    gap: 22px;
+    padding: 18px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    min-width: 0;
+  }
+  .label {
+    margin: 0 0 10px;
+    font: 700 11.5px/1.2 var(--ui);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--chalk-dim);
+  }
+  .hud {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 12px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .hud-round, .hud-points { display: grid; gap: 4px; }
+  .hud-points { justify-items: end; text-align: right; }
+  #tally { width: 64px; height: 56px; }
+  #tally path { fill: none; stroke: var(--sanguine); stroke-width: 5.5; stroke-linecap: round; }
+  .round-num { font: 800 58px/0.9 var(--display); color: var(--sanguine); }
+  .points { font: 500 34px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--amber); }
+  .delta { min-height: 1.3em; font: 500 14px var(--mono); color: var(--amber); }
+  .delta.spend { color: var(--chalk-dim); }
+  .caption { font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--chalk-dim); }
+
+  .loadout { display: grid; gap: 6px; }
+  .weapon { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font: 700 18px/1.2 var(--ui); }
+  .ammo { font: 500 26px/1 var(--mono); font-variant-numeric: tabular-nums; }
+  .ammo .slash { margin-inline: 6px; color: var(--chalk-dim); }
+  .ammo .reserve { color: var(--chalk-dim); }
+  .grenades { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--chalk-dim); }
+  .grenades i { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--chalk-dim); }
+  .grenades i.on { background: var(--chalk); border-color: var(--chalk); }
+
+  .meter { display: grid; gap: 5px; margin-bottom: 14px; }
+  .meter-head { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; }
+  .meter-head span:last-child { font: 500 13px var(--mono); font-variant-numeric: tabular-nums; color: var(--chalk-dim); }
+  .bar { display: block; height: 8px; border-radius: 2px; background: var(--ground); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--sanguine); }
+  .meter.truth .bar i { background: var(--chalk-dim); }
+  .reading { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0 0 18px; font-size: 14px; }
+  .reading dt { color: var(--chalk-dim); }
+  .reading dd {
+    margin: 0;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 8px;
+    font: 500 13.5px var(--mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    font: 700 11px/1 var(--ui);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--chalk-dim);
+  }
+  .chip.on { background: var(--chalk); border-color: var(--chalk); color: var(--ground); }
+  .chip.warn { border-color: var(--amber); color: var(--amber); }
+
+  .action { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 16px; align-items: start; }
+  .dpad { display: grid; grid-template-columns: repeat(3, 18px); grid-template-rows: repeat(3, 18px); gap: 3px; }
+  .dpad i { border: 1px solid var(--line); border-radius: 2px; }
+  .dpad i.center { border-radius: 50%; margin: 4px; }
+  .dpad i.on { background: var(--player); border-color: var(--player); }
+  .dpad i.on.sprint { background: var(--amber); border-color: var(--amber); }
+  .action-text { display: grid; gap: 8px; font-size: 14px; }
+  .action-text p { margin: 0; }
+  .action-text .quiet { color: var(--chalk-dim); }
+
+  .reward-row { display: flex; justify-content: space-between; gap: 8px; font-size: 14px; margin-bottom: 4px; }
+  .reward-row span:last-child { font: 500 15px var(--mono); font-variant-numeric: tabular-nums; }
+  .pos { color: var(--amber); }
+  .neg { color: var(--sanguine); }
+  #terms { margin-top: 8px; }
+
+  .log {
+    position: relative;
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-height: 320px;
+    overflow-y: auto;
+    display: grid;
+    gap: 1px;
+  }
+  .log button {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 50px minmax(0, 1fr);
+    gap: 10px;
+    padding: 5px 8px;
+    border: 0;
+    border-radius: 3px;
+    background: transparent;
+    font: 400 13.5px/1.35 var(--ui);
+    text-align: left;
+  }
+  .log button:hover { background: rgba(232, 228, 216, 0.06); }
+  .log time { font: 500 12px/1.6 var(--mono); font-variant-numeric: tabular-nums; color: var(--chalk-dim); }
+  .log .kill span { color: var(--chalk-dim); }
+  .log .purchase span { color: var(--amber); }
+  .log .hit span, .log .death span, .log .end span { color: var(--sanguine); }
+  .log .round span, .log .round_start span { font-weight: 700; }
+  .log li.now button { background: rgba(232, 228, 216, 0.11); }
+  .log li.future { opacity: 0.42; }
+</style>
+
+<header class="masthead">
+  <div class="brand">
+    <h1>NachtSim Film Room</h1>
+    <p class="tagline">One simulated game of Nacht der Untoten, top-down. The agent never sees this map: it gets a 50-number state vector and the HUD, 15 times a second. Everything else here is for you.</p>
+  </div>
+  <p class="summary" id="summary"></p>
+</header>
+
+<main class="layout">
+  <section class="stage" aria-label="Replay">
+    <div class="map-wrap" id="mapWrap">
+      <canvas id="map" role="img" aria-label="Top-down map of the current moment"></canvas>
+      <div class="banner" id="banner" aria-hidden="true"></div>
+      <div class="prompt" id="prompt" hidden></div>
+      <div class="scale" aria-hidden="true"><i></i><span>5 m</span></div>
+    </div>
+
+    <div class="transport">
+      <button type="button" class="play" id="play" aria-keyshortcuts="Space">Play</button>
+      <div class="stepper">
+        <button type="button" id="prevRound" aria-keyshortcuts="[">Round −</button>
+        <button type="button" id="back" aria-keyshortcuts="ArrowLeft">Step −</button>
+        <button type="button" id="fwd" aria-keyshortcuts="ArrowRight">Step +</button>
+        <button type="button" id="nextRound" aria-keyshortcuts="]">Round +</button>
+      </div>
+      <label class="speed" for="speed">Speed
+        <select id="speed">
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1× (game time)</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+          <option value="8">8×</option>
+        </select>
+      </label>
+      <span class="clock" id="clock"></span>
+    </div>
+
+    <div class="timeline">
+      <canvas id="timeline" aria-hidden="true"></canvas>
+      <input type="range" id="scrub" min="0" max="0" value="0" step="1" aria-label="Replay position">
+      <p class="tl-key">
+        <span><i style="background: var(--amber)"></i>Purchase</span>
+        <span><i style="background: var(--sanguine)"></i>Hit taken</span>
+        <span><i style="background: var(--chalk-dim)"></i>Kill</span>
+        <span>Bands are rounds · Space plays · ← → step · [ ] jump rounds</span>
+      </p>
+    </div>
+
+    <div class="options">
+      <label for="showTracked"><input type="checkbox" id="showTracked" checked> Lines to the 8 zombies in the agent's state vector</label>
+      <label for="showCone"><input type="checkbox" id="showCone" checked> Field of view (65°)</label>
+    </div>
+
+    <ul class="legend" aria-label="Map legend">
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><path class="sw-cone" d="M8 9 L27 1 L27 17 Z"/><circle class="sw-player" cx="8" cy="9" r="4.5"/></svg>Player and view</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><circle class="sw-z" cx="14" cy="9" r="5.5" stroke-dasharray="2 2"/></svg>Zombie outside, walking in</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><circle class="sw-z" cx="14" cy="9" r="5.5"/><circle class="sw-z-fill" cx="14" cy="9" r="1.8"/></svg>Tearing boards off a window</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><circle class="sw-z" cx="14" cy="9" r="5.5"/><path class="sw-z-fill" d="M14 3.5 A5.5 5.5 0 0 1 14 14.5 Z"/></svg>Climbing through</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><circle class="sw-z-fill" cx="14" cy="9" r="5.5"/></svg>Inside the building</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><rect class="sw-wood" x="2" y="5" width="3" height="8"/><rect class="sw-wood" x="6.5" y="5" width="3" height="8"/><rect class="sw-wood" x="11" y="5" width="3" height="8"/><rect class="sw-wood" x="15.5" y="5" width="3" height="8"/><rect class="sw-gap" x="20" y="5" width="3" height="8"/><rect class="sw-gap" x="24.5" y="5" width="3" height="8"/></svg>Window boards (6 = sealed)</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><line class="sw-hit" x1="2" y1="15" x2="26" y2="3"/></svg>Shot that hit</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><path class="sw-kill" d="M9 4 L19 14 M19 4 L9 14"/></svg>Kill (amber: headshot)</li>
+      <li><svg viewBox="0 0 28 18" aria-hidden="true"><rect class="sw-door" x="4" y="3" width="20" height="12"/><path d="M6 13 L12 5 M12 13 L18 5 M18 13 L22 7" stroke="var(--wood)" stroke-width="1"/></svg>Closed door, with its price</li>
+    </ul>
+  </section>
+
+  <aside class="panel" aria-label="This moment">
+    <section class="hud" aria-label="Game HUD">
+      <div class="hud-round">
+        <svg id="tally" viewBox="0 0 64 56" aria-hidden="true"></svg>
+        <span class="round-num" id="roundNum" hidden></span>
+        <span class="caption" id="roundCaption">Round 1</span>
+      </div>
+      <div class="hud-points">
+        <span class="delta" id="delta"></span>
+        <span class="points" id="points">500</span>
+        <span class="caption">Points</span>
+      </div>
+    </section>
+
+    <section class="loadout" aria-label="Weapon">
+      <div class="weapon"><span id="weapon"></span><span class="chip warn" id="reloading" hidden>Reloading</span><span class="chip" id="swapping" hidden>Switching</span></div>
+      <div class="ammo"><span id="mag"></span><span class="slash">/</span><span class="reserve" id="reserve"></span></div>
+      <div class="grenades" id="grenades"></div>
+    </section>
+
+    <section aria-label="Perception">
+      <h2 class="label">What it can see</h2>
+      <div class="meter">
+        <div class="meter-head"><span>Red damage overlay</span><span id="flashVal"></span></div>
+        <span class="bar"><i id="flashBar"></i></span>
+      </div>
+      <dl class="reading" id="reading"></dl>
+      <h2 class="label">What it can't</h2>
+      <div class="meter truth">
+        <div class="meter-head"><span>True health</span><span id="hpVal"></span></div>
+        <span class="bar"><i id="hpBar"></i></span>
+      </div>
+    </section>
+
+    <section aria-label="Action">
+      <h2 class="label">What it did</h2>
+      <div class="action">
+        <div class="dpad" id="dpad" aria-hidden="true"></div>
+        <div class="action-text">
+          <p id="turn"></p>
+          <div class="chips" id="holds"></div>
+          <p id="button"></p>
+        </div>
+      </div>
+    </section>
+
+    <section aria-label="Reward">
+      <h2 class="label">Reward</h2>
+      <div class="reward-row"><span>This step</span><span id="stepReward"></span></div>
+      <div class="reward-row"><span>Episode return</span><span id="return"></span></div>
+      <div class="chips" id="terms"></div>
+    </section>
+
+    <section aria-label="Match log">
+      <h2 class="label">Match log</h2>
+      <ol class="log" id="log"></ol>
+    </section>
+  </aside>
+</main>
+
+<script>const REPLAY = /*__REPLAY_DATA__*/null;</script>
+<script>
+(() => {
+  "use strict";
+  const R = REPLAY;
+  const M = R.map, F = R.frames, EV = R.events, N = F.t.length;
+  const $ = (id) => document.getElementById(id);
+  const css = getComputedStyle(document.documentElement);
+  const C = {};
+  for (const k of ["ground", "panel", "floor", "line", "chalk", "chalk-dim", "sanguine", "amber", "wood", "player"]) {
+    C[k] = css.getPropertyValue("--" + k).trim();
+  }
+  const DISPLAY = "'Big Shoulders Stencil Display', Impact, sans-serif";
+  const UI = "'Sofia Sans Condensed', 'Arial Narrow', sans-serif";
+  const [X0, Y0, X1, Y1] = M.bounds;
+  const WM = X1 - X0, HM = Y1 - Y0;
+  const TMAX = F.t[N - 1] || 1;
+  const YAW = R.action_spec.yaw_bins_deg, PITCH = R.action_spec.pitch_bins_deg, BUTTONS = R.action_spec.buttons;
+  const BUTTON_TEXT = { use: "Use (F)", reload: "Reload (R)", melee: "Knife (V)", grenade: "Throw a grenade (G)", swap: "Swap weapons" };
+  const ROUND_STARTS = EV.filter((e) => e.kind === "round_start").map((e) => e.i);
+  const FLAG = { ads: 1, sprint: 2, intermission: 4, reloading: 8, swapping: 16 };
+  const HALF_FOV = (R.fov_deg / 2) * Math.PI / 180;
+
+  const canvas = $("map"), ctx = canvas.getContext("2d");
+  const tl = $("timeline"), tctx = tl.getContext("2d");
+  const scrub = $("scrub");
+  const wrap = $("mapWrap");
+  document.documentElement.style.setProperty("--map-ratio", (WM / HM).toFixed(4));
+  canvas.style.aspectRatio = `${WM} / ${HM}`;
+  scrub.max = String(N - 1);
+
+  let dpr = 1, cssW = 1, cssH = 1, S = 1, tlW = 1, base = null, tlBase = null;
+  let idx = 0, playing = false, playT = 0, lastNow = 0, currentEvent = -2;
+  const X = (x) => (x - X0) * S;
+  const Y = (y) => (Y1 - y) * S;
+
+  const rgba = (hex, a) => {
+    const n = parseInt(hex.slice(1), 16);
+    return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+  };
+  const clock = (s) => {
+    const m = Math.floor(s / 60);
+    return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`;
+  };
+  const signed = (v, d = 2) => (v > 0 ? "+" : v < 0 ? "−" : "") + Math.abs(v).toFixed(d);
+  const clampIdx = (i) => Math.max(0, Math.min(N - 1, i));
+  function frameAt(t) {
+    let lo = 0, hi = N - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (F.t[mid] <= t) lo = mid; else hi = mid - 1;
+    }
+    return lo;
+  }
+  function mulberry(seed) {
+    return () => {
+      seed = (seed + 0x6d2b79f5) | 0;
+      let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  // ------------------------------------------------------------ static map layer
+  const kindAt = (ix, iy) => (ix < 0 || iy < 0 || ix >= M.nx || iy >= M.ny ? 0 : M.kind.charCodeAt(iy * M.nx + ix) - 48);
+  const isFloor = (k) => k === 1 || k === 2;
+
+  function chalk(g, pts, color, width, rnd, closed) {
+    const seq = closed ? pts.concat([pts[0]]) : pts;
+    for (let pass = 0; pass < 2; pass++) {
+      g.beginPath();
+      for (let k = 0; k < seq.length - 1; k++) {
+        const [ax, ay] = seq[k], [bx, by] = seq[k + 1];
+        const n = Math.max(1, Math.round(Math.hypot(bx - ax, by - ay) / 14));
+        for (let s = k === 0 ? 0 : 1; s <= n; s++) {
+          const f = s / n;
+          const px = ax + (bx - ax) * f + (rnd() - 0.5) * 1.1;
+          const py = ay + (by - ay) * f + (rnd() - 0.5) * 1.1;
+          if (k === 0 && s === 0) g.moveTo(px, py); else g.lineTo(px, py);
+        }
+      }
+      g.strokeStyle = color;
+      g.lineWidth = pass ? width * 2.4 : width;
+      g.globalAlpha = pass ? 0.16 : 0.9;
+      g.lineCap = "round";
+      g.lineJoin = "round";
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
+
+  function mergeRuns(map) {
+    const out = [];
+    for (const [line, starts] of map) {
+      starts.sort((a, b) => a - b);
+      let s = starts[0], e = s;
+      for (let q = 1; q <= starts.length; q++) {
+        if (q < starts.length && starts[q] === e + 1) { e = starts[q]; continue; }
+        out.push([line, s, e]);
+        if (q < starts.length) s = e = starts[q];
+      }
+    }
+    return out;
+  }
+
+  function buildBase() {
+    base = document.createElement("canvas");
+    base.width = canvas.width;
+    base.height = canvas.height;
+    const g = base.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = C.ground;
+    g.fillRect(0, 0, cssW, cssH);
+    const cs = M.cell, rnd = mulberry(1944);
+
+    g.save();
+    g.setLineDash([2, 5]);
+    g.strokeStyle = C["chalk-dim"];
+    g.globalAlpha = 0.35;
+    g.lineWidth = 1;
+    for (const w of M.windows) {
+      g.beginPath();
+      g.moveTo(X(w.spawn[0]), Y(w.spawn[1]));
+      g.lineTo(X(w.outside[0]), Y(w.outside[1]));
+      g.stroke();
+    }
+    g.restore();
+
+    const floor = new Path2D();
+    for (let iy = 0; iy < M.ny; iy++) {
+      for (let ix = 0; ix < M.nx; ix++) {
+        if (isFloor(kindAt(ix, iy))) floor.rect(X(X0 + ix * cs) - 0.3, Y(Y0 + (iy + 1) * cs) - 0.3, cs * S + 0.6, cs * S + 0.6);
+      }
+    }
+    g.fillStyle = C.floor;
+    g.fill(floor);
+    g.save();
+    g.clip(floor);
+    g.strokeStyle = C.chalk;
+    g.globalAlpha = 0.06;
+    g.lineWidth = 1;
+    g.beginPath();
+    for (let x = Math.ceil(X0); x <= X1; x++) { g.moveTo(X(x), 0); g.lineTo(X(x), cssH); }
+    for (let y = Math.ceil(Y0); y <= Y1; y++) { g.moveTo(0, Y(y)); g.lineTo(cssW, Y(y)); }
+    g.stroke();
+    g.restore();
+
+    const h = new Map(), v = new Map();
+    const add = (m, line, s) => { if (!m.has(line)) m.set(line, []); m.get(line).push(s); };
+    const wallPair = (a, b) => (isFloor(a) && b === 0) || (isFloor(b) && a === 0);
+    for (let iy = -1; iy < M.ny; iy++) {
+      for (let ix = -1; ix < M.nx; ix++) {
+        const a = kindAt(ix, iy);
+        if (wallPair(a, kindAt(ix, iy + 1))) add(h, iy + 1, ix);
+        if (wallPair(a, kindAt(ix + 1, iy))) add(v, ix + 1, iy);
+      }
+    }
+    for (const [line, s, e] of mergeRuns(h)) {
+      const y = Y(Y0 + line * cs);
+      chalk(g, [[X(X0 + s * cs), y], [X(X0 + (e + 1) * cs), y]], C.chalk, 1.8, rnd, false);
+    }
+    for (const [line, s, e] of mergeRuns(v)) {
+      const x = X(X0 + line * cs);
+      chalk(g, [[x, Y(Y0 + s * cs)], [x, Y(Y0 + (e + 1) * cs)]], C.chalk, 1.8, rnd, false);
+    }
+
+    g.textBaseline = "middle";
+    g.textAlign = "center";
+    g.fillStyle = C.chalk;
+    g.globalAlpha = 0.2;
+    g.font = `800 ${Math.max(14, 1.3 * S)}px ${DISPLAY}`;
+    for (const l of M.labels) g.fillText(l.text.toUpperCase(), X(l.x), Y(l.y));
+    g.globalAlpha = 1;
+
+    const small = `600 ${Math.max(10.5, 0.42 * S)}px ${UI}`;
+    for (const w of M.weapons) {
+      const [x, y] = w.pos, [nx, ny] = w.normal, tx = -ny, ty = nx, L = 0.75, T = 0.14;
+      const pts = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([a, b]) => [X(x + tx * L * a + nx * T * b), Y(y + ty * L * a + ny * T * b)]);
+      chalk(g, pts, C.chalk, 1.3, rnd, true);
+      g.font = small;
+      g.fillStyle = C["chalk-dim"];
+      if (nx !== 0) {
+        // Side walls: two short lines hugging the wall, so facing wall-buys never collide mid-room.
+        g.textAlign = nx > 0 ? "left" : "right";
+        const lx = X(x + nx * 0.3), lh = Math.max(10.5, 0.42 * S) * 0.62;
+        g.fillText(w.name, lx, Y(y) - lh);
+        g.fillText(String(w.price), lx, Y(y) + lh);
+      } else {
+        g.textAlign = "center";
+        g.fillText(`${w.name} · ${w.price}`, X(x + nx * 0.6), Y(y + ny * 0.6));
+      }
+    }
+    const [bx, by] = M.box;
+    g.strokeStyle = C.amber;
+    g.lineWidth = 1.5;
+    g.strokeRect(X(bx - 0.55), Y(by + 0.25), 1.1 * S, 0.5 * S);
+    g.fillStyle = C.amber;
+    g.textAlign = "center";
+    g.font = `800 ${Math.max(12, 0.5 * S)}px ${DISPLAY}`;
+    g.fillText("?", X(bx), Y(by));
+    g.font = small;
+    g.fillStyle = C["chalk-dim"];
+    g.fillText("Mystery Box · 950", X(bx), Y(by - 0.8));
+
+    wrap.style.setProperty("--scale-w", `${(5 * S).toFixed(1)}px`);
+  }
+
+  // ------------------------------------------------------------ per-frame map layer
+  function drawDoors(i) {
+    const open = F.doors[i];
+    M.doors.forEach((d, k) => {
+      const [x0, y0, x1, y1] = d.rect;
+      const rx = X(x0), ry = Y(y1), rw = (x1 - x0) * S, rh = (y1 - y0) * S;
+      ctx.save();
+      if (open >> k & 1) {
+        ctx.setLineDash([3, 4]);
+        ctx.strokeStyle = C["chalk-dim"];
+        ctx.globalAlpha = 0.5;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(rx, ry, rw, rh);
+      } else {
+        ctx.beginPath();
+        ctx.rect(rx, ry, rw, rh);
+        ctx.fillStyle = C.ground;
+        ctx.fill();
+        ctx.clip();
+        if (d.kind === "debris") {
+          const rnd = mulberry(k + 7);
+          ctx.fillStyle = C.wood;
+          for (let q = 0; q < 40; q++) ctx.fillRect(rx + rnd() * rw, ry + rnd() * rh, 2.2, 2.2);
+        } else {
+          ctx.strokeStyle = C.wood;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          for (let o = -rh; o < rw; o += 6) { ctx.moveTo(rx + o, ry + rh); ctx.lineTo(rx + o + rh, ry); }
+          ctx.stroke();
+        }
+        ctx.restore();
+        ctx.save();
+        ctx.font = `500 ${Math.max(10, 0.4 * S)}px 'Red Hat Mono', monospace`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const label = String(d.price), lw = ctx.measureText(label).width + 6;
+        ctx.fillStyle = rgba(C.ground, 0.85);
+        ctx.fillRect(rx + rw / 2 - lw / 2, ry + rh / 2 - 7, lw, 14);
+        ctx.fillStyle = C.amber;
+        ctx.fillText(label, rx + rw / 2, ry + rh / 2 + 0.5);
+      }
+      ctx.restore();
+    });
+  }
+
+  function drawWindows(i) {
+    const planks = F.planks[i];
+    M.windows.forEach((w, k) => {
+      const [px, py] = w.pos, [nx, ny] = w.normal, tx = -ny, ty = nx;
+      const cx = px + nx * 0.25, cy = py + ny * 0.25;
+      for (let p = 0; p < 6; p++) {
+        const f = -0.5 + (p + 0.5) / 6;
+        const bx = cx + tx * f, by = cy + ty * f;
+        const hw = 0.055 + Math.abs(tx) * 0, along = 0.2;
+        const w2 = (Math.abs(tx) * hw + Math.abs(nx) * along) * S, h2 = (Math.abs(ty) * hw + Math.abs(ny) * along) * S;
+        if (p < planks[k]) {
+          ctx.fillStyle = C.wood;
+          ctx.fillRect(X(bx) - w2, Y(by) - h2, 2 * w2, 2 * h2);
+        } else {
+          ctx.strokeStyle = rgba(C["chalk-dim"], 0.45);
+          ctx.lineWidth = 0.8;
+          ctx.strokeRect(X(bx) - w2, Y(by) - h2, 2 * w2, 2 * h2);
+        }
+      }
+    });
+  }
+
+  function drawEffects(i) {
+    for (let k = Math.max(1, i - 6); k <= i; k++) {
+      const a = 1 - (F.t[i] - F.t[k]) / 0.45;
+      if (a <= 0) continue;
+      const x = X(F.x[k]), y = Y(F.y[k]);
+      const hits = F.hits[k];
+      ctx.lineWidth = 1.6;
+      if (hits.length) {
+        ctx.strokeStyle = rgba(C.sanguine, a);
+        for (const [hx, hy] of hits) {
+          ctx.beginPath();
+          ctx.moveTo(x, y);
+          ctx.lineTo(X(hx), Y(hy));
+          ctx.stroke();
+        }
+      } else if (F.shots[k] > 0) {
+        const ang = -F.yaw[k];
+        ctx.strokeStyle = rgba(C.chalk, a * 0.55);
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        ctx.lineTo(x + Math.cos(ang) * 9 * S, y + Math.sin(ang) * 9 * S);
+        ctx.stroke();
+      }
+    }
+    const r = 0.32 * S;
+    for (let k = Math.max(1, i - 30); k <= i; k++) {
+      const a = 1 - (F.t[i] - F.t[k]) / 1.6;
+      if (a <= 0) continue;
+      for (const [kx, ky, kind] of F.kills[k]) {
+        const x = X(kx), y = Y(ky);
+        ctx.strokeStyle = rgba(kind === 1 ? C.amber : C.chalk, a);
+        ctx.lineWidth = 2.2;
+        ctx.lineCap = "round";
+        ctx.beginPath();
+        ctx.moveTo(x - r, y - r); ctx.lineTo(x + r, y + r);
+        ctx.moveTo(x + r, y - r); ctx.lineTo(x - r, y + r);
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawZombies(i) {
+    const z = F.z[i], r = 0.3 * S;
+    for (let k = 0; k < z.length; k += 4) {
+      const x = X(z[k]), y = Y(z[k + 1]), phase = z[k + 2], hp = z[k + 3];
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      if (phase === 3) {
+        ctx.fillStyle = C.sanguine;
+        ctx.fill();
+      } else {
+        ctx.strokeStyle = C.sanguine;
+        ctx.lineWidth = 1.6;
+        if (phase === 0) { ctx.setLineDash([2, 2]); ctx.globalAlpha = 0.75; }
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = C.sanguine;
+        if (phase === 1) {
+          ctx.beginPath();
+          ctx.arc(x, y, r * 0.33, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (phase === 2) {
+          ctx.beginPath();
+          ctx.arc(x, y, r, -Math.PI / 2, Math.PI / 2);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      if (hp < 0.995) {
+        ctx.beginPath();
+        ctx.arc(x, y, r + 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * Math.max(0, hp));
+        ctx.strokeStyle = C.chalk;
+        ctx.globalAlpha = 0.85;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+
+  function drawTracked(i) {
+    const z = F.z[i], px = F.x[i], py = F.y[i];
+    const near = [];
+    for (let k = 0; k < z.length; k += 4) near.push([Math.hypot(z[k] - px, z[k + 1] - py), k]);
+    near.sort((a, b) => a[0] - b[0]);
+    ctx.save();
+    ctx.setLineDash([2, 4]);
+    ctx.strokeStyle = C.chalk;
+    ctx.globalAlpha = 0.32;
+    ctx.lineWidth = 1;
+    for (const [, k] of near.slice(0, 8)) {
+      ctx.beginPath();
+      ctx.moveTo(X(px), Y(py));
+      ctx.lineTo(X(z[k]), Y(z[k + 1]));
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawGrenades(i) {
+    const gr = F.gren[i];
+    for (let k = 0; k < gr.length; k += 3) {
+      const x = X(gr[k]), y = Y(gr[k + 1]);
+      ctx.fillStyle = C.amber;
+      ctx.beginPath();
+      ctx.arc(x, y, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = rgba(C.amber, 0.5);
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.arc(x, y, 5 * S, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  function drawPlayer(i) {
+    const x = X(F.x[i]), y = Y(F.y[i]), ang = -F.yaw[i];
+    if ($("showCone").checked) {
+      const half = F.flags[i] & FLAG.ads ? HALF_FOV * 0.45 : HALF_FOV, len = 8 * S;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, len);
+      grad.addColorStop(0, rgba(C.player, 0.3));
+      grad.addColorStop(1, rgba(C.player, 0));
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.arc(x, y, len, ang - half, ang + half);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.strokeStyle = C.player;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + Math.cos(ang) * 1.3 * S, y + Math.sin(ang) * 1.3 * S);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x, y, 0.35 * S, 0, Math.PI * 2);
+    ctx.fillStyle = C.player;
+    ctx.fill();
+    ctx.strokeStyle = C.ground;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+
+  function drawVignette(i) {
+    const f = F.flash[i];
+    if (f < 0.02) return;
+    const g = ctx.createRadialGradient(cssW / 2, cssH / 2, Math.min(cssW, cssH) * 0.32, cssW / 2, cssH / 2, Math.hypot(cssW, cssH) * 0.55);
+    g.addColorStop(0, rgba(C.sanguine, 0));
+    g.addColorStop(1, rgba(C.sanguine, 0.7 * f));
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, cssW, cssH);
+  }
+
+  function drawMap(i) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.drawImage(base, 0, 0, cssW, cssH);
+    drawDoors(i);
+    drawWindows(i);
+    drawGrenades(i);
+    drawEffects(i);
+    drawZombies(i);
+    if ($("showTracked").checked) drawTracked(i);
+    drawPlayer(i);
+    drawVignette(i);
+  }
+
+  // ------------------------------------------------------------ timeline
+  const tx = (t) => (t / TMAX) * tlW;
+  function tick(g, x, y0, y1) { g.beginPath(); g.moveTo(x, y0); g.lineTo(x, y1); g.stroke(); }
+
+  function buildTimeline() {
+    tlBase = document.createElement("canvas");
+    tlBase.width = tl.width;
+    tlBase.height = tl.height;
+    const g = tlBase.getContext("2d");
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.fillStyle = C.panel;
+    g.fillRect(0, 0, tlW, 44);
+    let start = 0;
+    for (let i = 1; i <= N; i++) {
+      if (i < N && F.round[i] === F.round[start]) continue;
+      const x0 = tx(F.t[start]), x1 = tx(F.t[i - 1]);
+      g.fillStyle = F.round[start] % 2 ? C.floor : C.panel;
+      g.fillRect(x0, 0, Math.max(1, x1 - x0 + 1), 44);
+      if (x1 - x0 > 28) {
+        g.fillStyle = C["chalk-dim"];
+        g.font = `700 11px ${UI}`;
+        g.textAlign = "left";
+        g.textBaseline = "top";
+        g.fillText(`R${F.round[start]}`, x0 + 5, 4);
+      }
+      start = i;
+    }
+    for (const e of EV) {
+      const x = Math.round(tx(F.t[e.i])) + 0.5;
+      if (e.kind === "kill") { g.strokeStyle = rgba(C.chalk, 0.5); g.lineWidth = 1; tick(g, x, 31, 42); }
+      else if (e.kind === "purchase") { g.strokeStyle = C.amber; g.lineWidth = 2; tick(g, x, 17, 42); }
+      else if (e.kind === "hit") { g.strokeStyle = C.sanguine; g.lineWidth = 2; tick(g, x, 22, 42); }
+      else if (e.kind === "death" || e.kind === "end") {
+        g.strokeStyle = C.sanguine;
+        g.lineWidth = 2.5;
+        g.beginPath();
+        g.moveTo(x - 5, 16); g.lineTo(x + 5, 26);
+        g.moveTo(x + 5, 16); g.lineTo(x - 5, 26);
+        g.stroke();
+      }
+    }
+  }
+
+  function drawTimeline(i) {
+    tctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    tctx.drawImage(tlBase, 0, 0, tlW, 44);
+    const x = Math.round(tx(F.t[i])) + 0.5;
+    tctx.strokeStyle = C.chalk;
+    tctx.lineWidth = 2;
+    tick(tctx, x, 0, 44);
+    tctx.fillStyle = C.chalk;
+    tctx.beginPath();
+    tctx.moveTo(x - 5, 0); tctx.lineTo(x + 5, 0); tctx.lineTo(x, 6);
+    tctx.fill();
+  }
+
+  // ------------------------------------------------------------ side panel
+  const TALLY = [
+    "M10 8 C11 22 9 38 10 50",
+    "M22 7 C23 22 21 37 22 50",
+    "M34 8 C35 22 33 38 34 51",
+    "M46 7 C47 22 45 37 46 50",
+    "M3 43 C20 35 40 23 61 12",
+  ];
+  const tallySvg = $("tally");
+  tallySvg.innerHTML = TALLY.map((d) => `<path d="${d}"/>`).join("");
+  const tallyPaths = tallySvg.querySelectorAll("path");
+
+  const dpad = $("dpad");
+  const dpadCells = [];
+  for (let k = 0; k < 9; k++) dpadCells.push(dpad.appendChild(el("i", k === 4 ? "center" : "")));
+  const holds = {};
+  for (const [key, label] of [["fire", "Fire"], ["ads", "Aim down sights"], ["sprint", "Sprint"]]) {
+    holds[key] = $("holds").appendChild(el("span", "chip", label));
+  }
+  const grenadeDots = [];
+  const gWrap = $("grenades");
+  for (let k = 0; k < 4; k++) grenadeDots.push(gWrap.appendChild(el("i")));
+  gWrap.appendChild(el("span", "", "grenades"));
+
+  const reading = $("reading");
+  const readRows = {};
+  for (const [key, label] of [["round", "Round"], ["points", "Points"], ["ammo", "Ammo"], ["conf", "Parser confidence"]]) {
+    reading.appendChild(el("dt", "", label));
+    const dd = reading.appendChild(el("dd"));
+    const chip = dd.appendChild(el("span", "chip warn", "misread"));
+    const val = dd.appendChild(el("span"));
+    readRows[key] = { chip, val };
+  }
+
+  const logList = $("log");
+  const logItems = EV.map((e) => {
+    const li = el("li", e.kind);
+    const b = li.appendChild(el("button"));
+    b.type = "button";
+    b.appendChild(el("time", "", clock(e.t)));
+    b.appendChild(el("span", "", e.text));
+    b.addEventListener("click", () => { pause(); seek(e.i); });
+    logList.appendChild(li);
+    return li;
+  });
+
+  function lastEventAt(i) {
+    let lo = 0, hi = EV.length - 1, ans = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (EV[mid].i <= i) { ans = mid; lo = mid + 1; } else hi = mid - 1;
+    }
+    return ans;
+  }
+
+  function updatePanel(i) {
+    const r = F.round[i];
+    tallySvg.hidden = r > 5;
+    $("roundNum").hidden = r <= 5;
+    tallyPaths.forEach((p, k) => { p.style.opacity = k < r ? "1" : "0"; });
+    $("roundNum").textContent = String(r);
+    $("roundCaption").textContent = F.flags[i] & FLAG.intermission ? `Round ${r} cleared` : `Round ${r}`;
+
+    $("points").textContent = F.points[i].toLocaleString("en-US");
+    const delta = $("delta");
+    delta.textContent = "";
+    for (let k = i; k > 0 && F.t[i] - F.t[k] < 1.0; k--) {
+      const d = F.points[k] - F.points[k - 1];
+      if (d !== 0) {
+        delta.textContent = (d > 0 ? "+" : "−") + Math.abs(d).toLocaleString("en-US");
+        delta.classList.toggle("spend", d < 0);
+        break;
+      }
+    }
+
+    $("weapon").textContent = R.weapons[F.weapon[i]];
+    $("reloading").hidden = !(F.flags[i] & FLAG.reloading);
+    $("swapping").hidden = !(F.flags[i] & FLAG.swapping);
+    $("mag").textContent = String(F.mag[i]);
+    $("reserve").textContent = String(F.reserve[i]);
+    grenadeDots.forEach((d, k) => d.classList.toggle("on", k < F.grenades[i]));
+
+    const flash = F.flash[i];
+    $("flashBar").style.width = `${(flash * 100).toFixed(1)}%`;
+    $("flashVal").textContent = `${Math.round(flash * 100)}%`;
+    const hpFrac = Math.max(0, F.hp[i]) / R.summary.max_hp;
+    $("hpBar").style.width = `${(hpFrac * 100).toFixed(1)}%`;
+    $("hpVal").textContent = `${Math.max(0, F.hp[i]).toFixed(0)} / ${R.summary.max_hp}`;
+
+    const [sr, sp, sm, sres, conf] = F.obs[i];
+    const set = (key, seen, truth) => {
+      readRows[key].val.textContent = seen;
+      readRows[key].chip.hidden = seen === truth;
+    };
+    set("round", String(sr), String(r));
+    set("points", sp.toLocaleString("en-US"), F.points[i].toLocaleString("en-US"));
+    set("ammo", `${sm} / ${sres}`, `${F.mag[i]} / ${F.reserve[i]}`);
+    readRows.conf.val.textContent = `${Math.round(conf * 100)}%`;
+    readRows.conf.chip.hidden = true;
+
+    const a = F.act[i];
+    const strafe = a[0] - 1, fwd = a[1] - 1;
+    dpadCells.forEach((c) => c.classList.remove("on", "sprint"));
+    const cell = dpadCells[(1 - fwd) * 3 + (strafe + 1)];
+    cell.classList.add("on");
+    if (a[6] && fwd === 1) cell.classList.add("sprint");
+    const yaw = YAW[a[2]], pitch = PITCH[a[3]];
+    const turn = yaw === 0 ? "Holding its heading" : `Turned ${yaw > 0 ? "right" : "left"} ${Math.abs(yaw)}°`;
+    const look = pitch === 0 ? "" : `, looked ${pitch > 0 ? "up" : "down"} ${Math.abs(pitch)}°`;
+    $("turn").textContent = turn + look;
+    holds.fire.classList.toggle("on", a[4] === 1);
+    holds.ads.classList.toggle("on", a[5] === 1);
+    holds.sprint.classList.toggle("on", a[6] === 1);
+    const btn = BUTTONS[a[7]];
+    const bEl = $("button");
+    bEl.textContent = btn === "none" ? "No button pressed" : `Pressed ${BUTTON_TEXT[btn]}`;
+    bEl.className = btn === "none" ? "quiet" : "";
+
+    const rs = $("stepReward"), ret = $("return");
+    rs.textContent = signed(F.r[i], 2);
+    rs.className = F.r[i] > 0 ? "pos" : F.r[i] < 0 ? "neg" : "";
+    ret.textContent = signed(F.ret[i], 1);
+    const terms = $("terms");
+    terms.replaceChildren(...F.terms[i].map(([k, val]) => el("span", "chip " + (val > 0 ? "warn" : ""), `${R.reward_terms[k]} ${signed(val, 2)}`)));
+
+    const prompt = $("prompt");
+    if (F.prompt[i] >= 0) {
+      prompt.replaceChildren("Press & hold ", el("kbd", "", "F"), ` ${R.prompts[F.prompt[i]]}`);
+      prompt.hidden = false;
+    } else {
+      prompt.hidden = true;
+    }
+
+    const banner = $("banner");
+    let bannerAlpha = 0;
+    for (let q = ROUND_STARTS.length - 1; q >= 0; q--) {
+      if (ROUND_STARTS[q] > i) continue;
+      const age = F.t[i] - F.t[ROUND_STARTS[q]];
+      if (age < 2.6) {
+        bannerAlpha = age < 0.25 ? age / 0.25 : age > 1.8 ? Math.max(0, 1 - (age - 1.8) / 0.8) : 1;
+        banner.textContent = `Round ${F.round[ROUND_STARTS[q]]}`;
+      }
+      break;
+    }
+    banner.style.opacity = bannerAlpha.toFixed(2);
+
+    const cur = lastEventAt(i);
+    if (cur !== currentEvent) {
+      logItems.forEach((li, k) => {
+        li.classList.toggle("now", k === cur);
+        li.classList.toggle("future", k > cur);
+      });
+      currentEvent = cur;
+      if (cur >= 0 && playing) logList.scrollTop = Math.max(0, logItems[cur].offsetTop - logList.clientHeight / 2);
+    }
+  }
+
+  // ------------------------------------------------------------ playback
+  function render() {
+    drawMap(idx);
+    drawTimeline(idx);
+    updatePanel(idx);
+    scrub.value = String(idx);
+    $("clock").textContent = `${clock(F.t[idx])} of ${clock(TMAX)} · step ${idx.toLocaleString("en-US")}`;
+  }
+  function seek(i) {
+    idx = clampIdx(i);
+    playT = F.t[idx];
+    render();
+  }
+  function frame(now) {
+    if (!playing) return;
+    const dt = Math.min(0.1, (now - lastNow) / 1000);
+    lastNow = now;
+    playT += dt * Number($("speed").value);
+    while (idx < N - 1 && F.t[idx + 1] <= playT) idx++;
+    if (idx >= N - 1) pause();
+    render();
+    if (playing) requestAnimationFrame(frame);
+  }
+  function play() {
+    if (idx >= N - 1) seek(0);
+    playing = true;
+    $("play").textContent = "Pause";
+    lastNow = performance.now();
+    requestAnimationFrame(frame);
+  }
+  function pause() {
+    playing = false;
+    $("play").textContent = idx >= N - 1 ? "Replay" : "Play";
+  }
+  const togglePlay = () => (playing ? pause() : play());
+  function jumpRound(dir) {
+    pause();
+    if (dir > 0) {
+      const next = ROUND_STARTS.find((s) => s > idx);
+      seek(next === undefined ? N - 1 : next);
+    } else {
+      const prev = ROUND_STARTS.filter((s) => s < idx - 15);
+      seek(prev.length ? prev[prev.length - 1] : 0);
+    }
+  }
+
+  $("play").addEventListener("click", togglePlay);
+  $("back").addEventListener("click", () => { pause(); seek(idx - 1); });
+  $("fwd").addEventListener("click", () => { pause(); seek(idx + 1); });
+  $("prevRound").addEventListener("click", () => jumpRound(-1));
+  $("nextRound").addEventListener("click", () => jumpRound(1));
+  scrub.addEventListener("input", () => { pause(); seek(Number(scrub.value)); });
+  $("showTracked").addEventListener("change", render);
+  $("showCone").addEventListener("change", render);
+  function seekFromPointer(e) {
+    const rect = tl.getBoundingClientRect();
+    seek(frameAt(((e.clientX - rect.left) / rect.width) * TMAX));
+  }
+  tl.addEventListener("pointerdown", (e) => { pause(); tl.setPointerCapture(e.pointerId); seekFromPointer(e); });
+  tl.addEventListener("pointermove", (e) => { if (tl.hasPointerCapture(e.pointerId)) seekFromPointer(e); });
+  document.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t.tagName === "SELECT" || (t.tagName === "INPUT" && t.type === "range")) return;
+    if (e.key === " " && t.tagName !== "BUTTON") { e.preventDefault(); togglePlay(); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); pause(); seek(idx + (e.shiftKey ? 15 : 1)); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); pause(); seek(idx - (e.shiftKey ? 15 : 1)); }
+    else if (e.key === "]") jumpRound(1);
+    else if (e.key === "[") jumpRound(-1);
+  });
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    cssW = canvas.clientWidth || wrap.clientWidth || 600;
+    cssH = cssW * HM / WM;
+    canvas.width = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
+    S = cssW / WM;
+    tlW = tl.clientWidth || cssW;
+    tl.width = Math.round(tlW * dpr);
+    tl.height = Math.round(44 * dpr);
+    buildBase();
+    buildTimeline();
+    render();
+  }
+
+  // ------------------------------------------------------------ summary
+  const s = R.summary;
+  const who = { scripted: "Scripted agent", random: "Random agent" }[s.agent] || s.agent;
+  const verdict = s.ended === "game_over"
+    ? `Survived ${s.rounds_survived} round${s.rounds_survived === 1 ? "" : "s"}`
+    : `Reached round ${s.round_reached} before the step cap`;
+  const parts = [
+    [`${who}`, `, seed ${s.seed}`],
+    ["", `hardness ${s.hardness}, ${s.latency_steps}-step input lag`],
+    [verdict, ` in ${clock(s.game_time_s)} of game time`, "verdict"],
+    ["", `${s.kills} kills, ${s.headshots} headshots${s.knife ? `, ${s.knife} with the knife` : ""}`],
+    ["", s.accuracy === null ? "no shots fired" : `${Math.round(s.accuracy * 100)}% of shots hit`],
+    ["", `${s.points_earned.toLocaleString("en-US")} points earned`],
+    ["", `spec ${R.spec_version.slice(0, 8)}`],
+  ];
+  const summary = $("summary");
+  for (const [bold, rest, cls] of parts) {
+    const span = summary.appendChild(el("span"));
+    if (bold) span.appendChild(el("b", cls || "", bold));
+    span.appendChild(document.createTextNode(rest));
+  }
+
+  const linked = /^#t=([\d.]+)$/.exec(location.hash);
+  if (linked) idx = frameAt(Number(linked[1]));
+  new ResizeObserver(() => resize()).observe(wrap);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(resize);
+  resize();
+})();
+</script>

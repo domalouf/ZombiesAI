@@ -1,0 +1,49 @@
+# Nacht der Untoten floor plan for NachtSim, in meters.
+#
+# UNCALIBRATED. Room sizes, window count/placement, and the box and wall-weapon
+# spots are schematic guesses pending calibration from a map screenshot. The
+# topology is what matters and is right: start room -> help room via a door,
+# start room -> upstairs via debris, help room -> upstairs via stairs and a door.
+#
+# The two floors are unfolded side by side into one plane: upstairs sits north
+# of the start room across a solid gap, reached only through the stair
+# corridors. Sight and pathing both respect this.
+
+cell_size: 0.5
+bounds: [-5.0, -5.0, 28.0, 27.0]  # x0, y0, x1, y1
+zones: [start, help, upstairs]
+
+rooms:
+  - {id: start_room, zone: start, rect: [0, 0, 14, 10]}
+  - {id: help_room, zone: help, rect: [15, 0, 23, 8]}
+  - {id: upstairs_room, zone: upstairs, rect: [0, 14, 14, 22]}
+  - {id: start_stairs, zone: upstairs, rect: [11, 11, 13, 14]}
+  - {id: help_stairs, zone: help, poly: [[19, 8], [21, 8], [21, 16], [15, 16], [15, 14], [19, 14]]}
+
+# Order must match spec.DOORS.
+doors:
+  - {id: help_door, kind: door, rect: [14, 3, 15, 5], unlocks: help}
+  - {id: start_debris, kind: debris, rect: [11, 10, 13, 11], unlocks: upstairs}
+  - {id: upstairs_door, kind: door, rect: [14, 14, 15, 16], unlocks: upstairs}
+
+window_width: 1.0
+approach_length: 4.5
+windows:
+  - {id: start_south_w, zone: start, pos: [4, 0], normal: [0, -1]}
+  - {id: start_south_e, zone: start, pos: [10, 0], normal: [0, -1]}
+  - {id: start_west_s, zone: start, pos: [0, 3], normal: [-1, 0]}
+  - {id: start_west_n, zone: start, pos: [0, 7.5], normal: [-1, 0]}
+  - {id: help_south, zone: help, pos: [19, 0], normal: [0, -1]}
+  - {id: help_east, zone: help, pos: [23, 4], normal: [1, 0]}
+  - {id: upstairs_north_w, zone: upstairs, pos: [4, 22], normal: [0, 1]}
+  - {id: upstairs_north_e, zone: upstairs, pos: [10, 22], normal: [0, 1]}
+  - {id: upstairs_west, zone: upstairs, pos: [0, 18], normal: [-1, 0]}
+
+wall_weapons:
+  - {weapon: kar98k, pos: [7, 0.35]}
+  - {weapon: m1a1_carbine, pos: [13.65, 1.5]}
+  - {weapon: thompson, pos: [15.35, 6.5]}
+  - {weapon: double_barrel, pos: [22.65, 6.5]}
+
+box: {pos: [7, 21.6]}
+player_spawn: {pos: [7, 5]}
