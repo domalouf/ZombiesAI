@@ -40,7 +40,7 @@ PRESETS = {
     ),
     "nacht-state": EnvPreset(
         None,
-        episode_metrics=("round_reached", "repair_share", "max_term_share"),
+        episode_metrics=("round_reached", "start_round", "repair_share", "max_term_share"),
         asynchronous=True,
         ppo=dict(
             total_steps=20_000_000,

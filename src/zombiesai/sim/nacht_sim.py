@@ -77,6 +77,11 @@ def weapon_features(w: Weapon) -> tuple[float, float, float]:
 _WEAPON_FEATURES = {name: weapon_features(w) for name, w in WEAPONS.items()}
 
 
+# A curriculum start at round k holds up to this many points per round already cleared: about what a round-1
+# start earns by then (the scripted agent averages ~1,100).
+CURRICULUM_POINTS_PER_ROUND = 1000
+
+
 @dataclass(frozen=True)
 class SimConfig:
     hardness: float = 0.5
@@ -87,6 +92,9 @@ class SimConfig:
     params: SimParams = field(default_factory=SimParams)
     reward: RewardConfig = field(default_factory=RewardConfig)
     geometry_path: str | None = None
+    # Curriculum: start each episode at a uniform round in [lo, hi] unless reset options name one. Knifing
+    # carries rounds 1-2, so round-1-only training never pressures the policy into learning to shoot.
+    start_rounds: tuple[int, int] | None = None
 
 
 @dataclass(slots=True)
@@ -146,6 +154,9 @@ class NachtSim(gym.Env):
         self.config = config or SimConfig()
         if not 0.0 <= self.config.hardness <= 1.0:
             raise ValueError(f"hardness must be in [0, 1], got {self.config.hardness}")
+        rounds = self.config.start_rounds
+        if rounds is not None and not 1 <= rounds[0] <= rounds[1]:
+            raise ValueError(f"start_rounds must be (lo, hi) with 1 <= lo <= hi, got {rounds}")
         self.geo = geo = load_geometry(self.config.geometry_path)
         self.observation_space = spec.observation_space("state")
         self.action_space = spec.factored_action_space()
@@ -223,15 +234,20 @@ class NachtSim(gym.Env):
         ]
         self.slot = 0
         self.reload_t = self.swap_t = self.fire_cd = self.melee_cd = self.lock_t = 0.0
-        self.grenades = p.grenades_start
+        start_round, bonus = options.get("start_round"), 0
+        if start_round is None and cfg.start_rounds is not None:
+            start_round = int(rng.integers(cfg.start_rounds[0], cfg.start_rounds[1] + 1))
+            bonus = 10 * int(rng.integers(CURRICULUM_POINTS_PER_ROUND // 10 * (start_round - 1) + 1))
+        self.first_round = 1 if start_round is None else int(start_round)
+        self.grenades = min(p.grenades_max, p.grenades_start + p.grenades_per_round * (self.first_round - 1))
         self.live_grenades: list[list[float]] = []
-        self.points = int(options.get("start_points", mechanics.STARTING_POINTS))
+        self.points = int(options.get("start_points", mechanics.STARTING_POINTS + bonus))
         self.repair_t = 0.0
 
         self.z_alive[:] = False
         self.z_hit_t[:] = INF
         self._nearest_inside = INF
-        self.round = int(options.get("start_round", 1))
+        self.round = self.first_round
         self._start_round()
         self.intermission_t = 0.0
         self.t = 0.0
@@ -957,6 +973,7 @@ class NachtSim(gym.Env):
         st = self.reward_shaper.stats
         out = {
             "round_reached": self.round,
+            "start_round": self.first_round,
             "episode_steps": self.steps,
             "episode_time_s": self.t,
             "repair_share": st.repair_share(),

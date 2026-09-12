@@ -8,7 +8,7 @@ from gymnasium.utils.env_checker import check_env
 from zombiesai import spec
 from zombiesai.reward import REWARD_TERMS
 from zombiesai.sim import mechanics
-from zombiesai.sim.nacht_sim import INSIDE, NachtSim, SimConfig
+from zombiesai.sim.nacht_sim import CURRICULUM_POINTS_PER_ROUND, INSIDE, NachtSim, SimConfig
 from zombiesai.sim.params import SimParams
 
 H = spec.HUD_INDEX
@@ -224,3 +224,38 @@ def test_zombies_path_through_open_doors_only(door_open):
         env.step(NOOP)
     reached = abs(env.z_pos[0] - complex(env.px, env.py)) < 2.0
     assert reached == door_open
+
+
+def test_curriculum_starts_at_a_random_later_round():
+    env = deterministic_env(start_rounds=(2, 5))
+    seen = set()
+    for seed in range(60):
+        obs, info = env.reset(seed=seed)
+        r = env.round
+        seen.add(r)
+        assert info["round"] == r and hud(obs)["round"] == pytest.approx(r)
+        assert env.zombie_max_hp == mechanics.zombie_health(r)
+        most = mechanics.STARTING_POINTS + CURRICULUM_POINTS_PER_ROUND * (r - 1)
+        assert mechanics.STARTING_POINTS <= env.points <= most and env.points % 10 == 0
+        assert env.grenades == min(env.p.grenades_max, env.p.grenades_start + env.p.grenades_per_round * (r - 1))
+    assert seen == {2, 3, 4, 5}
+
+
+def test_reset_options_override_the_curriculum():
+    env = deterministic_env(start_rounds=(3, 5))
+    env.reset(seed=0, options={"start_round": 1, "start_points": 700})
+    assert (env.round, env.points, env.grenades) == (1, 700, env.p.grenades_start)
+
+
+def test_episode_summary_reports_the_start_round():
+    env = deterministic_env(start_rounds=(4, 4), max_steps=3)
+    env.reset(seed=0)
+    for _ in range(3):
+        *_, info = env.step(NOOP)
+    assert (info["start_round"], info["round_reached"]) == (4, 4)
+
+
+@pytest.mark.parametrize("bad", [(0, 3), (5, 3)])
+def test_start_rounds_must_be_a_valid_range(bad):
+    with pytest.raises(ValueError):
+        NachtSim(SimConfig(start_rounds=bad))

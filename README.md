@@ -38,6 +38,7 @@ uv run python scripts/watch.py --seed 1  # play a game and open its replay in yo
 uv run python scripts/train_ppo.py cartpole     # PPO correctness check (solves in ~5 min on CPU)
 uv run python scripts/train_ppo.py lunarlander  # the harder check
 uv run python scripts/train_ppo.py nacht-state  # the real thing: PPO on NachtSim's state vector
+uv run python scripts/train_ppo.py nacht-state --start-rounds 1 5  # curriculum: train from rounds 1-5 (eval stays at 1)
 uv run python scripts/curve.py runs/<run>                      # learning curve so far
 uv run python scripts/eval_policy.py runs/<run>/checkpoint.pt
 uv run python scripts/watch.py --checkpoint runs/<run>/checkpoint.pt
