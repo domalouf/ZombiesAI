@@ -140,9 +140,14 @@ def _corrupt_digits(value: float, rng: np.random.Generator) -> int:
 
 
 class NachtSim(gym.Env):
-    metadata = {"render_modes": []}
+    metadata = {"render_modes": ["rgb_array"], "render_fps": spec.DECISION_HZ}
 
-    def __init__(self, config: SimConfig | None = None):
+    def __init__(self, config: SimConfig | None = None, render_mode: str | None = None):
+        if render_mode not in self.metadata["render_modes"] + [None]:
+            raise ValueError(f"render_mode must be None or 'rgb_array', got {render_mode!r}")
+        self.render_mode = render_mode
+        self._renderer = None
+        self.shots_this_step = 0  # lets the renderer draw muzzle flash
         self.config = config or SimConfig()
         if not 0.0 <= self.config.hardness <= 1.0:
             raise ValueError(f"hardness must be in [0, 1], got {self.config.hardness}")
@@ -252,6 +257,7 @@ class NachtSim(gym.Env):
         self._nbuf: list[float] = []
         self._ui = self._ni = 0
         self._events: list[dict] = []
+        self.shots_this_step = 0
         self._refresh_distance_field()
         return self._observation(), {"round": self.round, "timing": asdict(self.timing)}
 
@@ -261,6 +267,7 @@ class NachtSim(gym.Env):
         dt = self.dt
         self.t += dt
         self._events = []
+        self.shots_this_step = 0
         acc = _StepAccum()
         points_before = self.points
 
@@ -309,6 +316,16 @@ class NachtSim(gym.Env):
         if terminated or truncated:
             info.update(self._episode_summary(terminated))
         return self._observation(downed=died), result.reward, terminated, truncated, info
+
+    def render(self):
+        """The agent's-eye view as a PIXELS_SHAPE uint8 frame; None unless built with render_mode="rgb_array"."""
+        if self.render_mode != "rgb_array":
+            return None
+        if self._renderer is None:
+            from zombiesai.sim.render import Renderer
+
+            self._renderer = Renderer(self.geo)
+        return self._renderer.render(self)
 
     # ------------------------------------------------------------ batched per-step randomness
     def _uniform(self) -> float:
@@ -522,6 +539,7 @@ class NachtSim(gym.Env):
     def _shoot(self, hw: HeldWeapon, moving: bool) -> None:
         hw.mag -= 1
         self.rs.shots += 1
+        self.shots_this_step += 1
         idx = np.flatnonzero(self.z_alive)
         if idx.size == 0:
             return

@@ -18,8 +18,9 @@ Built so far (all Linux, no game needed):
   every checkpoint and episode is stamped with.
 - `src/zombiesai/sim/` — **NachtSim** in state mode: ground-truth round
   mechanics from the game script, domain-randomized guesses for everything
-  else, latency/action-repeat/dropout randomization, and HUD noise. What it
-  gets wrong is listed in [`docs/sim_lies.md`](./docs/sim_lies.md).
+  else, latency/action-repeat/dropout randomization, and HUD noise. It also
+  renders a first-person raycast view with a HUD, at the agent's 128×72 or any
+  size. What it gets wrong is listed in [`docs/sim_lies.md`](./docs/sim_lies.md).
 - `src/zombiesai/reward.py` — the shaped reward, term by term, with the gain
   cap, novelty gating, and repair cap.
 - `src/zombiesai/store/` — the episode store (crash-tolerant, spec-checked).
@@ -34,6 +35,7 @@ uv run pytest                            # test suite
 uv run python scripts/bench_sim.py       # steps/s and multi-process scaling
 uv run python scripts/eval_baselines.py  # scripted vs random, 100 episodes each
 uv run python scripts/watch.py --seed 1  # play a game and open its replay in your browser
+uv run python scripts/film.py --seed 10033  # film a game in first-person pixels, MP4 in runs/films/
 
 uv run python scripts/train_ppo.py cartpole     # PPO correctness check (solves in ~5 min on CPU)
 uv run python scripts/train_ppo.py lunarlander  # the harder check

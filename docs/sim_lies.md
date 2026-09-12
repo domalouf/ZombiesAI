@@ -66,5 +66,10 @@ domain-randomized per episode, scaled by `hardness`.
   repeat (3–5 frames), and 5% action dropout are sampled per episode, not
   measured from S3.
 - **No audio.**
-- **No rendered pixels yet.** Only the state observation profile exists. The
-  raycast render mode is next.
+- **The rendered view is crude.** `render()` is a flat-shaded raycast: untextured
+  walls of one height (3 m), billboard zombies that always face the camera and
+  never animate, a stand-in gun, and no lighting beyond distance fog. The HUD
+  uses a made-up 3×5 pixel font, not the real glyph atlas. The 80° field of view
+  assumes WaW widens `cg_fov 65` to Hor+ at 16:9; it hasn't been measured.
+- **Pixels aren't an observation yet.** `render()` draws frames to watch and
+  film; the `render` observation profile that feeds them to a policy is next.
