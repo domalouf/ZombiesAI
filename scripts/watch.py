@@ -31,7 +31,8 @@ def main() -> None:
         args.agent = "ppo"
     else:
         agent = ScriptedAgent() if args.agent == "scripted" else RandomAgent(args.seed)
-    env = NachtSim(SimConfig(hardness=args.hardness, max_steps=args.max_steps))
+    freeze_pitch = bool(args.checkpoint) and agent.sim_config.get("freeze_pitch", False)
+    env = NachtSim(SimConfig(hardness=args.hardness, max_steps=args.max_steps, freeze_pitch=freeze_pitch))
     replay = record_replay(env, agent, seed=args.seed, agent_name=args.agent)
     out = write_replay_html(replay, args.out or Path("runs/replays") / f"{args.agent}-seed{args.seed}.html")
 

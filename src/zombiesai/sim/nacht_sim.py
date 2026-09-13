@@ -87,6 +87,7 @@ class SimConfig:
     params: SimParams = field(default_factory=SimParams)
     reward: RewardConfig = field(default_factory=RewardConfig)
     geometry_path: str | None = None
+    freeze_pitch: bool = False  # ablation: ignore the pitch head, so aim stays level (about head height)
 
 
 @dataclass(slots=True)
@@ -354,6 +355,8 @@ class NachtSim(gym.Env):
 
     def _look(self, a) -> None:
         self.yaw = _wrap(self.yaw - _YAW_RAD[a[spec.YAW]])
+        if self.config.freeze_pitch:
+            return
         pitch = self.pitch + spec.PITCH_BINS_DEG[a[spec.PITCH]]
         self.pitch = min(max(pitch, -PITCH_LIMIT_DEG), PITCH_LIMIT_DEG)
 

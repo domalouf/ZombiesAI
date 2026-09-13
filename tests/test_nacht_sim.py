@@ -199,6 +199,17 @@ def test_latency_delays_actions():
     assert math.isclose((yaw0 - env.yaw) % (2 * math.pi), math.radians(30), abs_tol=1e-9)
 
 
+@pytest.mark.parametrize("freeze_pitch", [False, True])
+def test_freeze_pitch_keeps_aim_level(freeze_pitch):
+    env = deterministic_env(freeze_pitch=freeze_pitch)
+    env.reset(seed=0)
+    for _ in range(3):
+        obs, *_ = env.step(spec.make_action(pitch=-6))
+    expected = 0.0 if freeze_pitch else -18.0
+    assert env.pitch == expected
+    assert obs["state"][spec.STATE_INDEX["pitch"]] == pytest.approx(expected / spec.STATE_PITCH_SCALE_DEG)
+
+
 @pytest.mark.parametrize("through_window", [True, False])
 def test_knife_reaches_through_windows_but_not_walls(through_window):
     env = deterministic_env()

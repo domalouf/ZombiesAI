@@ -40,6 +40,7 @@ uv run python scripts/film.py --seed 10033  # film a game in first-person pixels
 uv run python scripts/train_ppo.py cartpole     # PPO correctness check (solves in ~5 min on CPU)
 uv run python scripts/train_ppo.py lunarlander  # the harder check
 uv run python scripts/train_ppo.py nacht-state  # the real thing: PPO on NachtSim's state vector
+uv run python scripts/train_ppo.py nacht-state --freeze-pitch  # ablation: aim stays level, pitch head ignored
 uv run python scripts/curve.py runs/<run>                      # learning curve so far
 uv run python scripts/eval_policy.py runs/<run>/checkpoint.pt
 uv run python scripts/watch.py --checkpoint runs/<run>/checkpoint.pt

@@ -67,7 +67,9 @@ def main() -> None:
         agent = ScriptedAgent() if args.agent == "scripted" else RandomAgent(args.seed)
 
     width, height = (int(v) for v in args.size.lower().split("x"))
-    env = NachtSim(SimConfig(hardness=args.hardness, max_steps=args.max_steps), render_mode="rgb_array")
+    freeze_pitch = bool(args.checkpoint) and agent.sim_config.get("freeze_pitch", False)
+    sim_config = SimConfig(hardness=args.hardness, max_steps=args.max_steps, freeze_pitch=freeze_pitch)
+    env = NachtSim(sim_config, render_mode="rgb_array")
     obs, _ = env.reset(seed=args.seed)
     agent.reset()
     camera = Renderer(env.geo, width, height)

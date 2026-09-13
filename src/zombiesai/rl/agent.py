@@ -42,6 +42,7 @@ class PolicyAgent:
         self.discrete = ck["discrete"]
         self.deterministic = deterministic
         self.step = ck["step"]
+        self.sim_config = ck["config"].get("sim", {})  # the SimConfig overrides it was trained under
 
     def reset(self) -> None:
         pass

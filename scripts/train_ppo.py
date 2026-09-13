@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--ent-coef", type=float)
     parser.add_argument("--gamma", type=float)
     parser.add_argument("--hardness", type=float, help="NachtSim sim_hardness (default 0.5)")
+    parser.add_argument("--freeze-pitch", action="store_true", help="NachtSim ablation: ignore the pitch head")
     parser.add_argument("--run-name", help="default: ppo-<env>-s<seed>-<timestamp>")
     args = parser.parse_args()
 
@@ -32,8 +33,11 @@ def main() -> None:
         }.items()
         if v is not None
     }
-    if args.hardness is not None:
-        overrides["sim"] = {"hardness": args.hardness}
+    sim = {"hardness": args.hardness} if args.hardness is not None else {}
+    if args.freeze_pitch:
+        sim["freeze_pitch"] = True
+    if sim:
+        overrides["sim"] = sim
     cfg = PPOConfig.for_preset(args.env, seed=args.seed, **overrides)
     name = args.run_name or f"ppo-{args.env}-s{args.seed}-{time.strftime('%Y%m%d-%H%M%S')}"
     checkpoint = train(cfg, Path("runs") / name)

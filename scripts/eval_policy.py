@@ -20,7 +20,8 @@ def main() -> None:
     torch.manual_seed(args.seed)
     agent = PolicyAgent(args.checkpoint, deterministic=args.deterministic)
     preset = PRESETS[agent.env]
-    env = make_env(agent.env)
+    # A policy trained with pitch frozen only makes sense in a sim with pitch frozen.
+    env = make_env(agent.env, {"freeze_pitch": agent.sim_config.get("freeze_pitch", False)})
     returns, rounds = [], []
     for ep in range(args.episodes):
         obs, _ = env.reset(seed=args.seed + ep)
