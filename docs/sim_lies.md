@@ -71,5 +71,9 @@ domain-randomized per episode, scaled by `hardness`.
   never animate, a stand-in gun, and no lighting beyond distance fog. The HUD
   uses a made-up 3×5 pixel font, not the real glyph atlas. The 80° field of view
   assumes WaW widens `cg_fov 65` to Hor+ at 16:9; it hasn't been measured.
-- **Pixels aren't an observation yet.** `render()` draws frames to watch and
-  film; the `render` observation profile that feeds them to a policy is next.
+- **Pixels are an observation now, and they are still a stand-in.**
+  `SimConfig(obs_profile="render")` feeds the raycast view to the policy, which
+  is what lets a pixel network (behavioural cloning, M2's CNN check) be
+  evaluated at all. It is a smoke test, not a transfer path: an inverse dynamics
+  model or an encoder fit to these frames will not read real World at War
+  footage, and no sim-trained encoder weights ever load into the real agent.

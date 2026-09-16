@@ -80,3 +80,24 @@ def test_muzzle_flash_shows_only_on_the_step_a_shot_is_fired():
     env.step(spec.make_action(fire=1))  # holding a semi-auto trigger doesn't fire again
     assert env.shots_this_step == 0
     assert not np.array_equal(env.render(), firing)
+
+
+def test_the_render_profile_hands_the_policy_pixels_instead_of_the_state_vector():
+    env = NachtSim(SimConfig(obs_profile="render"))
+    obs, _ = env.reset(seed=0)
+    assert set(obs) == {"pixels", "hud", "prev_actions"} and obs["pixels"].shape == spec.PIXELS_SHAPE
+    assert env.observation_space.contains(obs)
+    obs, *_ = env.step(spec.make_action(yaw=14.0))
+    assert env.observation_space.contains(obs)
+    np.testing.assert_array_equal(obs["pixels"], env.frame())
+    # The state vector is still there for a scripted agent or a diagnostic to ask for, just not observed.
+    assert env.state().shape == (spec.STATE_DIM,)
+
+
+def test_the_state_profile_is_still_the_default_and_draws_nothing():
+    env = NachtSim()
+    obs, _ = env.reset(seed=0)
+    assert set(obs) == {"state", "hud", "prev_actions"}
+    assert env._renderer is None  # the renderer is never built for a policy that doesn't look at pixels
+    with pytest.raises(ValueError):
+        NachtSim(SimConfig(obs_profile="audio"))

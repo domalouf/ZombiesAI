@@ -14,6 +14,7 @@ def save_checkpoint(path: Path, net: ActorCritic, flat: ObsFlattener, discrete: 
     tmp = path.with_suffix(".tmp")
     torch.save(
         {
+            "kind": "mlp",
             "model": net.state_dict(),
             "nvec": list(net.nvec),
             "hidden": list(cfg.hidden),
@@ -42,6 +43,7 @@ class PolicyAgent:
         self.discrete = ck["discrete"]
         self.deterministic = deterministic
         self.step = ck["step"]
+        self.obs_profile = "render" if self.keys and "pixels" in self.keys else "state"
 
     def reset(self) -> None:
         pass
@@ -55,3 +57,16 @@ class PolicyAgent:
             dist = self.net.dist(torch.from_numpy(row)[None])
             action = (dist.mode() if self.deterministic else dist.sample())[0].numpy()
         return int(action[0]) if self.discrete else action
+
+
+def load_agent(checkpoint: str | Path, *, deterministic: bool = False, **kwargs):
+    """Any checkpoint this project writes, behind reset()/act(obs): the vector-observation PPO policy, or a
+    BC policy that plays from pixels. Scripts take a path and do not care which they were handed."""
+    kind = torch.load(checkpoint, map_location="cpu", weights_only=True).get("kind", "mlp")
+    if kind == "bc":
+        from zombiesai.demos.agent import BCAgent
+
+        return BCAgent(checkpoint, deterministic=deterministic, **kwargs)
+    if kind == "mlp":
+        return PolicyAgent(checkpoint, deterministic=deterministic, **kwargs)
+    raise ValueError(f"{checkpoint} holds a {kind!r} checkpoint, which is not a playable policy")

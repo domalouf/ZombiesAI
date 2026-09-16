@@ -47,7 +47,7 @@ def end_card(frame: np.ndarray, rounds: int, truncated: bool, s: int) -> np.ndar
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--agent", choices=("scripted", "random"), default="scripted")
-    parser.add_argument("--checkpoint", type=Path, help="film a trained PPO policy instead (overrides --agent)")
+    parser.add_argument("--checkpoint", type=Path, help="film a trained policy instead (PPO or BC; overrides --agent)")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hardness", type=float, default=0.5)
     parser.add_argument("--max-steps", type=int, default=100_000)
@@ -58,16 +58,19 @@ def main() -> None:
     if args.checkpoint:
         import torch
 
-        from zombiesai.rl.agent import PolicyAgent
+        from zombiesai.rl.agent import load_agent
 
         torch.manual_seed(args.seed)  # the policy samples its actions; same seed, same game
-        agent = PolicyAgent(args.checkpoint)
-        args.agent = "ppo"
+        agent = load_agent(args.checkpoint)
+        args.agent = "bc" if getattr(agent, "obs_profile", "state") == "render" else "ppo"
     else:
         agent = ScriptedAgent() if args.agent == "scripted" else RandomAgent(args.seed)
 
     width, height = (int(v) for v in args.size.lower().split("x"))
-    env = NachtSim(SimConfig(hardness=args.hardness, max_steps=args.max_steps), render_mode="rgb_array")
+    profile = getattr(agent, "obs_profile", "state")
+    env = NachtSim(
+        SimConfig(hardness=args.hardness, max_steps=args.max_steps, obs_profile=profile), render_mode="rgb_array"
+    )
     obs, _ = env.reset(seed=args.seed)
     agent.reset()
     camera = Renderer(env.geo, width, height)
