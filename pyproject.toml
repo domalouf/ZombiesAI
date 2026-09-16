@@ -16,6 +16,10 @@ dependencies = [
 dev = ["pytest>=8"]
 # LunarLander, used only to validate the from-scratch algorithms (M2/M3).
 classic = ["gymnasium[box2d]>=1.1"]
+# Screen capture for recording demos on the gaming PC (uv sync --group capture). Nothing needs it to train,
+# evaluate, or ingest video -- only to record a human playing. dxcam is Desktop Duplication and is faster;
+# mss is the fallback and works anywhere. Video ingest needs the ffmpeg binary, not a Python package.
+capture = ["mss>=9.0", "dxcam>=0.0.5; sys_platform == 'win32'"]
 
 [tool.uv]
 default-groups = ["dev", "classic"]

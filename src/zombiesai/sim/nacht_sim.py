@@ -81,6 +81,9 @@ _WEAPON_FEATURES = {name: weapon_features(w) for name, w in WEAPONS.items()}
 class SimConfig:
     hardness: float = 0.5
     max_steps: int = 18_000
+    # "state" is the fast path the RL algorithms train on; "render" feeds the raycast view to the policy
+    # instead, which is what a pixel network (behavioural cloning, M2's CNN check) has to be evaluated on.
+    obs_profile: str = "state"
     latency_steps: int | None = None
     frames_per_step: int | None = None
     action_dropout: float | None = None
@@ -151,8 +154,11 @@ class NachtSim(gym.Env):
         self.config = config or SimConfig()
         if not 0.0 <= self.config.hardness <= 1.0:
             raise ValueError(f"hardness must be in [0, 1], got {self.config.hardness}")
+        if self.config.obs_profile not in spec.OBS_PROFILES:
+            raise ValueError(f"obs_profile must be one of {tuple(spec.OBS_PROFILES)}, got {self.config.obs_profile!r}")
+        self.pixel_obs = self.config.obs_profile == "render"
         self.geo = geo = load_geometry(self.config.geometry_path)
-        self.observation_space = spec.observation_space("state")
+        self.observation_space = spec.observation_space(self.config.obs_profile)
         self.action_space = spec.factored_action_space()
         self.reward_shaper = RewardShaper(self.config.reward)
 
@@ -319,8 +325,15 @@ class NachtSim(gym.Env):
 
     def render(self):
         """The agent's-eye view as a PIXELS_SHAPE uint8 frame; None unless built with render_mode="rgb_array"."""
-        if self.render_mode != "rgb_array":
-            return None
+        return self.frame() if self.render_mode == "rgb_array" else None
+
+    def state(self) -> np.ndarray:
+        """The state-profile vector, whichever profile this sim was built with -- the render profile hides it
+        from the policy, but a scripted agent or a diagnostic still has every right to ask."""
+        return self._state_vector()
+
+    def frame(self) -> np.ndarray:
+        """The same view, drawn whether or not anyone asked to watch: the render profile's observation."""
         if self._renderer is None:
             from zombiesai.sim.render import Renderer
 
@@ -892,12 +905,12 @@ class NachtSim(gym.Env):
 
     # ------------------------------------------------------------ observations
     def _observation(self, downed: bool = False) -> dict[str, np.ndarray]:
+        # The prompt is read first either way: the state vector does not use it, but the HUD and the
+        # rendered view both draw it, and they must agree about the same step.
         self.prompt = self._prompt()
-        return {
-            "state": self._state_vector(),
-            "hud": self._hud(downed),
-            "prev_actions": spec.encode_prev_actions(self._history),
-        }
+        obs = {"hud": self._hud(downed), "prev_actions": spec.encode_prev_actions(self._history)}
+        obs["pixels" if self.pixel_obs else "state"] = self.frame() if self.pixel_obs else self._state_vector()
+        return obs
 
     def _state_vector(self) -> np.ndarray:
         px, py, yaw = self.px, self.py, self.yaw
