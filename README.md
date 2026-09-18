@@ -53,7 +53,9 @@ uv run python scripts/film.py --seed 10033  # film a game in first-person pixels
 uv run python scripts/train_ppo.py cartpole     # PPO correctness check (solves in ~5 min on CPU)
 uv run python scripts/train_ppo.py lunarlander  # the harder check
 uv run python scripts/train_ppo.py nacht-state  # the real thing: PPO on NachtSim's state vector
-uv run python scripts/curve.py runs/<run>                      # learning curve so far
+uv run python scripts/curve.py runs/<run>                      # one run's learning curve, in the terminal
+uv run python scripts/dashboard.py                            # every run, as a page: curves, health, gates
+uv run python scripts/dashboard.py --watch 30                 # ...rebuilt every 30s while a run trains
 uv run python scripts/eval_policy.py runs/<run>/checkpoint.pt
 uv run python scripts/watch.py --checkpoint runs/<run>/checkpoint.pt
 ```
@@ -91,6 +93,19 @@ delay the whole delayed-MDP design is built around.
 
 Training runs write `config.json`, `metrics.jsonl` (one line per update), and
 `checkpoint.pt` to `runs/<run>/`.
+
+`dashboard.py` reads all of them and writes `runs/dashboard.html`: **how training
+is going**, in one self-contained page. Every run PPO, BC or the IDM wrote —
+return and round reached, entropy, KL, clip fraction, explained variance, value
+loss and throughput — each curve a bucket mean over the spread it was averaged
+out of, so nothing is smoothed away silently. Charts are scoped to one
+environment at a time, because a CartPole return and a NachtSim return are not
+the same number. It also grades each run against the gates in `PLAN.md`: the
+M7 anti-hacking pair (no reward term above 60% of return, repairs below 25% of
+points) and M2's solved-at returns, and says which way the headline metric is
+actually moving and whether that beats its own noise. It needs nothing but the
+standard library, so it also runs on a `runs/` directory copied off the
+training box.
 
 `watch.py` writes a self-contained replay to `runs/replays/`: a top-down map with
 play/pause, speed, scrubbing, what the agent could and couldn't see, its action
