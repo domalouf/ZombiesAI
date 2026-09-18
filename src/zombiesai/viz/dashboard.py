@@ -7,8 +7,10 @@ numpy or gymnasium, so this can be pointed at a runs/ directory copied off the t
 import json
 import math
 import re
+import shutil
 import time
 from base64 import b64encode
+from html import escape
 from pathlib import Path
 
 TEMPLATE = Path(__file__).with_name("dashboard_template.html")
@@ -391,32 +393,63 @@ def build_dashboard(root: Path, buckets: int = 160, stale_after: float = 600.0, 
     }
 
 
-def _inline_fonts(html: str) -> str:
-    """Swap the webfont link for the repo's own woff2, base64'd, so the page makes no external request."""
+def _scrub(value):
+    """Drop anything path-shaped. A trainer's config carries the paths of the clips it read, and those
+    are the user's own filesystem: fine on their machine, not fine on a public page."""
+    if isinstance(value, str):
+        return None if "/" in value or "\\" in value else value
+    if isinstance(value, dict):
+        return {k: v for k, v in ((k, _scrub(v)) for k, v in value.items()) if v is not None}
+    if isinstance(value, list):
+        kept = [v for v in (_scrub(v) for v in value) if v is not None]
+        return kept if len(kept) == len(value) else None
+    return value
+
+
+def public_payload(payload: dict, root_label: str = "runs/") -> dict:
+    """The same page with nothing local in it: no absolute paths, no clip filenames, no machine names."""
+    out = dict(payload, root=root_label)
+    out["runs"] = [dict(run, config=_scrub(run["config"]), last_row=_scrub(run["last_row"])) for run in payload["runs"]]
+    return out
+
+
+def _local_fonts(html: str, embed: bool) -> str:
+    """Replace the webfont link with the repo's own woff2 either way, so the page never calls out.
+
+    `embed` base64s them into the one file. The site build wants them as sibling files instead: under a
+    default-src 'self' CSP a data: font URI is refused, and the page silently falls back to system faces.
+    """
     if not FONTS.is_dir():
         return html
     css = (FONTS / "fonts.css").read_text()
+    if embed:
+        def as_data_uri(match: re.Match) -> str:
+            path = FONTS / Path(match.group(1)).name
+            if not path.exists():
+                return match.group(0)
+            return f"url(data:font/woff2;base64,{b64encode(path.read_bytes()).decode()}) format(\"woff2\")"
 
-    def embed(match: re.Match) -> str:
-        path = FONTS / Path(match.group(1)).name
-        if not path.exists():
-            return match.group(0)
-        return f"url(data:font/woff2;base64,{b64encode(path.read_bytes()).decode()}) format(\"woff2\")"
-
-    css = re.sub(r"url\(([^)]+)\) format\(\"woff2\"\)", embed, css)
+        css = re.sub(r"url\(([^)]+)\) format\(\"woff2\"\)", as_data_uri, css)
     return re.sub(r"<!--fonts-->.*?<!--/fonts-->", lambda _: f"<style>\n{css}</style>", html, count=1, flags=re.S)
 
 
-def write_dashboard_html(payload: dict, path: str | Path, standalone: bool = True, refresh: float = 0) -> Path:
+def write_dashboard_html(
+    payload: dict,
+    path: str | Path,
+    standalone: bool = True,
+    refresh: float = 0,
+    embed_fonts: bool = True,
+    head: str = "",
+) -> Path:
     """The dashboard as one file: data, styles, fonts and script inlined, no request to anywhere."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")
     html = TEMPLATE.read_text().replace("/*__DASHBOARD_DATA__*/null", data, 1)
-    html = _inline_fonts(html)
+    html = _local_fonts(html, embed=embed_fonts)
     if standalone:
         title = re.search(r"<title>.*?</title>\n", html).group(0)
-        meta = '<meta name="color-scheme" content="dark">\n'
+        meta = '<meta name="color-scheme" content="dark">\n' + head
         if refresh:
             # A training run appends to metrics.jsonl for hours; --watch rewrites the file, this re-reads it.
             meta += f'<meta http-equiv="refresh" content="{int(refresh)}">\n'
@@ -427,6 +460,31 @@ def write_dashboard_html(payload: dict, path: str | Path, standalone: bool = Tru
         )
     path.write_text(html)
     return path
+
+
+def write_dashboard_site(
+    payload: dict,
+    out_dir: str | Path,
+    intro: str,
+    links: list[tuple[str, str]],
+    description: str,
+) -> Path:
+    """The dashboard as a static directory (index.html + fonts/) that makes no external request.
+
+    Same shape as the replay page's site build, and publishable the same way: nothing here is served,
+    computed or fetched at view time -- it is the numbers as they stood when the page was built.
+    """
+    out_dir = Path(out_dir)
+    head = f'<meta name="description" content="{escape(description)}">\n'
+    public = public_payload(payload)
+    public["intro"] = intro
+    public["links"] = [[label, href] for label, href in links]
+    index = write_dashboard_html(public, out_dir / "index.html", embed_fonts=False, head=head)
+    (out_dir / "fonts").mkdir(exist_ok=True)
+    for f in FONTS.iterdir():
+        if f.suffix in (".woff2", ".txt"):
+            shutil.copy2(f, out_dir / "fonts" / f.name)
+    return index
 
 
 def write_dashboard(

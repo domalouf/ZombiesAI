@@ -101,6 +101,9 @@
   .chip .state { font: 500 11px var(--mono); color: var(--chalk-faint); }
   .chip.seg[aria-pressed="true"] { background: var(--floor); border-color: var(--chalk-dim); }
   :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .site-nav { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13.5px; }
+  .site-nav a { color: var(--chalk-dim); text-decoration: none; border-bottom: 1px solid var(--line); }
+  .site-nav a:hover { color: var(--chalk); border-color: var(--chalk-dim); }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
   figure { margin: 0; }
@@ -166,6 +169,7 @@
 
 <main>
   <header class="masthead">
+    <nav class="site-nav" id="nav" aria-label="Site" hidden></nav>
     <h1>Training Room</h1>
     <p class="tagline" id="tagline"></p>
     <p class="meta" id="meta"></p>
@@ -598,14 +602,20 @@ function blankSlate() {
 
 function render() {
   const live = runs.filter((r) => r.status === "running");
-  document.getElementById("tagline").textContent = runs.length
+  if (DATA.links && DATA.links.length) {
+    const nav = document.getElementById("nav");
+    nav.hidden = false;
+    mount(nav, DATA.links.map(([label, href]) => el("a", { href, text: label })));
+  }
+  document.getElementById("tagline").textContent = DATA.intro || (runs.length
     ? "Every training run under " + DATA.root + ", read from the metrics each trainer writes as it goes. " +
       "Lines are bucket means; the wash behind each one is the spread inside the bucket, so nothing is smoothed away."
-    : "Nothing to show yet.";
+    : "Nothing to show yet.");
   mount(document.getElementById("meta"), [
     el("span", {}, [document.createTextNode("Built "), el("b", { text: DATA.generated })]),
     el("span", {}, [el("b", { text: String(runs.length) }), document.createTextNode(" runs")]),
-    live.length ? el("span", {}, [el("b", { text: String(live.length) }), document.createTextNode(" running now")]) : null,
+    live.length ? el("span", {}, [el("b", { text: String(live.length) }),
+      document.createTextNode(DATA.intro ? " running when this was built" : " running now")]) : null,
   ]);
 
   const body = document.getElementById("body");
@@ -656,8 +666,9 @@ function renderScoped() {
   for (const draw of charts) draw();
 }
 
-document.getElementById("footer").textContent =
-  "ZombiesAI — reads runs/*/metrics.jsonl, makes no request to anywhere. Rebuild with scripts/dashboard.py.";
+document.getElementById("footer").textContent = DATA.intro
+  ? "A snapshot, not a live view: these are the numbers as they stood when the page was built."
+  : "ZombiesAI — reads runs/*/metrics.jsonl, makes no request to anywhere. Rebuild with scripts/dashboard.py.";
 render();
 let resizeTimer = null;
 addEventListener("resize", () => {
