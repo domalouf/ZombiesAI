@@ -1,5 +1,7 @@
 # ZombiesAI
 
+[![tests](https://github.com/domalouf/ZombiesAI/actions/workflows/tests.yml/badge.svg)](https://github.com/domalouf/ZombiesAI/actions/workflows/tests.yml)
+
 A reinforcement-learning agent learning to survive *Nacht der Untoten* — Call
 of Duty: World at War's Nazi Zombies map — by screen capture and synthetic
 keyboard/mouse input only, the way a person would. No mod tools, no memory
