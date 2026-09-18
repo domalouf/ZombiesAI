@@ -107,6 +107,19 @@ actually moving and whether that beats its own noise. It needs nothing but the
 standard library, so it also runs on a `runs/` directory copied off the
 training box.
 
+For the website, `--site` builds it the way the replay page is built — a static
+directory (`index.html` + `fonts/`) with the fonts as files rather than `data:`
+URIs, which the site's `default-src 'self'` CSP refuses, and with the local paths
+a config carries (clip filenames, output directories) stripped out. Nothing is
+served or fetched at view time: it is a snapshot of the numbers as they stood
+when the page was built, and it says so. `deploy/deploy.sh` publishes it to
+[domalouf.com/zombies/training/](https://domalouf.com/zombies/training/)
+alongside the replay.
+
+```sh
+uv run python scripts/dashboard.py --site site/zombies/training
+```
+
 `watch.py` writes a self-contained replay to `runs/replays/`: a top-down map with
 play/pause, speed, scrubbing, what the agent could and couldn't see, its action
 each step, and a clickable match log. Add `#t=90` to the file's URL to open it at

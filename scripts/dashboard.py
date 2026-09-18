@@ -5,7 +5,14 @@ import time
 import webbrowser
 from pathlib import Path
 
-from zombiesai.viz.dashboard import write_dashboard
+from zombiesai.viz.dashboard import build_dashboard, write_dashboard, write_dashboard_site
+
+REPO_URL = "https://github.com/domalouf/ZombiesAI"
+SITE_INTRO = (
+    "How the reinforcement-learning agent's training is going. Every run its trainers have written — "
+    "PPO on NachtSim, behavioural cloning from human play, and the inverse dynamics model that labels "
+    "footage nobody logged input for. A snapshot, rebuilt when the page is published."
+)
 
 
 def summarize(payload: dict) -> None:
@@ -35,8 +42,24 @@ def main() -> None:
                         help="seconds without a new row before a run reads as stopped")
     parser.add_argument("--watch", type=float, nargs="?", const=30.0, metavar="SECONDS",
                         help="rebuild on an interval while training runs; the page reloads itself to match")
+    parser.add_argument("--site", type=Path, metavar="DIR",
+                        help="build the public page instead: DIR/index.html + fonts/, nothing local in it")
     parser.add_argument("--no-open", action="store_true", help="don't open the dashboard in a browser")
     args = parser.parse_args()
+
+    if args.site:
+        payload = build_dashboard(args.runs, buckets=args.buckets, stale_after=args.stale_after)
+        index = write_dashboard_site(
+            payload,
+            args.site,
+            intro=SITE_INTRO,
+            links=[("← domalouf.com", "/"), ("The agent playing", "/zombies/"), ("Code on GitHub", REPO_URL)],
+            description="Learning curves, optimiser health and reward-hacking gates for an RL agent "
+            "learning Nacht der Untoten.",
+        )
+        summarize(payload)
+        print(f"site page: {index.resolve()}")
+        return
 
     out = args.out or args.runs / "dashboard.html"
     refresh = args.watch or 0

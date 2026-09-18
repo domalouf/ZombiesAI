@@ -9,9 +9,11 @@ from zombiesai.viz.dashboard import (
     build_dashboard,
     classify,
     collect_runs,
+    public_payload,
     read_run,
     trend,
     write_dashboard_html,
+    write_dashboard_site,
 )
 
 
@@ -213,3 +215,45 @@ def test_embedded_data_cannot_close_the_script_tag(tmp_path):
     assert data["runs"][0]["name"] == "<img src=x onerror=alert(1)>"
     # And the page builds every label as text, so a name is never parsed as markup.
     assert re.search(r"\.innerHTML\s*=", html) is None
+
+
+def test_public_payload_drops_anything_path_shaped(tmp_path):
+    config = {
+        "env": "nacht-state",
+        "device": "cuda",
+        "obs_keys": ["pixels", "vector"],
+        "hidden": [128, 128],
+        "lr": 0.0003,
+        "train_clips": ["/home/dom/Videos/waw/clip_004.mp4"],
+        "out_dir": "runs/bc1",
+    }
+    write_run(tmp_path, "bc1", ppo_rows(5), config)
+    public = public_payload(build_dashboard(tmp_path))
+    kept = public["runs"][0]["config"]
+    assert kept["env"] == "nacht-state" and kept["hidden"] == [128, 128] and kept["obs_keys"] == ["pixels", "vector"]
+    assert kept["device"] == "cuda" and kept["lr"] == 0.0003
+    assert "train_clips" not in kept and "out_dir" not in kept  # the user's filesystem stays theirs
+    assert public["root"] == "runs/"  # never the absolute path the build happened to run from
+
+
+def test_site_build_is_a_static_directory_with_no_external_request(tmp_path):
+    write_run(tmp_path / "runs", "ppo-nacht-state-s1", ppo_rows(30, env_metrics=True), {"env": "nacht-state"})
+    out = tmp_path / "site"
+    index = write_dashboard_site(
+        build_dashboard(tmp_path / "runs"),
+        out,
+        intro="How training is going.",
+        links=[("← domalouf.com", "/"), ("Code", "https://github.com/domalouf/ZombiesAI")],
+        description="Learning curves for an RL agent.",
+    )
+    html = index.read_text()
+    assert index == out / "index.html"
+    # Fonts ship as files, not data: URIs -- a default-src 'self' CSP refuses the latter.
+    for face in ("big-shoulders-stencil-display", "red-hat-mono", "sofia-sans-condensed"):
+        assert (out / "fonts" / f"{face}.woff2").exists() and f"url(fonts/{face}.woff2)" in html
+    assert "data:font" not in html
+    assert not re.search(r'(src|href)="(?!#)(https?:)?//', html)  # nothing fetched from anywhere
+    assert '<meta name="description" content="Learning curves for an RL agent.">' in html
+    assert 'http-equiv="refresh"' not in html  # a published page is a snapshot, not a poller
+    data = json.loads(re.search(r"const DATA = (\{.*?\});\n", html, re.S).group(1))
+    assert data["intro"] == "How training is going." and data["links"][0] == ["← domalouf.com", "/"]
