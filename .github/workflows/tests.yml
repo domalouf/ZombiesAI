@@ -1,0 +1,57 @@
+# The test suite, on the one platform it is designed to run without a game: Linux.
+#
+# Two system dependencies decide whether this is a real gate or a comfortable lie. The video-ingest tests
+# skip themselves without ffmpeg, and the capture tests skip themselves without an X server -- so a runner
+# missing either reports a green suite that never touched the code most likely to break. They are installed
+# below and then checked for, because a skipped test looks exactly like a passing one at a glance.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ffmpeg and an X server
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -q --no-install-recommends ffmpeg xvfb libx11-6 libxext6
+          # The only two skip conditions in the suite. If either is missing, fail here with a clear reason
+          # rather than half an hour later with a green tick over untested code.
+          command -v ffmpeg
+          command -v ffprobe
+          command -v Xvfb
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install the project with a CPU build of PyTorch
+        # pyproject resolves torch from the CUDA 12.8 index, which is right for the machine that runs the
+        # game and about 3 GB of wheels CI would never execute a kernel from. Everything else syncs normally.
+        run: |
+          uv sync --no-install-package torch
+          uv pip install "torch>=2.8" --index-url https://download.pytorch.org/whl/cpu
+
+      - name: pytest
+        # --no-sync keeps the CPU torch installed above; a plain `uv run` would resync and undo it.
+        # -rs lists anything that skipped, so a silent skip is visible in the log.
+        run: uv run --no-sync pytest -q -rs
+
+      - name: Versions under test
+        if: always()
+        run: |
+          uv run --no-sync python -c "import sys, torch, numpy; print(sys.version); print('torch', torch.__version__); print('numpy', numpy.__version__)"
+          ffmpeg -version | head -1
