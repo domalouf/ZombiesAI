@@ -40,7 +40,13 @@ jobs:
 
       - name: Install the project with a CPU build of PyTorch
         # pyproject resolves torch from the CUDA 12.8 index, which is right for the machine that runs the
-        # game and about 3 GB of wheels CI would never execute a kernel from. Everything else syncs normally.
+        # game and a wheel no test here executes a kernel from. Skipping it and installing the CPU build
+        # instead keeps the tests honest about which torch they ran against (the last step prints it).
+        #
+        # Note what this does not do: --no-install-package skips torch itself, not its dependencies, so the
+        # nvidia-* and triton wheels the lock pins still land here. Measured at about 20 s on a runner, which
+        # is why it is left alone; the fix, if it ever matters, is the extras-and-conflicts pattern from uv's
+        # PyTorch guide in pyproject, which would also make `uv sync` on a CPU-only Linux box cheap.
         run: |
           uv sync --no-install-package torch
           uv pip install "torch>=2.8" --index-url https://download.pytorch.org/whl/cpu
