@@ -65,7 +65,9 @@ def main() -> None:
                         help="mouse counts per degree of yaw at your sensitivity, from spike S4")
     parser.add_argument("--bindings", type=Path, help="JSON map of key -> control, if yours aren't the defaults")
     parser.add_argument("--region", type=int, nargs=4, metavar=("LEFT", "TOP", "WIDTH", "HEIGHT"),
-                        help="capture this rectangle instead of the whole monitor")
+                        help="capture this rectangle instead of the whole window or monitor")
+    parser.add_argument("--window", default="World at War",
+                        help="Linux: the game window to capture, by title or 0x id (it runs under XWayland)")
     parser.add_argument("--monitor", type=int, default=1)
     parser.add_argument("--notes", default="", help="what you were trying to do -- camping, training, dying early")
     # Sim source only.
@@ -81,14 +83,35 @@ def main() -> None:
     input_config = InputConfig(counts_per_degree=args.counts_per_degree, bindings=bindings)
 
     if args.source == "screen":
+        import sys
+
         from zombiesai.demos.capture import ScreenCapture
-        from zombiesai.demos.win32_input import RawInputRecorder
 
         if args.counts_per_degree == 1.0:
-            print("warning: --counts-per-degree is still 1.0, so every look label is scaled wrong. Run spike S4.")
-        capture = ScreenCapture(tuple(args.region) if args.region else None, monitor=args.monitor)
-        inputs = RawInputRecorder()
-        inputs.start()
+            print("warning: --counts-per-degree is still 1.0, so every look label is scaled wrong.")
+            print("         Run scripts/calibrate_mouse.py first (spike S4).")
+        window = args.window
+        if isinstance(window, str) and window.startswith("0x"):
+            window = int(window, 16)
+        capture = ScreenCapture(
+            tuple(args.region) if args.region else None, monitor=args.monitor,
+            window=window if sys.platform.startswith("linux") else None,
+        )
+        # Raw device counts either way: Raw Input on Windows, the event devices on Linux. Cursor deltas
+        # would be useless in both -- the game captures and re-centres the pointer.
+        if sys.platform == "win32":
+            from zombiesai.demos.win32_input import RawInputRecorder
+
+            inputs = RawInputRecorder()
+            inputs.start()
+        else:
+            from zombiesai.demos.evdev_input import EvdevInput
+
+            inputs = EvdevInput()
+            print(f"reading {', '.join(d.name for d in inputs.devices)}")
+            if not inputs.monotonic:
+                print("warning: this kernel would not switch the devices to CLOCK_MONOTONIC; timestamps are")
+                print("         converted from wall clock, so a clock step mid-recording would shift labels.")
         out = next_dir(args.out, "demo")
         print(f"recording to {out} -- play; ctrl-c to stop early")
         config = RecorderConfig(

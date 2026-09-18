@@ -25,10 +25,12 @@ capture = ["mss>=9.0", "dxcam>=0.0.5; sys_platform == 'win32'"]
 default-groups = ["dev", "classic"]
 
 # The RTX 5070 is Blackwell (sm_120) and needs a CUDA 12.8+ build; the default PyPI wheel can't see it.
+# Linux and Windows are both possible hosts for the game (docs/linux.md), so both get the CUDA index. A
+# CPU-only machine still resolves -- it just downloads the CUDA libraries and never uses them.
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cpu", marker = "sys_platform != 'win32'" },
-    { index = "pytorch-cu128", marker = "sys_platform == 'win32'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform != 'win32' and sys_platform != 'linux'" },
 ]
 
 [[tool.uv.index]]

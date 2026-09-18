@@ -20,10 +20,11 @@ from zombiesai.demos.inputs import InputConfig, synthesize
 
 
 class ScreenCapture:
-    """Desktop capture: dxcam (DXGI Desktop Duplication) where it exists, mss everywhere else.
+    """Desktop capture behind one `grab()`: X11/XWayland on Linux, DXGI Desktop Duplication on Windows.
 
-    Borderless windowed is the assumption, as the plan requires -- DirectX 9 exclusive fullscreen generally
-    cannot be captured by Desktop Duplication at all.
+    Borderless windowed is the assumption on Windows, as the plan requires -- DirectX 9 exclusive fullscreen
+    generally cannot be captured by Desktop Duplication at all. On Linux the game is an XWayland client, so
+    capture targets its window by title or id and the compositor never enters the picture.
     """
 
     def __init__(
@@ -33,27 +34,45 @@ class ScreenCapture:
         backend: str = "auto",
         fit: str = "crop",
         monitor: int = 1,
+        window: int | str | None = None,
+        display: str | None = None,
     ):
         self.region, self.fit, self.monitor = region, fit, monitor
+        self.window, self.display = window, display
         self._box: tuple[int, int, int, int] | None = None
         self._last: np.ndarray | None = None
         self.backend = backend if backend != "auto" else self._pick()
         self._open()
 
-    @staticmethod
-    def _pick() -> str:
+    def _pick(self) -> str:
         import importlib.util
+        import os
+        import sys
 
-        for name in ("dxcam", "mss"):
-            if importlib.util.find_spec(name) is not None:
-                return name
-        raise RuntimeError("no capture backend: pip install dxcam (Windows) or mss")
+        if sys.platform == "win32" and importlib.util.find_spec("dxcam") is not None:
+            return "dxcam"
+        # An explicit display or window is a statement of intent; otherwise DISPLAY says whether there is an
+        # X server (which on a Wayland session means XWayland, which is where the game will be).
+        if sys.platform.startswith("linux") and (self.display or self.window is not None or os.environ.get("DISPLAY")):
+            return "x11"
+        if importlib.util.find_spec("mss") is not None:
+            return "mss"
+        raise RuntimeError(
+            "no capture backend: on Linux set DISPLAY (the game runs under XWayland), "
+            "on Windows pip install dxcam, or install mss"
+        )
 
     def _open(self) -> None:
         if self.backend == "dxcam":
             import dxcam
 
             self._camera = dxcam.create(output_color="RGB")
+        elif self.backend == "x11":
+            from zombiesai.demos.x11_capture import X11Grabber
+
+            # The region goes to the server, which sends back only those pixels; cropping here instead would
+            # copy the whole screen across the socket every tick to throw most of it away.
+            self._grabber = X11Grabber(window=self.window, display=self.display, region=self.region)
         else:
             import mss
 
@@ -61,6 +80,9 @@ class ScreenCapture:
 
     def grab(self) -> np.ndarray:
         """One full-resolution RGB frame, repeating the last one if the compositor had no new frame."""
+        if self.backend == "x11":
+            self._last = self._grabber.grab()
+            return self._last
         if self.backend == "dxcam":
             frame = self._camera.grab(region=self.region)
             if frame is None:
@@ -87,11 +109,16 @@ class ScreenCapture:
         return fr.to_policy_frame(frame, self._box, self.fit)
 
     def describe(self) -> dict:
-        return {"kind": "screen", "backend": self.backend, "region": self.region, "fit": self.fit, "box": self._box}
+        out = {"kind": "screen", "backend": self.backend, "region": self.region, "fit": self.fit, "box": self._box}
+        if self.backend == "x11":
+            out["source"] = self._grabber.describe()
+        return out
 
     def close(self) -> None:
         if self.backend == "dxcam":
             self._camera.release()
+        elif self.backend == "x11":
+            self._grabber.close()
         else:
             self._sct.close()
 

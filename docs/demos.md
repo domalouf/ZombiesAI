@@ -18,13 +18,21 @@ uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --m
     --notes "camping the help room, deliberately bad positioning after round 8"
 ```
 
+The command is the same on either OS. On Linux the pixels come from the game's XWayland window and the input
+log from `/dev/input/event*`, which reports the same device counts Windows Raw Input does. The Linux setup
+those two need -- group membership, a udev rule, and flat pointer acceleration -- is in
+[`linux.md`](./linux.md), along with the spike order and what to check when the engine ignores the virtual
+mouse.
+
 This is the only route that produces ground-truth labels, and its output is what trains the inverse dynamics
 model that makes Route B possible. Two things decide whether the labels are worth anything:
 
 - **`--counts-per-degree` is spike S4's number** — mouse counts per degree of yaw *at the sensitivity you
   play at*, with in-game smoothing and acceleration off. Wrong number, wrong look labels, every single step.
+  `scripts/calibrate_mouse.py` measures it for you by turning the view and watching the pixels move.
 - **Raw counts, not cursor deltas.** In a mouse-look FPS the cursor is captured and re-centred, so cursor
-  positions carry no information about how far you turned. `demos/win32_input.py` reads Windows Raw Input
+  positions carry no information about how far you turned. `demos/evdev_input.py` reads the kernel's
+  event devices and `demos/win32_input.py` reads Windows Raw Input
   (`WM_INPUT`), which reports the device's own relative counts — the same unit the agent's synthetic mouse
   will emit. That symmetry is the reason a human's action means anything to the policy.
 
@@ -150,10 +158,10 @@ A few failures and what they usually mean:
 
 - **No HUD parse.** Real clips carry no `hud` vector, so BC here is pixels-only and there is no reward on
   real footage. That arrives with M4's parser; the clip format leaves room for it.
-- **`ScreenCapture` and `RawInputRecorder` have not been run against the game.** They are written against
-  Desktop Duplication (via `dxcam` or `mss`) and Win32 Raw Input, and their pure parts are unit-tested on
-  Linux, but the message loop, the device registration and the capture timing are exactly what spikes S1–S3
-  exist to verify. Treat the first recording session as the spike.
+- **Nothing here has been run against the game.** The Linux capture path is tested against a real X
+  server and the dispatcher's output round-trips through the same decoder a recording uses, but an X
+  server in CI is not World at War under Proton, and `win32_input.py` has never run on Windows at all.
+  Spikes S1-S3 exist to check exactly this; treat the first session as one.
 - **The IDM is trained per-game, not per-project.** An IDM fit to your sensitivity and your bindings labels
   your footage. Someone else's video, at a different sensitivity, needs its own `counts_per_degree` at
   minimum — and, if the difference is large, its own IDM.
