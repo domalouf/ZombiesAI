@@ -85,6 +85,18 @@ class Labels:
         return len(self.actions)
 
 
+def inverse_bindings(bindings: dict[str, str]) -> dict[str, str]:
+    """control -> the code that drives it, first binding wins.
+
+    The map is written code-first because that is how a log reads, but everything that *emits* input -- the
+    synthetic log in `synthesize`, the agent's dispatcher in `realgame/dispatch.py` -- needs it the other way
+    round. Deriving it here keeps one source of truth for which key means "reload"."""
+    out: dict[str, str] = {}
+    for code, control in bindings.items():
+        out.setdefault(control, code)
+    return out
+
+
 def read_log(path: str | Path) -> list[dict]:
     """Parse inputs.jsonl, tolerating a truncated final line from a recorder that was killed."""
     events = []
@@ -215,9 +227,7 @@ def synthesize(action, start: float, dt: float, config: InputConfig | None = Non
     """
     config = config or InputConfig()
     values = spec.action_tuple(action)
-    inverse: dict[str, str] = {}
-    for code, control in config.bindings.items():
-        inverse.setdefault(control, code)
+    inverse = inverse_bindings(config.bindings)
     events: list[dict] = []
     mid = start + dt / 2
 

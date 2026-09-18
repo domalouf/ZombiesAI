@@ -34,6 +34,11 @@ Built so far (all Linux, no game needed):
   logs raw mouse counts alongside the screen, video ingest for footage nobody
   logged input for, an inverse dynamics model that labels it, and behavioural
   cloning over pixels. See [`docs/demos.md`](./docs/demos.md).
+- `src/zombiesai/realgame/` — the agent's hands: a factored action diffed against
+  what is currently held, turned into key transitions and mouse sub-moves, and
+  handed to a kernel virtual device. With capture (`demos/x11_capture.py`) and
+  raw input (`demos/evdev_input.py`), the whole Linux side of the real-game loop
+  exists. See [`docs/linux.md`](./docs/linux.md).
 
 ```sh
 uv sync                                  # Python 3.13 env + deps (PyTorch: CPU on Linux, CUDA 12.8 on Windows)
@@ -66,9 +71,21 @@ uv run python scripts/train_bc.py data/clips/session1 data/demos --out runs/bc1
 uv run python scripts/eval_bc.py runs/bc1/bc.pt --clips data/demos --episodes 20
 uv run python scripts/watch.py --checkpoint runs/bc1/bc.pt           # watch what it learned
 
-# No Windows box yet? The same recorder path, driven by NachtSim, for labelled clips today.
+# No game yet? The same recorder path, driven by NachtSim, for labelled clips today.
 uv run python scripts/record_demo.py --source sim --episodes 20 --counts-per-degree 10
 ```
+
+On the machine that runs the game (Linux; see [`docs/linux.md`](./docs/linux.md)
+for why, and for the udev and libinput setup), the M0 spikes are two commands:
+
+```sh
+uv run python scripts/calibrate_mouse.py --window "World at War" --full-turn  # S1 + S4
+uv run python scripts/spike_capture.py --window "World at War" --latency      # S2 + S3
+```
+
+The first answers whether the engine sees synthetic input at all and measures
+mouse counts per degree; the second measures capture rate and the closed-loop
+delay the whole delayed-MDP design is built around.
 
 Training runs write `config.json`, `metrics.jsonl` (one line per update), and
 `checkpoint.pt` to `runs/<run>/`.
@@ -93,6 +110,7 @@ each step, and a clickable match log. Add `#t=90` to the file's URL to open it a
   the policy RL starts from.
 - **Learning RL is the point.** Final bot skill is secondary to a clean
   environment, fast iteration, and swappable algorithms.
-- **Hardware:** RTX 5070, 12GB, trained locally.
+- **Hardware:** RTX 5070, 12GB, trained locally, on Linux (the game runs under
+  Proton as an XWayland client; synthetic input is a kernel virtual device).
 
 See `PLAN.md` for everything else.
