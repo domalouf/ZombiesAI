@@ -33,7 +33,8 @@ def main() -> None:
         replay,
         args.out,
         intro=intro,
-        links=[("← domalouf.com", "/"), ("Code on GitHub", REPO_URL)],
+        # Absolute paths, because deploy.sh publishes both pages under /zombies/ on the same host.
+        links=[("← domalouf.com", "/"), ("How it learned", "/zombies/training/"), ("Code on GitHub", REPO_URL)],
         description="Watch a from-scratch PPO agent play Nacht der Untoten in simulation, move by move.",
     )
     s = replay["summary"]
