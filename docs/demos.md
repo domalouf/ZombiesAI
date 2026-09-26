@@ -25,6 +25,12 @@ those two need -- group membership, a udev rule, and flat pointer acceleration -
 [`linux.md`](./linux.md), along with the spike order and what to check when the engine ignores the virtual
 mouse.
 
+Switching workspace or minimising the game mid-recording does not end it: while the window cannot be grabbed
+the recorder repeats the last good frame, flags those steps `bad_step` so training skips them, and prints a
+line when capture is lost and when it is back. A window that comes back at a different size counts as still
+gone (HUD crops cannot change shape mid-clip), and the recording stops cleanly once the window has been gone
+for 30 s, or at once if it was destroyed.
+
 This is the only route that produces ground-truth labels, and its output is what trains the inverse dynamics
 model that makes Route B possible. Two things decide whether the labels are worth anything:
 

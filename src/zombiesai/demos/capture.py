@@ -19,6 +19,11 @@ from zombiesai.demos.clips import load_clip
 from zombiesai.demos.inputs import InputConfig, synthesize
 
 
+class CaptureLost(RuntimeError):
+    """The thing being captured is gone for good (the game window was destroyed), so there is nothing left to
+    wait for. A recorder should stop cleanly on this rather than hold a stale frame forever."""
+
+
 class ScreenCapture:
     """Desktop capture behind one `grab()`: X11/XWayland on Linux, DXGI Desktop Duplication on Windows.
 
@@ -44,8 +49,14 @@ class ScreenCapture:
         # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
         self.hud_regions, self.hud_scale = hud_regions, hud_scale
         self.last_hud: dict[str, np.ndarray] | None = None
+        # Whether the frame `read()` last returned is a repeat of an earlier one because the window could not
+        # be grabbed, and why. A repeat is not what the player saw, so a recorder must not train on it.
+        self.last_stale = False
+        self.stale_reason: str | None = None
         self._box: tuple[int, int, int, int] | None = None
         self._last: np.ndarray | None = None
+        self._shape: tuple[int, ...] | None = None  # full-resolution shape of the first good grab
+        self._policy: np.ndarray | None = None  # the last good policy frame, returned again while stale
         self.backend = backend if backend != "auto" else self._pick()
         self._open()
 
@@ -111,7 +122,30 @@ class ScreenCapture:
         return self._grabber.is_capturable() if self.backend == "x11" else True
 
     def read(self) -> np.ndarray:
-        frame = self.grab()
+        """The next policy frame -- or, while the window cannot be grabbed, the last good one again, with
+        `last_stale` set and `last_hud` left at the crops that went with it.
+
+        Losing the window for a moment is ordinary on a desktop (a workspace switch, a notification that
+        steals the surface) and should cost the recording those steps, not the whole session. With no good
+        frame to fall back on there is nothing honest to return, so the error propagates; and a window that
+        has been destroyed raises `CaptureLost`, since no amount of waiting brings that XID back.
+        """
+        try:
+            frame = self.grab()
+        except Exception as error:
+            if self._policy is None or not self._transient(error):
+                raise
+            return self._stale(str(error))
+        if self._shape is not None and frame.shape != self._shape:
+            # The window came back at another size. The policy frame would survive a rescale, but the crop box
+            # was frozen on the first frame and the HUD crops' shapes are fixed for the life of a clip (the
+            # writer refuses a change, rightly: the crops would no longer mean the same pixels). So a resized
+            # window is an outage like any other until it is put back, and the recorder gives up on it after
+            # its outage limit rather than splicing two geometries into one clip.
+            height, width = self._shape[:2]
+            return self._stale(
+                f"the window is now {frame.shape[1]}x{frame.shape[0]}; the recording started at {width}x{height}"
+            )
         if self._box is None:
             # Detected once, on the first frame, and then frozen: a crop that drifts mid-recording would
             # change what the pixels mean halfway through the clip.
@@ -120,7 +154,25 @@ class ScreenCapture:
             from zombiesai.demos.hud_crops import crop_regions
 
             self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale)
-        return fr.to_policy_frame(frame, self._box, self.fit)
+        self._shape = frame.shape
+        self._policy = fr.to_policy_frame(frame, self._box, self.fit)
+        self.last_stale, self.stale_reason = False, None
+        return self._policy
+
+    def _transient(self, error: Exception) -> bool:
+        """Whether a failed grab is worth waiting out. Only the X11 path can tell the difference; anything
+        it cannot vouch for is treated as the fault it looks like."""
+        if self.backend != "x11":
+            return False
+        from zombiesai.demos.x11_capture import WindowGone, WindowUnavailable
+
+        if isinstance(error, WindowGone):
+            raise CaptureLost(str(error)) from error
+        return isinstance(error, WindowUnavailable)
+
+    def _stale(self, reason: str) -> np.ndarray:
+        self.last_stale, self.stale_reason = True, reason
+        return self._policy
 
     def describe(self) -> dict:
         out = {"kind": "screen", "backend": self.backend, "region": self.region, "fit": self.fit, "box": self._box}

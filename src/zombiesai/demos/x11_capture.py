@@ -12,6 +12,10 @@ but slow enough to fail spike S2. Which one you got is in `describe()`, so a slo
 
 Grabbing the whole root window does not work on a Wayland compositor -- XWayland's root is not the desktop.
 Grab the game's window instead: `X11Grabber(window="World at War")`.
+
+A window can stop being readable without anything being wrong: switch Hyprland workspace, minimise it, or let
+a popup take over, and `XShmGetImage` answers BadMatch until it is back. Those arrive as `WindowUnavailable`,
+which a caller can wait out; a window that no longer exists at all arrives as `WindowGone`, which it cannot.
 """
 
 import ctypes
@@ -35,6 +39,16 @@ class X11Error(RuntimeError):
 class WindowNotFound(X11Error):
     """No window matches the title (yet). Separate from X11Error because it is the one failure worth waiting
     out: the game may simply not be running, or not be mapped, when the recorder starts."""
+
+
+class WindowUnavailable(X11Error):
+    """The window exists but cannot be read right now: unmapped, minimised, on another workspace, or resized
+    out from under the grab region. Transient by nature -- the next grab re-checks and may well succeed."""
+
+
+class WindowGone(X11Error):
+    """The window has been destroyed -- the game closed or crashed. XIDs are not handed back out while the
+    server has others to give, so waiting for this one to return would wait forever."""
 
 
 class XErrorEvent(ctypes.Structure):
@@ -326,8 +340,13 @@ class X11Grabber:
             raise X11Error(f"window 0x{self.window:x} has depth {self.depth}; only 24- and 32-bit are supported")
         left, top, width, height = region or (0, 0, attributes.width, attributes.height)
         self.region = (int(left), int(top), int(width), int(height))
+        # Only a region we derived from the window may follow the window when it resizes. One the caller chose
+        # is a statement about which pixels they want, and is not ours to move.
+        self._follows_window = region is None
+        self._lost = False
 
-        if shm and x.shm_query(self.display):
+        self._shm = bool(shm and x.shm_query(self.display))
+        if self._shm:
             self._attach_shm()
         self.backend = "xshm" if self.image else "xgetimage"
 
@@ -364,6 +383,20 @@ class X11Grabber:
         self.shm_info, self.image = info, image
         self._buffer = (ctypes.c_uint8 * size).from_address(address)
 
+    def _release_shm(self) -> None:
+        """Detach and free the shared image, leaving the connection open. The segment is sized to the region,
+        so a region that changes needs a new one."""
+        shared = self.shm_info is not None
+        if shared:
+            self.x.shm_detach(self.display, ctypes.byref(self.shm_info))
+        if self.image is not None:
+            self._destroy_image(self.image, shared=shared)
+            self.image = None
+        if shared:
+            self.x.shmdt(self.shm_info.shmaddr)
+            self.shm_info = None
+        self._buffer = None
+
     def _destroy_image(self, image, shared: bool = False) -> None:
         """XDestroyImage frees `image->data` with free(). For a shared image that pointer came from shmat,
         not malloc, so it is cleared first and the segment is detached separately."""
@@ -389,7 +422,7 @@ class X11Grabber:
         ok = x.get_attributes(self.display, self.window, ctypes.byref(attributes))
         check_errors(x, self.display, f"window 0x{self.window:x}")
         if not ok:
-            raise X11Error(f"window 0x{self.window:x} no longer exists")
+            raise WindowGone(f"window 0x{self.window:x} no longer exists")
         if attributes.map_state != IS_VIEWABLE:
             return False
         root = XWindowAttributes()
@@ -403,13 +436,64 @@ class X11Grabber:
             return False
         try:
             self.grab()
+        except WindowGone:
+            raise
         except X11Error:
             return False
         return True
 
     def grab(self) -> np.ndarray:
         """The region as an (H, W, 3) uint8 RGB array. The returned array owns its memory: the shared buffer
-        is overwritten by the next grab, and a view into it would silently change under the caller."""
+        is overwritten by the next grab, and a view into it would silently change under the caller.
+
+        Raises `WindowUnavailable` while the window cannot be read and `WindowGone` once it no longer exists.
+        The happy path costs nothing extra: the window is only re-examined after a grab has failed, and then
+        before every retry until one succeeds.
+        """
+        if self._lost:
+            # Checked before retrying, not just after failing: a window that comes back *larger* would grab
+            # without complaint, and hand back its top-left corner as if it were the whole thing.
+            self._refresh()
+        try:
+            pixels = self._read()
+        except X11Error as error:
+            self._lost = True
+            self._refresh()  # raises WindowGone or a sharper WindowUnavailable, if there is one to raise
+            raise WindowUnavailable(str(error)) from error
+        self._lost = False
+        return pixels
+
+    def _refresh(self) -> None:
+        """Re-read the window's state after a failed grab, and follow it if it was resized.
+
+        A remap at the same size needs nothing: the shared segment belongs to the connection, not the window,
+        and XShmGetImage simply starts working again. A resize is different -- a region that now overhangs
+        the window is a BadMatch on every grab forever -- so a region derived from the window is re-derived,
+        and the shared image, which is sized to the region, is rebuilt to match.
+        """
+        x = self.x
+        clear_errors()
+        attributes = XWindowAttributes()
+        ok = x.get_attributes(self.display, self.window, ctypes.byref(attributes))
+        try:
+            check_errors(x, self.display, f"window 0x{self.window:x}")
+        except X11Error as error:
+            raise WindowGone(f"window 0x{self.window:x} no longer exists ({error})") from error
+        if not ok:
+            raise WindowGone(f"window 0x{self.window:x} no longer exists")
+        if attributes.map_state != IS_VIEWABLE:
+            raise WindowUnavailable(
+                f"window 0x{self.window:x} is not viewable (minimised, unmapped, or on another workspace)"
+            )
+        size = (attributes.width, attributes.height)
+        if self._follows_window and size != self.size:
+            self.region = (0, 0, int(size[0]), int(size[1]))
+            if self._shm:
+                self._release_shm()
+                self._attach_shm()
+            self.backend = "xshm" if self.image else "xgetimage"
+
+    def _read(self) -> np.ndarray:
         x, (left, top, width, height) = self.x, self.region
         clear_errors()
         if self.image is not None:
@@ -448,16 +532,7 @@ class X11Grabber:
         x = getattr(self, "x", None)
         if x is None or not getattr(self, "display", None):
             return
-        shared = self.shm_info is not None
-        if shared:
-            x.shm_detach(self.display, ctypes.byref(self.shm_info))
-        if self.image is not None:
-            self._destroy_image(self.image, shared=shared)
-            self.image = None
-        if shared:
-            x.shmdt(self.shm_info.shmaddr)
-            self.shm_info = None
-        self._buffer = None
+        self._release_shm()
         x.close_display(self.display)
         self.display = None
 
