@@ -199,6 +199,7 @@ uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2   # --corr
 | Capture | `demos/x11_capture.py` (XWayland, MIT-SHM) | `dxcam` Desktop Duplication |
 | Recording human input | `demos/evdev_input.py` | `demos/win32_input.py` |
 | Synthetic input | `realgame/uinput.py` | not written yet (`SendInput` ladder) |
+| Several games at once | `realgame/instances.py` + `realgame/xtest.py` (an X server per game; `docs/rl.md`) | not possible (one foreground window per desktop) |
 | Everything else | identical | identical |
 
 `demos/capture.py` picks the backend by platform, so nothing above the adapter layer knows which it got.

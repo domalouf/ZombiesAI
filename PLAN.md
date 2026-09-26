@@ -40,6 +40,15 @@ GitHub and the literature turned up scripted GSC bots and nothing else.
    pure CPU, no window, no input-focus problem — parallelized to every core the
    machine has (M1), it's the actual source of data volume. Trade compute for
    sample efficiency everywhere.
+
+   *Update, Linux host:* this fact is about Windows, where a desktop session is
+   the unit. Under Proton the game is an X11 client, and the one-foreground-window
+   unit is an **X server** — cheap to multiply. Each instance now runs in its own
+   rootful Xwayland with XTEST input private to it (`realgame/instances.py`,
+   `realgame/xtest.py`); XInput2 raw motion from XTEST, hidden-workspace GPU
+   rendering at 60 fps and MIT-SHM capture were measured on the target machine.
+   Four instances are ~216k steps/hour. What remains for the game itself to answer
+   is `scripts/spike_instances.py`. See [`docs/rl.md`](./docs/rl.md).
 2. **The reward signal is a computer-vision artifact.** If the HUD parser is
    wrong, RL optimizes noise and you won't notice for days. Perception
    reliability is a first-class subsystem, not a utility function.
@@ -548,6 +557,11 @@ run with <5 watchdog restarts and zero data loss; T1 `rounds_survived` over the
 last 20 episodes exceeds BC by ≥1 round *and* holds under frozen-policy eval;
 T2 (stretch) beats the human demonstrator. **Anti-hacking gate for T1:** no
 single reward term >60% of return, and repairs <25% of points.
+
+*Built on Linux first:* with several instances in parallel the data rate
+supports on-policy fine-tuning, so the first M7 learner is PPO from BC init
+(`rl/parallel_ppo.py`: actor per game, critic warm-up, KL anchor to BC). The
+replay-ratio learner above stays the slot for when that runs out of road.
 
 ### Demonstrations and BC — the details that decide whether it works
 

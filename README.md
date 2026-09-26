@@ -41,6 +41,13 @@ Built so far (all Linux, no game needed):
   handed to a kernel virtual device. With capture (`demos/x11_capture.py`) and
   raw input (`demos/evdev_input.py`), the whole Linux side of the real-game loop
   exists. See [`docs/linux.md`](./docs/linux.md).
+- **RL on the real game, several games at once** — each World at War instance
+  in an X server of its own (a hidden rootful Xwayland) with private XTEST input
+  (`realgame/instances.py`, `realgame/xtest.py`); the game as an environment
+  whose reward comes off the HUD (`realgame/env.py`, `realgame/hud_reward.py`);
+  and PPO fine-tuning of the BC policy with a critic warm-up and a KL anchor to
+  BC, one actor process per game (`rl/parallel_ppo.py`). See
+  [`docs/rl.md`](./docs/rl.md).
 
 ```sh
 uv sync                                  # Python 3.13 env + deps (PyTorch: CPU on Linux, CUDA 12.8 on Windows)
@@ -77,6 +84,17 @@ uv run python scripts/watch.py --checkpoint runs/bc1/bc.pt           # watch wha
 
 # No game yet? The same recorder path, driven by NachtSim, for labelled clips today.
 uv run python scripts/record_demo.py --source sim --episodes 20 --counts-per-degree 10
+```
+
+Then let it teach itself, with several games playing at once (details in
+[`docs/rl.md`](./docs/rl.md)):
+
+```sh
+uv run python scripts/train_rl.py runs/bc1/bc.pt --env sim --actors 8   # rehearse the pipeline on NachtSim
+uv run python scripts/instances.py up --n 4                             # four games, four private X servers
+uv run python scripts/spike_instances.py --counts-per-degree 9.09      # does each take input, alone?
+uv run python scripts/train_rl.py runs/bc1/bc.pt --actors 4 --counts-per-degree 9.09 --out runs/rl1
+uv run python scripts/instances.py down
 ```
 
 On the machine that runs the game (Linux; see [`docs/linux.md`](./docs/linux.md)
@@ -129,10 +147,11 @@ each step, and a clickable match log. Add `#t=90` to the file's URL to open it a
 
 - **Screen capture only.** Pixels in, keyboard/mouse out. Reward and episode
   boundaries are read off the HUD.
-- **Real-time, single instance.** ~54,000 agent steps/hour from the real
-  game — where an Atari DQN baseline assumes 10,000,000. A faithful simulator
-  built from the game's own source constants, from-scratch PPO and DQN, and
-  behavioral cloning from human play are how the plan closes that gap.
+- **Real-time.** ~54,000 agent steps/hour from one real game — where an
+  Atari DQN baseline assumes 10,000,000. A faithful simulator built from the
+  game's own source constants, from-scratch PPO and DQN, and behavioral cloning
+  from human play are how the plan closes that gap — and on Linux, several
+  games at once, each in its own X server (`docs/rl.md`).
 - **Human play is the other half of the data problem.** Recorded demonstrations
   and ordinary gameplay video are the only source of real experience that does
   not cost real time at 15 decisions a second — an inverse dynamics model turns
