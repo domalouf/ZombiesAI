@@ -15,6 +15,7 @@ bindings, a different `counts_per_degree`, or different bins, without asking any
 """
 
 import json
+import math
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -130,6 +131,62 @@ def record(
             }
         )
     return path
+
+
+def wait_to_start(
+    probe,
+    *,
+    timeout: float,
+    countdown: float = 3.0,
+    poll: float = 0.5,
+    discard=None,
+    say=print,
+    notify=None,
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> bool:
+    """Hold the start of a recording until `probe()` says the game can be captured, then count down.
+
+    Returns True the moment recording should begin, False if `timeout` seconds pass with nothing capturable.
+    The game usually lives on another workspace from the terminal that launched the recorder, and grabbing a
+    window nobody can see fails -- so rather than make someone race from the terminal to the game, the
+    recorder waits for them to get there. The countdown is for the player, whose hands are not on the
+    controls yet the instant the window appears; `probe()` is asked again at the end of it, and a window that
+    went away in the meantime (a quick alt-tab back) sends it back to waiting rather than recording black.
+
+    `discard()` is called on every tick and once more immediately before returning True. It exists for the
+    input source: `drain()` hands back everything since the previous call, and `InputFolder` clamps events
+    from before a decision into it -- so without this, a minute of mouse movement spent reaching the game
+    would land in the first label as one enormous flick. A key held down across the start is lost with the
+    rest (its press was discarded), which is why there is a countdown to let go on.
+
+    `clock` and `sleep` are injectable so the logic is tested without anybody waiting.
+    """
+    discard = discard or (lambda: None)
+    deadline = clock() + timeout
+    while True:
+        if not probe():
+            say(f"waiting for the game window to be on screen -- switch to it (giving up after {timeout:.0f}s)")
+            while True:
+                discard()
+                if clock() >= deadline:
+                    return False
+                sleep(poll)
+                if probe():
+                    break
+        ticks = math.ceil(countdown)
+        if ticks:
+            say(f"game window is on screen; recording in {countdown:g}s")
+            if notify is not None:
+                notify(f"recording in {countdown:g}s")
+        for n in range(ticks, 0, -1):
+            say(f"  {n}...\a")  # the bell, for anyone who left the terminal where they can hear it
+            discard()
+            sleep(countdown / ticks)
+        if probe():
+            discard()
+            return True
+        say("the game window left the screen during the countdown")
 
 
 def requantize(clip_dir: str | Path, config: InputConfig, *, dt: float | None = None) -> np.ndarray:

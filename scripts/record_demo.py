@@ -3,6 +3,9 @@
     # Windows, with the game running in borderless windowed:
     uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20
 
+    # Linux, launched from a terminal on another workspace: start once the game is on screen, after 3 s.
+    uv run python scripts/record_demo.py --source screen --window "Call of Duty" --wait --counts-per-degree 6.4
+
     # Anywhere, to generate labelled clips for the inverse dynamics model without touching the game:
     uv run python scripts/record_demo.py --source sim --episodes 20 --agent scripted
 
@@ -16,11 +19,13 @@ has no idea what to do the moment it drifts off-distribution, and there is no DA
 
 import argparse
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 from zombiesai.demos.clips import load_clip
 from zombiesai.demos.inputs import DEFAULT_BINDINGS, InputConfig
-from zombiesai.demos.recorder import RecorderConfig, quality_report, record
+from zombiesai.demos.recorder import RecorderConfig, quality_report, record, wait_to_start
 
 
 def check(path: Path) -> None:
@@ -50,6 +55,22 @@ def check(path: Path) -> None:
         )
 
 
+def notify(message: str, seconds: float = 3.0) -> None:
+    """A desktop notification, when there is a notifier -- by the time the countdown runs, the player is
+    looking at the game and not at this terminal. Best effort: no notify-send, or a notifier that hangs, is
+    not a reason to lose the recording."""
+    if shutil.which("notify-send") is None:
+        return
+    try:
+        subprocess.run(
+            ["notify-send", "--app-name", "ZombiesAI", "--expire-time", str(int(seconds * 1000)),
+             "record_demo", message],
+            timeout=2, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def next_dir(root: Path, prefix: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     existing = [p.name for p in root.glob(f"{prefix}_*")]
@@ -60,7 +81,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source", choices=("screen", "sim"), default="screen")
     parser.add_argument("--out", type=Path, default=Path("data/demos"))
-    parser.add_argument("--minutes", type=float, default=20.0, help="stop after this long (screen source)")
+    parser.add_argument("--minutes", type=float, default=20.0,
+                        help="stop after this many minutes of recording (screen source; --wait time not counted)")
+    parser.add_argument("--wait", action="store_true",
+                        help="don't start until the game window can be captured (it is on the visible "
+                             "workspace), then count down -- for launching from a terminal elsewhere")
+    parser.add_argument("--countdown", type=float, default=3.0, help="with --wait: seconds between the game "
+                        "appearing and recording starting")
+    parser.add_argument("--wait-timeout", type=float, default=300.0,
+                        help="with --wait: give up after this many seconds without a capturable window")
     parser.add_argument("--counts-per-degree", type=float, default=1.0,
                         help="mouse counts per degree of yaw at your sensitivity, from spike S4")
     parser.add_argument("--bindings", type=Path, help="JSON map of key -> control, if yours aren't the defaults")
@@ -97,11 +126,24 @@ def main() -> None:
             window = int(window, 16)
         from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
 
-        capture = ScreenCapture(
-            tuple(args.region) if args.region else None, monitor=args.monitor,
-            window=window if sys.platform.startswith("linux") else None,
-            hud_regions=None if args.no_hud else HUD_REGIONS, hud_scale=HUD_SCALE,
-        )
+        def open_capture() -> ScreenCapture:
+            return ScreenCapture(
+                tuple(args.region) if args.region else None, monitor=args.monitor,
+                window=window if sys.platform.startswith("linux") else None,
+                hud_regions=None if args.no_hud else HUD_REGIONS, hud_scale=HUD_SCALE,
+            )
+
+        not_found: tuple[type[Exception], ...] = ()
+        if args.wait and sys.platform.startswith("linux"):
+            from zombiesai.demos.x11_capture import WindowNotFound
+
+            # Only a window that isn't there yet is worth waiting for. No X display, or the wrong depth, stays
+            # an immediate error rather than a five-minute timeout.
+            not_found = (WindowNotFound,)
+        try:
+            capture = open_capture()
+        except not_found:
+            capture = None
         # Raw device counts either way: Raw Input on Windows, the event devices on Linux. Cursor deltas
         # would be useless in both -- the game captures and re-centres the pointer.
         if sys.platform == "win32":
@@ -117,6 +159,34 @@ def main() -> None:
             if not inputs.monotonic:
                 print("warning: this kernel would not switch the devices to CLOCK_MONOTONIC; timestamps are")
                 print("         converted from wall clock, so a clock step mid-recording would shift labels.")
+        if args.wait:
+            def capturable() -> bool:
+                nonlocal capture
+                if capture is None:
+                    try:
+                        capture = open_capture()
+                    except not_found:
+                        return False
+                return capture.is_capturable()
+
+            try:
+                ready = wait_to_start(
+                    capturable, timeout=args.wait_timeout, countdown=args.countdown,
+                    discard=inputs.drain, notify=lambda message: notify(message, args.countdown),
+                )
+            except KeyboardInterrupt:
+                ready = None
+            if not ready:
+                # Nothing was recorded, so there is nothing to write -- just let go of the devices and say why.
+                inputs.close()
+                if capture is not None:
+                    capture.close()
+                if ready is None:
+                    raise SystemExit("\nstopped before recording started")
+                raise SystemExit(
+                    f"gave up after {args.wait_timeout:.0f}s: no capturable window titled {args.window!r}. "
+                    "It has to be on the visible workspace and wholly on screen."
+                )
         out = next_dir(args.out, "demo")
         print(f"recording to {out} -- play; ctrl-c to stop early")
         config = RecorderConfig(
