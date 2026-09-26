@@ -255,3 +255,21 @@ def test_a_grabber_whose_window_was_destroyed_raises_window_gone():
     with pytest.raises(WindowGone, match="no longer exists"):
         grabber.grab()
     assert not x11_capture._errors  # reported, not left behind to poison the next check
+
+
+def test_re_deriving_the_play_marks_keeps_the_clip_start_an_outage_set():
+    """requantize rewrites the mark key's flags from the log; the fresh start after a capture outage is not
+    the mark key's, and a frame stack must still not reach back across the repeats before it."""
+    from zombiesai.demos.clips import FLAG_BAD_STEP, FLAG_CLIP_START, FLAG_NOT_PLAYING, with_play_marks
+
+    flags = np.zeros(10, np.uint8)
+    flags[0] = FLAG_CLIP_START
+    flags[2:4] = FLAG_BAD_STEP  # stale frames during an outage
+    flags[4] = FLAG_CLIP_START  # first good frame after it
+    flags[6:8] = FLAG_NOT_PLAYING  # an old F8 stretch...
+    flags[8] = FLAG_CLIP_START  # ...and the resume it set
+    marked = np.zeros(10, bool)  # re-derived under a key that was never pressed
+    out = with_play_marks(flags, marked)
+    assert out[4] & FLAG_CLIP_START and out[0] & FLAG_CLIP_START
+    assert not out[8] & FLAG_CLIP_START and not (out & FLAG_NOT_PLAYING).any()
+    assert (out[2:4] & FLAG_BAD_STEP).all()

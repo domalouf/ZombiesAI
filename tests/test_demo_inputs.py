@@ -194,3 +194,41 @@ def test_firing_is_checked_against_the_magazine():
     assert inputs.fire_ammo_agreement(fire, mag)["correlation"] > 0.9
     assert inputs.fire_ammo_agreement(fire, mag)["shots_while_not_firing"] == 0
     assert inputs.fire_ammo_agreement(fire[::-1], mag)["correlation"] < 0.5
+
+
+def test_a_mark_key_that_is_also_a_control_is_refused():
+    with pytest.raises(ValueError, match="mark key"):
+        inputs.InputConfig(bindings={**inputs.DEFAULT_BINDINGS, "f8": "use"})
+    assert inputs.InputConfig(mark_key="F7").mark_key == "f7"
+
+
+def test_the_default_mark_key_is_free_in_every_shipped_binding_map():
+    import json
+    from pathlib import Path
+
+    shipped = json.loads((Path(__file__).parents[1] / "configs" / "waw_bindings.json").read_text())
+    for bindings in (inputs.DEFAULT_BINDINGS, shipped):
+        inputs.InputConfig(bindings=bindings)  # raises if the mark key were bound
+
+
+def test_both_input_backends_name_the_mark_key_the_same_way():
+    from zombiesai.demos import evdev_input, win32_input
+
+    assert evdev_input.key_name(66) == win32_input.vk_name(0x77) == inputs.MARK_KEY  # KEY_F8, VK_F8
+
+
+def test_not_playing_marks_from_the_window_of_one_press_to_the_window_of_the_next():
+    events = log_for([spec.NEUTRAL_ACTION] * 10) + [
+        {"t": 2.5 * DT, "type": "key", "code": "f8", "down": True},
+        {"t": 2.6 * DT, "type": "key", "code": "f8", "down": False},
+        {"t": 5.0 * DT, "type": "key", "code": "f8", "down": True},  # exactly on a deadline: belongs to step 5
+        {"t": 5.1 * DT, "type": "key", "code": "f8", "down": False},
+        {"t": 8.2 * DT, "type": "key", "code": "f8", "down": True},  # a double tap inside one window
+        {"t": 8.3 * DT, "type": "key", "code": "f8", "down": False},
+        {"t": 8.5 * DT, "type": "key", "code": "f8", "down": True},
+        {"t": 8.6 * DT, "type": "key", "code": "f8", "down": False},
+    ]
+    marked = inputs.not_playing(events, 0.0, 10, CONFIG, DT)
+    np.testing.assert_array_equal(np.flatnonzero(marked), [2, 3, 4, 5, 8])
+    off = inputs.not_playing(events, 0.0, 10, inputs.InputConfig(counts_per_degree=10.0, mark_key=None), DT)
+    assert not off.any()

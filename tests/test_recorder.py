@@ -5,7 +5,12 @@ import numpy as np
 from zombiesai import spec
 from zombiesai.agents.scripted import ScriptedAgent
 from zombiesai.demos.capture import ClipPlayback, ReplayInput, SimSource
-from zombiesai.demos.clips import FLAG_BAD_STEP, load_clip
+from zombiesai.demos.clips import (
+    FLAG_BAD_STEP,
+    FLAG_CLIP_START,
+    FLAG_NOT_PLAYING,
+    load_clip,
+)
 from zombiesai.demos.inputs import InputConfig, read_log, synthesize
 from zombiesai.demos.recorder import RecorderConfig, quality_report, record, requantize, wait_to_start
 from zombiesai.sim.nacht_sim import NachtSim, SimConfig
@@ -233,3 +238,94 @@ def test_input_from_before_the_recording_does_not_become_the_first_label(tmp_pat
     arrives as one impossible flick -- which is what this checks the discard prevents."""
     assert abs(first_yaw(tmp_path, "backlogged", discard=False)) > 100
     assert first_yaw(tmp_path, "discarded", discard=True) == 0.0
+
+
+def marked_recording(tmp_path, presses=(3.3, 6.4), n=12, extra=()):
+    """A replayed recording with the mark key tapped at the given times (in decisions), plus any extra events."""
+    clip, _ = recorded(tmp_path)
+    dt = 1.0 / spec.DECISION_HZ
+    actions = [spec.make_action(forward=1, yaw=6.0 if k % 2 else 0.0) for k in range(n)]
+    events = [e for k, a in enumerate(actions) for e in synthesize(a, k * dt, dt, CONFIG)]
+    for at in presses:
+        events += [
+            {"t": at * dt, "type": "key", "code": "f8", "down": True},
+            {"t": (at + 0.1) * dt, "type": "key", "code": "f8", "down": False},
+        ]
+    events += [{**e, "t": e["t"] * dt} for e in extra]
+    path = record(
+        ClipPlayback(clip.path),
+        ReplayInput(events, origin=0.0),
+        tmp_path / "marked",
+        RecorderConfig(max_steps=n, realtime=False, input=CONFIG),
+        progress_every=0,
+    )
+    return load_clip(path), np.array(actions, dtype=np.uint8)
+
+
+def test_the_mark_key_flags_every_step_whose_window_was_not_play(tmp_path, capsys):
+    """Pressed during step 3's window, pressed again during step 6's: 3..6 are out, play resumes at 7."""
+    clip, _ = marked_recording(tmp_path)
+    marked = np.flatnonzero(clip.flags & FLAG_NOT_PLAYING)
+    np.testing.assert_array_equal(marked, [3, 4, 5, 6])
+    np.testing.assert_array_equal(np.flatnonzero(clip.flags & FLAG_CLIP_START), [0, 7])
+    summary = clip.manifest["summary"]
+    assert summary["not_playing_steps"] == 4 and summary["mark_key"] == "f8"
+    out = capsys.readouterr().out
+    assert "NOT PLAYING" in out and "playing again" in out
+
+
+def test_a_held_mark_key_repeating_is_one_toggle_not_many(tmp_path):
+    """Windows Raw Input repeats the make code while a key is held; that must not flicker the marking."""
+    held = [{"t": 3.3 + 0.05 * i, "type": "key", "code": "f8", "down": True} for i in range(12)]
+    held.append({"t": 4.0, "type": "key", "code": "f8", "down": False})
+    clip, _ = marked_recording(tmp_path, presses=(), extra=held)
+    np.testing.assert_array_equal(np.flatnonzero(clip.flags & FLAG_NOT_PLAYING), np.arange(3, 12))
+
+
+def test_the_mark_key_is_never_an_action_label(tmp_path):
+    clip, actions = marked_recording(tmp_path)
+    np.testing.assert_array_equal(clip.actions, actions[: clip.n_steps])
+    assert any(e.get("code") == "f8" for e in read_log(clip.path / "inputs.jsonl"))  # kept in the raw log
+
+
+def test_usable_leaves_out_the_steps_marked_not_playing(tmp_path):
+    clip, _ = marked_recording(tmp_path)
+    np.testing.assert_array_equal(clip.usable(), (clip.flags & FLAG_NOT_PLAYING) == 0)
+    assert clip.usable().sum() == clip.n_steps - 4
+
+
+def test_requantizing_rederives_the_marking_from_the_log(tmp_path):
+    clip, _ = marked_recording(tmp_path)
+    before = clip.flags.copy()
+    requantize(clip.path, CONFIG)
+    np.testing.assert_array_equal(load_clip(clip.path).flags, before)
+    # Recorded with the wrong key in mind: re-applying under another key removes the marks entirely...
+    requantize(clip.path, InputConfig(counts_per_degree=10.0, mark_key="f7"))
+    again = load_clip(clip.path)
+    assert not (again.flags & FLAG_NOT_PLAYING).any()
+    np.testing.assert_array_equal(np.flatnonzero(again.flags & FLAG_CLIP_START), [0])
+    # ...and going back puts them where the recorder had them.
+    requantize(clip.path, CONFIG)
+    np.testing.assert_array_equal(load_clip(clip.path).flags, before)
+
+
+def test_frame_stacks_do_not_reach_back_across_a_marked_stretch(tmp_path):
+    from zombiesai.demos.dataset import ClipDataset
+
+    clip, _ = marked_recording(tmp_path)
+    data = ClipDataset([clip], before=3)
+    assert 7 in data.index[:, 1] and not set(data.index[:, 1]) & {3, 4, 5, 6}
+    resumed = data.frames(np.array([[0, 7], [0, 8]]))
+    for tap in resumed[0]:
+        np.testing.assert_array_equal(tap, clip.frames[7])
+    np.testing.assert_array_equal(resumed[1][:3], clip.frames[[7, 7, 7]])
+    np.testing.assert_array_equal(
+        data.prev_actions(0, 7), spec.encode_prev_actions([spec.NEUTRAL_ACTION] * spec.PREV_ACTION_HISTORY)
+    )
+
+
+def test_the_quality_check_reports_marked_time_and_describes_only_play(tmp_path):
+    clip, _ = marked_recording(tmp_path)
+    report = quality_report(clip)
+    assert report["not_playing_steps"] == 4
+    assert report["behaviour"]["steps"] == clip.n_steps - 4

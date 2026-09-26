@@ -31,6 +31,7 @@ from zombiesai.store.episode_store import git_provenance
 FLAG_BAD_STEP = 1  # capture overrun, dropped frame, or a step spanning a cut: excluded from training
 FLAG_LOW_CONFIDENCE = 2  # pseudo-label below the keep threshold
 FLAG_CLIP_START = 4  # no usable history before this step, so a frame stack must clamp here
+FLAG_NOT_PLAYING = 8  # the player marked this stretch as menus/pause/loading (the mark key): not gameplay
 
 LABEL_SOURCES = ("input_log", "agent", "idm", "none")
 _FRAME_BYTES = int(np.prod(spec.PIXELS_SHAPE))
@@ -193,6 +194,13 @@ class Clip:
             return np.zeros(self.n_steps, dtype=np.uint8)
         return self.labels["flags"]
 
+    @property
+    def segment_start(self) -> np.ndarray:
+        """(T,) the step each step's history begins at: the latest FLAG_CLIP_START at or before it (0 when
+        the clip has none). Frame stacks and previous-action histories clamp here, not just at step 0."""
+        starts = np.where((self.flags & FLAG_CLIP_START) != 0, np.arange(self.n_steps), 0)
+        return np.maximum.accumulate(starts) if len(starts) else starts
+
     def extra(self, key: str) -> np.ndarray | None:
         """Optional per-step target (`mc_return`, `aux_dpoints`, `aux_damage`); None when this clip has none.
 
@@ -214,11 +222,39 @@ class Clip:
         return crops[: (len(crops) // per) * per].reshape(-1, *shape)[: self.n_steps]
 
     def usable(self, min_confidence: float = 0.0) -> np.ndarray:
-        """Boolean mask of steps fit to train on: not flagged bad, and confidently enough labelled."""
-        ok = (self.flags & FLAG_BAD_STEP) == 0
+        """Boolean mask of steps fit to train on: not flagged bad, not marked as out of play, and confidently
+        enough labelled."""
+        ok = (self.flags & (FLAG_BAD_STEP | FLAG_NOT_PLAYING)) == 0
         if self.labelled:
             ok &= self.confidence >= min_confidence
         return ok
+
+
+def with_play_marks(flags: np.ndarray, not_playing: np.ndarray) -> np.ndarray:
+    """Rewrite a clip's play marking from a (T,) not-playing mask, leaving every other flag alone.
+
+    Marked steps get FLAG_NOT_PLAYING, and the first step of play after a marked stretch gets
+    FLAG_CLIP_START: the frames behind it are a pause menu or a loading screen, and a frame stack that
+    reached back into them would teach the policy that a menu is what comes before a fight. Existing marks
+    are cleared first -- the marking is derived from the raw log, so re-deriving it (a different mark key)
+    must be able to remove marks as well as add them. Only the FLAG_CLIP_START this marking put there (on a
+    step just after a marked one) is cleared: the recorder also sets it on the first good frame after a
+    capture outage, and that one is not the mark key's to take away. Step 0 keeps its own.
+    """
+    flags = np.asarray(flags, dtype=np.uint8)
+    was_marked = (flags & FLAG_NOT_PLAYING) != 0
+    ours = np.zeros(len(flags), dtype=bool)
+    ours[1:] = was_marked[:-1] & ~was_marked[1:]
+    flags = flags & np.uint8(~FLAG_NOT_PLAYING & 0xFF)
+    flags = np.where(ours, flags & np.uint8(~FLAG_CLIP_START & 0xFF), flags).astype(np.uint8)
+    marked = np.asarray(not_playing, dtype=bool)[: len(flags)]
+    resumed = np.zeros_like(marked)
+    resumed[1:] = marked[:-1] & ~marked[1:]
+    flags = flags | np.where(marked, FLAG_NOT_PLAYING, 0).astype(np.uint8)
+    flags = flags | np.where(resumed, FLAG_CLIP_START, 0).astype(np.uint8)
+    if len(flags):
+        flags[0] |= FLAG_CLIP_START
+    return flags
 
 
 def load_clip(path: str | Path, *, require_labels: bool = False) -> Clip:
