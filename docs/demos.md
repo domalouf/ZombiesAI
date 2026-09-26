@@ -180,8 +180,8 @@ the interaction line under the crosshair ("Press & hold F to buy ... [Cost: 1200
 sees that a prompt is up but not what it offers or costs -- and `powerup`, the countdowns timed power-ups
 put below it ("Double Points: 23", "Insta-Kill: 7"). They are cut from the same grab as each frame,
 area-downsampled by half -- digits stay about 12 px tall at 1440p -- and cost ~7.4 GB per 20 minutes. That
-is what lets M4's parser put points, ammo, round, what is on offer and which power-ups are running on a
-recording after the fact. Recordings made before the prompt and power-up boxes existed have only the two
+is what lets M4's parser (docs/hud.md; points, round, grenades and ammo so far) put points, ammo, round,
+what is on offer and which power-ups are running on a recording after the fact. Recordings made before the prompt and power-up boxes existed have only the two
 corners.
 
 That size is only while recording. When the session ends, `record_demo.py` (and `play_real.py`) pack each
@@ -253,9 +253,10 @@ A few failures and what they usually mean:
 
 ## What is not built yet
 
-- **No HUD parse.** Real clips carry no `hud` vector yet, so BC here is pixels-only and there is no reward on
-  real footage. Screen recordings keep full-resolution HUD crops for M4's parser to read later; ingested
-  video and recordings made before the crops existed have none.
+- **The HUD parse is not in the training data yet.** `scripts/parse_hud.py` reads points, round, grenades
+  and ammo from a clip's HUD crops (docs/hud.md) into `hud.npz`, but BC does not consume it and there is
+  no reward on real footage yet. Ingested video and recordings made before the crops existed have no
+  crops; `--lowres` reads only the round from their frames.
 - **Nothing here has been run against the game.** The Linux capture path is tested against a real X
   server and the dispatcher's output round-trips through the same decoder a recording uses, but an X
   server in CI is not World at War under Proton, and `win32_input.py` has never run on Windows at all.
