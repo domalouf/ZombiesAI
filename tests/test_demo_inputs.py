@@ -1,3 +1,6 @@
+import os
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -98,35 +101,121 @@ def turning_video(turns, lag=0, seed=1):
     return np.stack(video)
 
 
+def random_turns(seed, size=120, choices=(-6.0, -3.0, 3.0, 6.0)):
+    return np.random.default_rng(seed).choice(choices, size=size)
+
+
 def test_yaw_labels_are_checked_against_the_pixels():
-    rng = np.random.default_rng(2)
-    turns = rng.choice([-8.0, -3.0, 3.0, 8.0], size=60)
-    video = turning_video(turns)
-    report = inputs.yaw_flow_agreement(turns, video)
-    assert report["correlation"] > 0.9 and report["lag"] == 0
+    turns = random_turns(2)
+    report = inputs.yaw_flow_agreement(turns, turning_video(turns))
+    assert report["verdict"] == "ok" and report["reasons"] == []
+    assert report["rank_correlation"] > 0.9 and report["lag"] == 0
+    # The synthetic pan moves one pixel per "degree", which on a 128-px frame is a 96-degree lens.
+    assert report["px_per_deg"] == pytest.approx(1.0, abs=0.05)
+    assert report["fov_deg"] == pytest.approx(96.3, abs=2.0)
 
 
 def test_the_check_reports_the_delay_between_command_and_response():
     """The best-fitting lag is the closed-loop delay, read straight off the recording."""
-    rng = np.random.default_rng(3)
-    turns = rng.choice([-8.0, -3.0, 3.0, 8.0], size=60)
-    report = inputs.yaw_flow_agreement(turns, turning_video(turns, lag=2))
-    assert report["lag"] == 2 and report["correlation"] > 0.9
+    turns = random_turns(3)
+    video = turning_video(turns, lag=2)
+    report = inputs.yaw_flow_agreement(turns, video, expected_lag=2)
+    assert report["verdict"] == "ok" and report["lag"] == 2 and report["rank_correlation"] > 0.9
     assert report["by_lag"][0] < report["by_lag"][2]
+    # The same pixels, when the recording should have answered at once: that is a timing bug.
+    assert inputs.yaw_flow_agreement(turns, video)["verdict"] == "misaligned"
+
+
+@pytest.mark.parametrize("steps", [-3, -2, -1, 1, 2, 3])
+def test_labels_slipped_against_their_frames_are_called_misaligned(steps):
+    turns = random_turns(5)
+    video = turning_video(turns)
+    slipped = np.roll(turns, steps)
+    report = inputs.yaw_flow_agreement(slipped, video)
+    assert report["verdict"] == "misaligned" and report["lag"] == -steps
+    assert report["lag_confidence"] >= inputs.FLOW_CHECK.lag_confidence
+    # A slip moves the peak of the lag curve; it does not lower it -- which is why a correlation threshold
+    # alone could not tell a slipped log from a noisy one.
+    assert report["rank_correlation"] > 0.9
+
+
+@pytest.mark.parametrize("scale", [0.5, 2.0])
+def test_a_wrong_counts_per_degree_is_caught_by_the_implied_field_of_view(scale):
+    """Every turn scaled by the same factor ranks exactly as before, so only the pixels-per-degree see it."""
+    turns = random_turns(6)
+    video = turning_video(turns)
+    report = inputs.yaw_flow_agreement(turns * scale, video)
+    assert report["rank_correlation"] > 0.9 and report["lag"] == 0
+    assert report["verdict"] == "wrong_scale"
+    assert report["px_per_deg"] == pytest.approx(1.0 / scale, rel=0.1)
+    assert "counts_per_degree" in report["reasons"][0]
+
+
+def test_a_handful_of_wrong_matches_does_not_sink_a_good_recording():
+    """Real footage: fog, zombies and the gun make the SAD search lock onto nonsense on some steps. A rank
+    and a median shrug that off where Pearson on the raw shifts collapsed to 0.5 (demo_0000)."""
+    turns = random_turns(7, size=200)
+    video = turning_video(turns).copy()
+    rng = np.random.default_rng(8)
+    for step in rng.choice(len(turns), size=30, replace=False):  # 15% of steps: the next frame is noise
+        video[step + 1] = rng.integers(0, 255, size=video[step + 1].shape, dtype=np.uint8)
+    report = inputs.yaw_flow_agreement(turns, video)
+    assert report["verdict"] == "ok" and report["lag"] == 0
+    assert report["fov_deg"] == pytest.approx(96.3, abs=3.0)
 
 
 def test_labels_that_belong_to_another_recording_do_not_correlate():
-    rng = np.random.default_rng(4)
-    turns = rng.choice([-8.0, -3.0, 3.0, 8.0], size=60)
+    turns = random_turns(4)
     video = turning_video(turns)
-    unrelated = rng.permutation(turns)
-    assert inputs.yaw_flow_agreement(unrelated, video)["correlation"] < 0.5
+    unrelated = np.random.default_rng(4).permutation(turns)
+    report = inputs.yaw_flow_agreement(unrelated, video)
+    assert report["verdict"] == "no_signal" and report["rank_correlation"] < 0.5
+
+
+def test_a_flipped_yaw_sign_is_named_as_such():
+    turns = random_turns(9)
+    report = inputs.yaw_flow_agreement(-turns, turning_video(turns))
+    assert report["verdict"] == "no_signal" and "sign is flipped" in report["reasons"][0]
 
 
 def test_a_recording_with_no_turning_in_it_says_so_rather_than_inventing_a_number():
     still = np.zeros(40)
     report = inputs.yaw_flow_agreement(still, turning_video(still))
-    assert report["lag"] is None and np.isnan(report["correlation"])
+    assert report["verdict"] == "too_little_turning"
+    assert report["lag"] is None and np.isnan(report["rank_correlation"])
+
+
+def test_the_implied_field_of_view_inverts_the_pinhole_model():
+    for fov in (60.0, 80.0, 96.0):
+        assert inputs.implied_fov_deg(inputs._px_per_deg_at(fov)) == pytest.approx(fov)
+    assert np.isnan(inputs.implied_fov_deg(0.0))
+
+
+def real_demo():
+    """The first real recording, if this checkout has it (data/ is not in git): the numbers in `FlowCheck`
+    were chosen on it. Point ZOMBIESAI_REAL_DEMO at a clip to run against it from a worktree."""
+    path = Path(os.environ.get("ZOMBIESAI_REAL_DEMO", Path(__file__).parents[1] / "data" / "demos" / "demo_0000"))
+    if not (path / "clip.json").exists():
+        pytest.skip(f"no real recording at {path}")
+    from zombiesai.demos.clips import load_clip
+
+    clip = load_clip(path)
+    if not clip.labelled:
+        pytest.skip(f"{path} has no labels")
+    return clip
+
+
+def test_a_real_recording_passes_and_its_corruptions_do_not():
+    """Read-only: every corruption is made in memory."""
+    clip = real_demo()
+    yaw = np.asarray(clip.labels["yaw_deg"], dtype=np.float64)
+    report = inputs.yaw_flow_agreement(yaw, clip.frames)
+    assert report["verdict"] == "ok" and report["lag"] == 0
+    assert 75.0 < report["fov_deg"] < 100.0
+    for steps in (-2, 1, 3):
+        assert inputs.yaw_flow_agreement(np.roll(yaw, steps), clip.frames)["verdict"] == "misaligned"
+    for scale in (0.5, 2.0):
+        assert inputs.yaw_flow_agreement(yaw * scale, clip.frames)["verdict"] == "wrong_scale"
 
 
 def test_firing_is_checked_against_the_magazine():

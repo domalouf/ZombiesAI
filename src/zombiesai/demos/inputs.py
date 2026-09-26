@@ -274,29 +274,169 @@ def label_confidence(labels: Labels, config: InputConfig | None = None) -> np.nd
     return confidence.astype(np.float32)
 
 
+@dataclass(frozen=True)
+class FlowCheck:
+    """Pass/fail criteria for `yaw_flow_agreement`, in one place, each number with the reason it is that number.
+
+    The check exists to catch two bugs, and each leaves its own fingerprint in the pixels:
+
+    * **The log and the frames are out of step in time.** Then yaw agrees with image motion best at some
+      *other* lag than the recording's closed-loop delay. A timing bug moves the peak of the lag curve; it
+      does not flatten it (on demo_0000, rolling the labels by k steps moves the peak by exactly k and leaves
+      its height alone). So timing is judged on *where* the peak is, never on how tall it is.
+    * **`counts_per_degree` is wrong.** Then yaw and image motion still agree in rank -- a bigger turn still
+      moves the image more -- so no correlation can see it. What changes is the *scale*: pixels per labelled
+      degree, which the game's field of view fixes. So scale is judged on the implied horizontal FOV.
+
+    Plain Pearson correlation, the first version of this check, failed both ways on real footage: a handful of
+    SAD matches locked onto fog, a zombie or the static gun dragged it to 0.52 on a perfectly good recording,
+    and it was blind to a sensitivity error anyway. Everything here is a rank, a median or a bootstrap instead.
+    """
+
+    # Steps whose labelled yaw is below this are not sampled: an integer-pixel search cannot see a turn that
+    # moves the 128-px frame by under a pixel, so they carry only noise.
+    min_turn_deg: float = 0.5
+    # Fewer sampled turning steps than this and the verdict is "too_little_turning", not a guess.
+    min_samples: int = 8
+    # Spearman rank correlation of yaw against image motion at the best lag must reach this. demo_0000 (real,
+    # 10 minutes) scores 0.70-0.74 depending on the sample; sim clips 0.43-0.85; labels shuffled against their
+    # frames stay within +-0.15 on a few hundred samples but reach 0.34 on the ~40 turning steps of a short
+    # sim clip, hence the second condition.
+    min_rank_correlation: float = 0.3
+    # ...and be this many standard errors (rho * sqrt(n - 1)) clear of zero, so a short clip's lucky 0.34 at
+    # one of seven lags is not read as signal (that one is 2.3). Real footage clears it six times over.
+    min_z: float = 2.5
+    # The best lag is only called wrong when it beats the expected lag with this bootstrap confidence (the
+    # share of resamples of the sampled steps in which it still does). A fixed margin will not do: on
+    # demo_0000 the gap between the true peak and its neighbour is 0.09-0.20 depending on which 400 steps are
+    # drawn, and a shifted log shows the same gap the other way round. The paired bootstrap knows how noisy
+    # this particular sample is. A delay that straddles a decision boundary splits the response between two
+    # lags, the resamples disagree about which is higher, and nothing is flagged -- which is right.
+    lag_confidence: float = 0.95
+    bootstrap: int = 200
+    # The px/deg fit uses turns in this range. Below 2 degrees the shift is a pixel or two and the ratio is
+    # all rounding. Above 8 the shift nears the +-24 px search edge if the FOV is narrow (8 degrees at 2.4
+    # px/deg, a 2x sensitivity error on real footage, is 19 px), and big flicks smear.
+    slope_turn_deg: tuple[float, float] = (2.0, 8.0)
+    # Horizontal FOV implied by the measured px/deg, on the 128-px observation. WaW's cg_fov 65-80 is 81-96
+    # degrees at 16:9 (Hor+); the sim renders 80 and the estimator reads 77-82 there; demo_0000 reads 83-86.
+    # A 2x error in counts_per_degree moves an 80-96 degree FOV to 118-132 (labels too big) or 45-59 (too
+    # small); the band sits between. A 1.5x error mostly passes -- it is the gross errors this is for. ADS does
+    # not bias it: WaW scales sensitivity with zoom (demo_0000: 1.17 px/deg aiming down sights, 1.19 hip).
+    fov_deg: tuple[float, float] = (62.0, 110.0)
+    # Only for the hint in the "wrong_scale" reason: the FOV to assume when suggesting a corrected
+    # counts_per_degree. demo_0000 measures 85; the sim is 80; WaW's default is 81.
+    typical_fov_deg: float = 85.0
+
+
+FLOW_CHECK = FlowCheck()
+
+
+def implied_fov_deg(px_per_deg: float, width: int = spec.PIXELS_SHAPE[1]) -> float:
+    """Horizontal field of view of a pinhole camera whose centre pixels move `px_per_deg` per degree of yaw."""
+    if not px_per_deg > 0:
+        return float("nan")
+    focal = px_per_deg * 180.0 / np.pi  # pixels per radian at the centre of the frame
+    return float(np.degrees(2.0 * np.arctan(width / 2.0 / focal)))
+
+
+def _px_per_deg_at(fov_deg: float, width: int = spec.PIXELS_SHAPE[1]) -> float:
+    """The inverse of `implied_fov_deg`."""
+    return float(width / 2.0 / np.tan(np.radians(fov_deg) / 2.0) * np.pi / 180.0)
+
+
+def _ranks(x: np.ndarray) -> np.ndarray:
+    from scipy.stats import rankdata
+
+    return rankdata(x)
+
+
+def _pearson(a: np.ndarray, b: np.ndarray) -> float:
+    if len(a) < 3 or np.ptp(a) == 0 or np.ptp(b) == 0:
+        return float("nan")
+    return float(np.corrcoef(a, b)[0, 1])
+
+
+def _px_per_deg(turns: np.ndarray, moved: np.ndarray) -> float:
+    """Robust slope of image motion against yaw, through the origin; NaN if there is nothing to fit.
+
+    Zero shifts are dropped first. In the fitting range every plausible FOV moves the image at least a pixel,
+    so a zero is the SAD search locking onto something that does not move with the view -- the gun, the HUD,
+    a textureless wall in the sim -- not a measurement; a short sim clip can be mostly those. The median of
+    per-step ratios then shrugs off the wrong locks that remain, but on the sim's few discrete turns it is
+    stuck on integer-pixel ratios (2 degrees reads 1.0 or 1.5 px/deg, never 1.33). So it only picks the
+    inliers -- steps within 1.5 px or 30% of what it predicts -- and a least-squares fit through the origin
+    over those gives the number, which averages the rounding away.
+    """
+    keep = moved != 0
+    turns, moved = turns[keep], moved[keep]
+    if len(turns) < 3:
+        return float("nan")
+    rough = float(np.median(moved / turns))
+    if not rough > 0:
+        return rough
+    inlier = np.abs(moved - rough * turns) <= np.maximum(1.5, 0.3 * rough * np.abs(turns))
+    if inlier.sum() < 3:
+        return rough
+    t, m = turns[inlier], moved[inlier]
+    return float((t * m).sum() / (t * t).sum())
+
+
 def yaw_flow_agreement(
-    yaw_deg: np.ndarray, frames: np.ndarray, sample: int = 250, lags=(0, 1, 2, 3), seed: int = 0
+    yaw_deg: np.ndarray,
+    frames: np.ndarray,
+    sample: int = 400,
+    lags=(-3, -2, -1, 0, 1, 2, 3),
+    expected_lag: int = 0,
+    seed: int = 0,
+    check: FlowCheck = FLOW_CHECK,
 ) -> dict:
-    """Cross-check look labels against the pixels: a turn to the right must drag the image left.
+    """Cross-check look labels against the pixels: a turn to the right must drag the image left, by an amount
+    the game's field of view fixes, at the moment the recording's closed-loop delay says.
 
-    The action recorded at step k is what the player *commanded* while looking at frame k, and the game
-    answers a decision or two later, so the check sweeps a few lags and reports the one that fits best.
-    That best lag is not just bookkeeping -- it is the closed-loop delay, measured from the recording
-    itself, and it should match what spike S3 measured and what the sim's latency knob is set to.
+    Samples up to `sample` turning steps, measures each one's horizontal image shift with `estimate_shift` at
+    a sweep of lags, and reports:
 
-    A correlation below about 0.9 at every lag means the input log and the capture are misaligned in time,
-    or `counts_per_degree` is wrong. Either way it is a bug no amount of training will absorb.
+    * **lag** -- where yaw and image motion agree best, by Spearman rank correlation (all lags in `by_lag`).
+      The action recorded at step k is what the player commanded while looking at frame k, so on a correctly
+      paired recording the response shows up between frames k+lag and k+lag+1, where lag is the closed-loop
+      delay in decisions: 0 for the recorder on the real game (demo_0000) and for a sim without input
+      latency. The sweep includes negative lags on purpose -- a peak there means the image moved *before*
+      the hand did, which only a misaligned log produces. `lag_confidence` is the bootstrap share of
+      resamples in which the best lag beats `expected_lag`.
+    * **px_per_deg** and the **fov_deg** it implies -- a robust slope of image shift against labelled yaw at
+      the best lag. A wrong `counts_per_degree` leaves every correlation untouched and shows up only here.
+    * **verdict** -- "ok", or the first thing that is wrong: "too_little_turning"; "no_signal" (yaw does not
+      track the pixels at any lag: labels from another recording, a flipped sign, a broken capture);
+      "misaligned" (the best lag is confidently not `expected_lag`); or "wrong_scale" (an implied FOV no
+      game would have). `reasons` says why in words. The criteria are `check`'s, documented on `FlowCheck`.
+
+    Cost: one SAD search per sampled step per lag, under a second for 400 steps.
     """
     from zombiesai.demos.frames import estimate_shift
 
     n = min(len(yaw_deg), len(frames))
-    lags = tuple(int(lag) for lag in lags)
-    turned = np.flatnonzero(np.abs(np.asarray(yaw_deg[:n])) > 0.5)
-    turned = turned[turned + max(lags) + 1 < n]
-    if len(turned) < 8:
-        return {"n": int(len(turned)), "lag": None, "correlation": float("nan"), "by_lag": {}}
+    yaw = np.asarray(yaw_deg[:n], dtype=np.float64)
+    expected_lag = int(expected_lag)
+    lags = tuple(sorted({int(lag) for lag in lags} | {expected_lag}))
+    turned = np.flatnonzero(np.abs(yaw) > check.min_turn_deg)
+    turned = turned[(turned + min(lags) >= 0) & (turned + max(lags) + 1 < n)]
+    report = {
+        "n": int(len(turned)),
+        "verdict": "too_little_turning",
+        "reasons": [f"only {len(turned)} turning steps; need {check.min_samples}"],
+        "lag": None,
+        "expected_lag": expected_lag,
+        "rank_correlation": float("nan"),
+        "by_lag": {},
+        "px_per_deg": float("nan"),
+        "fov_deg": float("nan"),
+    }
+    if len(turned) < check.min_samples:
+        return report
     rng = np.random.default_rng(seed)
     idx = np.sort(rng.choice(turned, size=min(sample, len(turned)), replace=False))
+    report["n"] = int(len(idx))
 
     shifts: dict[int, float] = {}
     for i in idx:
@@ -304,24 +444,91 @@ def yaw_flow_agreement(
             j = int(i) + lag
             if j not in shifts:
                 shifts[j] = float(estimate_shift(frames[j], frames[j + 1])[0])
-    turns = np.asarray(yaw_deg, dtype=np.float64)[idx]
-    by_lag: dict[int, float] = {}
-    for lag in lags:
-        moved = np.array([shifts[int(i) + lag] for i in idx])
-        if moved.std() < 1e-9 or turns.std() < 1e-9:
-            continue
-        # Negated: positive yaw (turning right) drags the scene to negative x.
-        by_lag[lag] = float(-np.corrcoef(turns, moved)[0, 1])
+    turns = yaw[idx]
+    # Negated: positive yaw (turning right) drags the scene to negative x.
+    moved = {lag: -np.array([shifts[int(i) + lag] for i in idx]) for lag in lags}
+    turn_ranks = _ranks(turns)
+    moved_ranks = {lag: _ranks(m) for lag, m in moved.items()}
+    by_lag = {lag: _pearson(turn_ranks, r) for lag, r in moved_ranks.items()}
+    by_lag = {lag: rho for lag, rho in by_lag.items() if not np.isnan(rho)}
+    report["by_lag"] = by_lag
     if not by_lag:
-        return {"n": int(len(idx)), "lag": None, "correlation": float("nan"), "by_lag": {}}
+        report.update(verdict="no_signal", reasons=["the image did not move at any lag"])
+        return report
     best = max(by_lag, key=lambda lag: by_lag[lag])
-    return {
-        "n": int(len(idx)),
-        "lag": int(best),
-        "correlation": by_lag[best],
-        "by_lag": by_lag,
-        "mean_abs_shift_px": float(np.mean([abs(shifts[int(i) + best]) for i in idx])),
-    }
+    rho = by_lag[best]
+    expected = by_lag.get(expected_lag, float("-inf"))
+
+    # Paired bootstrap over the sampled steps: in what share of resamples does the best lag still beat the
+    # expected one? Ranks are kept from the full sample; for a confidence that only has to separate 0.95
+    # from a coin flip, re-ranking every resample is not worth the time.
+    confidence = 0.0
+    if best != expected_lag and expected_lag in by_lag:
+        boot = np.random.default_rng(seed + 1)
+        wins = 0
+        for _ in range(check.bootstrap):
+            pick = boot.integers(0, len(idx), len(idx))
+            t = turn_ranks[pick]
+            wins += _pearson(t, moved_ranks[best][pick]) > _pearson(t, moved_ranks[expected_lag][pick])
+        confidence = wins / check.bootstrap
+
+    lo, hi = check.slope_turn_deg
+    fit = (np.abs(turns) >= lo) & (np.abs(turns) <= hi)
+    px_per_deg = _px_per_deg(turns[fit], moved[best][fit])
+    width = int(np.shape(frames[0])[1])
+    fov = implied_fov_deg(px_per_deg, width)
+    report.update(
+        lag=int(best),
+        rank_correlation=rho,
+        lag_confidence=confidence,
+        px_per_deg=px_per_deg,
+        fov_deg=fov,
+        sign_agreement=float(np.mean(np.sign(turns) == np.sign(moved[best]))),
+        mean_abs_shift_px=float(np.mean(np.abs(moved[best]))),
+    )
+
+    z = rho * np.sqrt(len(idx) - 1)
+    if rho < check.min_rank_correlation or z < check.min_z:
+        worst = min(by_lag, key=lambda lag: by_lag[lag])
+        mirrored = by_lag[worst] < -check.min_rank_correlation and -by_lag[worst] > rho
+        verdict, reason = "no_signal", (
+            f"yaw tracks image motion at rank correlation {rho:.2f} at best ({z:.1f} standard errors); "
+            f"need {check.min_rank_correlation} and {check.min_z}"
+            + (f" -- but it tracks it backwards ({by_lag[worst]:.2f}): yaw's sign is flipped" if mirrored else "")
+        )
+    elif best != expected_lag and confidence >= check.lag_confidence:
+        off = abs(best - expected_lag)
+        steps = f"{off} decision{'s' if off > 1 else ''}"
+        verdict, reason = "misaligned", (
+            f"yaw fits the pixels best at lag {best} ({rho:.2f}), not the expected {expected_lag} "
+            f"({expected:.2f}), in {confidence:.0%} of resamples: "
+            + (
+                f"the image moves before the labelled turn, so each label is stamped {steps} late"
+                if best < expected_lag
+                else f"each label is stamped {steps} early, or the closed-loop delay really is {best} "
+                "decisions (compare spike S3)"
+            )
+        )
+    elif np.isnan(px_per_deg):
+        # Fewer than 3 moving samples in the fitting range (all flicks, or all nudges): the timing half of the
+        # check still stands, the scale half has nothing to say.
+        verdict, reason = "ok", f"scale not checked: too few sampled {lo:.0f}-{hi:.0f} degree turns moved the view"
+    elif px_per_deg <= 0:
+        verdict, reason = "wrong_scale", (
+            f"the image moves the wrong way or not at all on {lo:.0f}-{hi:.0f} degree turns "
+            f"({px_per_deg:.2f} px per labelled degree)"
+        )
+    elif not check.fov_deg[0] <= fov <= check.fov_deg[1]:
+        verdict, reason = "wrong_scale", (
+            f"{px_per_deg:.2f} px per labelled degree implies a {fov:.0f} degree horizontal FOV, outside "
+            f"{check.fov_deg[0]:.0f}-{check.fov_deg[1]:.0f}; at a typical {check.typical_fov_deg:.0f} degrees, "
+            f"counts_per_degree should be about {_px_per_deg_at(check.typical_fov_deg, width) / px_per_deg:.2g}x "
+            "what it is"
+        )
+    else:
+        verdict, reason = "ok", None
+    report.update(verdict=verdict, reasons=[reason] if reason else [])
+    return report
 
 
 def fire_ammo_agreement(fire: np.ndarray, mag_ammo: np.ndarray) -> dict:

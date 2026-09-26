@@ -202,7 +202,10 @@ class SimSource:
         return events
 
     def describe(self) -> dict:
-        return {"kind": "sim", "seed": self.seed, "agent": type(self.agent).__name__}
+        # The sim's input latency is drawn per episode; the yaw-versus-flow check needs it to know which lag a
+        # correctly paired recording should peak at.
+        return {"kind": "sim", "seed": self.seed, "agent": type(self.agent).__name__,
+                "latency_steps": int(self.env.timing.latency_steps)}
 
     def close(self) -> None:
         self.env.close()

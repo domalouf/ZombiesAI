@@ -46,12 +46,17 @@ requantize("data/demos/demo_0000", InputConfig(counts_per_degree=6.9))
 ```
 
 `record_demo.py` checks the recording the moment it finishes, while the game is still open: overrun rate,
-label confidence, what your hands did, and — the one that matters — whether your yaw labels correlate with
-the direction the image actually moved, at which lag. The lag is the closed-loop delay measured from your own
-recording, and it should match spike S3. Below about 0.9 correlation at every lag, the input log and the
-capture are out of step in time: stop and fix it, because no amount of training absorbs a timing bug. (On
-`--source sim` the number runs lower — the raycast view is flat-shaded, so there is less for the optical-flow
-estimate to lock onto.)
+label confidence, what your hands did, and — the one that matters — whether your yaw labels track the
+direction the image actually moved (`yaw_flow_agreement`, criteria in `FlowCheck`). It reports three
+things. The **lag** at which yaw and image motion agree best (Spearman rank correlation over lags −3…+3) is
+the closed-loop delay measured from your own recording: 0 on the real game (demo_0000 peaks sharply there),
+the sim's own input latency on `--source sim`. A peak confidently elsewhere means the input log and the
+capture are out of step in time — stop and fix it, because no amount of training absorbs a timing bug. The
+**px per degree** of image shift, as a horizontal FOV, catches a wrong `--counts-per-degree`, which no
+correlation can see: WaW reads 81–96° at 16:9, the sim 80°, and a 2× error lands outside 62–110°. That one
+is fixed with `requantize`, not by re-recording. The rank correlation itself only has to clear 0.3: on real
+footage the optical-flow estimate locks onto fog, zombies and the gun often enough that 0.7 is a good
+recording (demo_0000 scores 0.74, where the old Pearson threshold of 0.9 read 0.52 and cried wolf).
 
 **Play deliberately varied games.** Camping, trains, bad positioning, early deaths, running out of ammo. A
 policy cloned from expert-only play has no idea what to do the moment it drifts off-distribution, and there
@@ -161,7 +166,8 @@ A few failures and what they usually mean:
 | every head at its majority baseline | not enough data, or `min_confidence` threw most of it away |
 | yaw balanced accuracy near chance, raw accuracy high | it predicts "no turn" always; check the IDM's own yaw accuracy first |
 | copy rate far above the human's | action inertia — train without `--prev-actions` |
-| yaw/flow correlation below 0.9 at every lag | log and frames misaligned in time; fix before anything else |
+| quality check says `misaligned` (yaw/flow peak at the wrong lag) | log and frames out of step in time; fix before anything else |
+| quality check says `wrong_scale` (implied FOV outside 62–110°) | wrong `counts_per_degree`; `requantize` with the suggested value |
 
 ## What is not built yet
 
