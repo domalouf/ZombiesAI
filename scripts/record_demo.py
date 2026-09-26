@@ -69,6 +69,8 @@ def main() -> None:
     parser.add_argument("--window", default="World at War",
                         help="Linux: the game window to capture, by title or 0x id (it runs under XWayland)")
     parser.add_argument("--monitor", type=int, default=1)
+    parser.add_argument("--no-hud", action="store_true",
+                        help="don't save full-resolution HUD crops (they cost ~2.6 GB per 20 minutes at 1440p)")
     parser.add_argument("--notes", default="", help="what you were trying to do -- camping, training, dying early")
     # Sim source only.
     parser.add_argument("--episodes", type=int, default=1, help="how many sim games to record")
@@ -93,9 +95,12 @@ def main() -> None:
         window = args.window
         if isinstance(window, str) and window.startswith("0x"):
             window = int(window, 16)
+        from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
+
         capture = ScreenCapture(
             tuple(args.region) if args.region else None, monitor=args.monitor,
             window=window if sys.platform.startswith("linux") else None,
+            hud_regions=None if args.no_hud else HUD_REGIONS, hud_scale=HUD_SCALE,
         )
         # Raw device counts either way: Raw Input on Windows, the event devices on Linux. Cursor deltas
         # would be useless in both -- the game captures and re-centres the pointer.
@@ -123,6 +128,9 @@ def main() -> None:
         except KeyboardInterrupt:
             raise SystemExit("\nstopped") from None
         print(f"wrote {path}")
+        clip = load_clip(path)
+        for name in clip.hud_regions:
+            print(f"  HUD crops {name}: {clip.hud(name).shape[1:]} per step")
         check(path)
         return
 

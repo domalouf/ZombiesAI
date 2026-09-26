@@ -97,7 +97,16 @@ data/clips/<name>/
   clip.json    where the pixels came from, how they were cropped, spec stamps, label source
   labels.npz   actions (T, 8), per-step confidence, raw pre-quantization yaw/pitch degrees
   inputs.jsonl raw input log (Route A only)
+  hud_<name>.u8  full-resolution HUD crops, (T, h, w, 3), same step index as frames.u8 (Route A only)
 ```
+
+The policy's 128×72 frame turns the points and ammo counters into a smear, so screen recordings also keep
+the two HUD corners at full resolution (`demos/hud_crops.py`): `points_ammo` in the bottom right (points
+and their "+N" popups, weapon, grenades, magazine and reserve ammo) and `round` in the bottom left. They are
+cut from the same grab as each frame, area-downsampled by half -- digits stay about 12 px tall at 1440p --
+and cost ~2.6 GB per 20 minutes. That is what lets M4's parser put points, ammo and round on a recording
+after the fact. `--no-hud` turns them off. The boxes are screen fractions placed on a 16:9 capture; another
+aspect ratio needs new ones.
 
 Frames and labels are versioned separately on purpose. A spec change that touches the HUD layout must not
 invalidate a weekend of ingested video; one that moves the yaw bins must invalidate its labels. Recorded
@@ -156,8 +165,9 @@ A few failures and what they usually mean:
 
 ## What is not built yet
 
-- **No HUD parse.** Real clips carry no `hud` vector, so BC here is pixels-only and there is no reward on
-  real footage. That arrives with M4's parser; the clip format leaves room for it.
+- **No HUD parse.** Real clips carry no `hud` vector yet, so BC here is pixels-only and there is no reward on
+  real footage. Screen recordings keep full-resolution HUD crops for M4's parser to read later; ingested
+  video and recordings made before the crops existed have none.
 - **Nothing here has been run against the game.** The Linux capture path is tested against a real X
   server and the dispatcher's output round-trips through the same decoder a recording uses, but an X
   server in CI is not World at War under Proton, and `win32_input.py` has never run on Windows at all.

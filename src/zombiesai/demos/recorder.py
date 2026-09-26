@@ -81,6 +81,8 @@ def record(
     t0 = time.monotonic()
     try:
         pending = frame_source.read()
+        # A source that cuts full-resolution HUD crops from each grab exposes the latest set as `last_hud`.
+        pending_hud = getattr(frame_source, "last_hud", None)
         for k in range(1, config.max_steps + 1):
             if config.max_seconds and k * dt > config.max_seconds:
                 break
@@ -104,8 +106,9 @@ def record(
                 yaw_deg=float(labels.yaw_deg[0]),
                 pitch_deg=float(labels.pitch_deg[0]),
                 flags=FLAG_BAD_STEP if late else 0,
+                hud=pending_hud,
             )
-            pending = frame
+            pending, pending_hud = frame, getattr(frame_source, "last_hud", None)
             if progress_every and k % progress_every == 0:
                 print(f"  {k} decisions ({k * dt:.0f}s), {overruns} overruns", flush=True)
             if stop is not None and stop():

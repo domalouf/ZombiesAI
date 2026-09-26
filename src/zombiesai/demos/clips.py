@@ -11,6 +11,8 @@ labels are worth -- instead of being forced into fields an episode needs and a v
       frames.u8    (T, 72, 128, 3) uint8, decision rate, area-averaged
       clip.json    provenance: source video, crop box, fit, spec stamps, label source
       labels.npz   actions (T, 8) uint8 + per-step confidence and raw pre-quantization yaw/pitch degrees
+      hud_<name>.u8  optional (T, h, w, 3) uint8 full-resolution HUD crops, one file per region, same step
+                     index as frames.u8; shapes and boxes in clip.json["hud"] (see demos/hud_crops.py)
 
 Frames and labels are versioned separately on purpose: a spec change that touches the HUD layout must not
 invalidate a weekend of ingested video, but one that moves the yaw bins must invalidate its labels.
@@ -50,6 +52,7 @@ class ClipWriter:
         self.label_source = label_source
         self.n_steps = 0
         self._frames = open(self.path / "frames.u8", "ab")
+        self._hud: dict[str, object] | None = None  # region name -> open file, fixed by the first step
         self._labels: dict[str, list] = {}
         self._manifest = {
             "spec_version": spec.SPEC_VERSION,
@@ -78,10 +81,12 @@ class ClipWriter:
         yaw_deg: float = 0.0,
         pitch_deg: float = 0.0,
         flags: int = 0,
+        hud: dict[str, np.ndarray] | None = None,
     ) -> None:
         frame = np.ascontiguousarray(frame, dtype=np.uint8)
         if frame.shape != spec.PIXELS_SHAPE:
             raise ValueError(f"frame shaped {frame.shape}, expected {spec.PIXELS_SHAPE}")
+        hud_rows = self._check_hud(hud)
         if self.label_source == "none":
             if action is not None:
                 raise ValueError("this clip was opened with label_source='none' but was given an action")
@@ -90,6 +95,8 @@ class ClipWriter:
             # would shift every later label by one, which nothing downstream could detect.
             raise ValueError(f"this clip's labels come from {self.label_source!r}; every step needs an action")
         self._frames.write(frame.tobytes())
+        for name, crop in hud_rows.items():
+            self._hud[name].write(crop.tobytes())
         if action is not None:
             row = {
                 "action": spec.validate_action(action).astype(np.uint8),
@@ -103,8 +110,47 @@ class ClipWriter:
                 self._labels.setdefault(key, []).append(value)
         self.n_steps += 1
 
+    def _check_hud(self, hud: dict[str, np.ndarray] | None) -> dict[str, np.ndarray]:
+        """HUD crops follow the same rule as actions: once a clip has them, every step must, or the crops
+        would drift out of step with the frames. Region names and shapes are fixed by the first step."""
+        if self._hud is None:
+            if not hud:
+                if self.n_steps == 0:
+                    self._hud = {}
+                return {}
+            if self.n_steps:
+                raise ValueError("HUD crops started mid-clip; they must arrive from the first step")
+            shapes = {}
+            for name, crop in hud.items():
+                self._hud_file(name)
+                shapes[name] = list(np.shape(crop))
+            self._manifest["hud"] = dict(self._manifest.get("hud", {}), shapes=shapes)
+            self._write_manifest()
+        if not self._hud:
+            if hud:
+                raise ValueError("this clip started without HUD crops; they cannot start mid-clip")
+            return {}
+        if not hud or set(hud) != set(self._hud):
+            raise ValueError(f"every step needs HUD crops for {sorted(self._hud)}, got {sorted(hud or {})}")
+        rows = {}
+        for name, crop in hud.items():
+            crop = np.ascontiguousarray(crop, dtype=np.uint8)
+            want = tuple(self._manifest["hud"]["shapes"][name])
+            if crop.shape != want:
+                raise ValueError(f"HUD crop {name!r} shaped {crop.shape}, expected {want}")
+            rows[name] = crop
+        return rows
+
+    def _hud_file(self, name: str):
+        if self._hud is None:
+            self._hud = {}
+        self._hud[name] = open(self.path / f"hud_{name}.u8", "ab")
+        return self._hud[name]
+
     def close(self, summary: dict | None = None) -> Path:
         self._frames.close()
+        for f in (self._hud or {}).values():
+            f.close()
         if self._labels:
             np.savez(self.path / "labels.npz", **{k: np.stack(v) for k, v in self._labels.items()})
         self._manifest.update(status="closed", n_steps=self.n_steps, summary=summary or {})
@@ -154,6 +200,19 @@ class Clip:
         have all three. The trainers ask rather than assume, and train the heads the data can supply."""
         return None if self.labels is None else self.labels.get(key)
 
+    @property
+    def hud_regions(self) -> list[str]:
+        return sorted(self.manifest.get("hud", {}).get("shapes", {}))
+
+    def hud(self, name: str) -> np.ndarray | None:
+        """Full-resolution HUD crops for one region, (T, h, w, 3) memmapped; None if this clip has none."""
+        shape = self.manifest.get("hud", {}).get("shapes", {}).get(name)
+        if shape is None:
+            return None
+        crops = np.memmap(self.path / f"hud_{name}.u8", dtype=np.uint8, mode="r")
+        per = int(np.prod(shape))
+        return crops[: (len(crops) // per) * per].reshape(-1, *shape)[: self.n_steps]
+
     def usable(self, min_confidence: float = 0.0) -> np.ndarray:
         """Boolean mask of steps fit to train on: not flagged bad, and confidently enough labelled."""
         ok = (self.flags & FLAG_BAD_STEP) == 0
@@ -184,6 +243,12 @@ def load_clip(path: str | Path, *, require_labels: bool = False) -> Clip:
             frames, labels = frames[:n], {k: v[:n] for k, v in labels.items()}
     elif require_labels:
         raise FileNotFoundError(f"{path} has no labels.npz; label it with the IDM or record it with input logging")
+    for name, shape in manifest.get("hud", {}).get("shapes", {}).items():
+        # A crash between the frame write and a HUD write leaves that region one step short.
+        n = (path / f"hud_{name}.u8").stat().st_size // int(np.prod(shape))
+        if n < len(frames):
+            frames = frames[:n]
+            labels = None if labels is None else {k: v[:n] for k, v in labels.items()}
     return Clip(path, manifest, frames, labels)
 
 

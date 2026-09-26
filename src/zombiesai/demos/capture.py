@@ -36,9 +36,14 @@ class ScreenCapture:
         monitor: int = 1,
         window: int | str | None = None,
         display: str | None = None,
+        hud_regions: dict | None = None,
+        hud_scale: float = 1.0,
     ):
         self.region, self.fit, self.monitor = region, fit, monitor
         self.window, self.display = window, display
+        # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
+        self.hud_regions, self.hud_scale = hud_regions, hud_scale
+        self.last_hud: dict[str, np.ndarray] | None = None
         self._box: tuple[int, int, int, int] | None = None
         self._last: np.ndarray | None = None
         self.backend = backend if backend != "auto" else self._pick()
@@ -106,10 +111,16 @@ class ScreenCapture:
             # Detected once, on the first frame, and then frozen: a crop that drifts mid-recording would
             # change what the pixels mean halfway through the clip.
             self._box = fr.crop_box(*frame.shape[:2], fr.detect_bars(frame), self.fit)
+        if self.hud_regions:
+            from zombiesai.demos.hud_crops import crop_regions
+
+            self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale)
         return fr.to_policy_frame(frame, self._box, self.fit)
 
     def describe(self) -> dict:
         out = {"kind": "screen", "backend": self.backend, "region": self.region, "fit": self.fit, "box": self._box}
+        if self.hud_regions:
+            out["hud"] = {"regions": {k: list(v) for k, v in self.hud_regions.items()}, "scale": self.hud_scale}
         if self.backend == "x11":
             out["source"] = self._grabber.describe()
         return out

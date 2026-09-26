@@ -1,0 +1,57 @@
+"""Full-resolution HUD crops, saved beside the policy frames so a recording can be HUD-parsed later.
+
+The policy sees 128x72, where the points and ammo counters are a smear of a few pixels. The HUD parser (M4)
+reads them from the full-resolution screen instead -- and it can only do that for a recording if the
+recorder kept those pixels. These crops are what it keeps.
+
+Boxes are fractions of the captured frame, so a resolution change is a rescale rather than a redo (the same
+rule the plan sets for the parser's own calibration). They were placed on a 2560x1440 capture of Nacht with
+generous margins: the "+10" popups float up and left of the points, and the round counter grows from a
+single tally mark into wide numerals by the later rounds. WaW anchors its HUD to the screen corners and
+scales it with height, so the fractions hold at any 16:9 resolution; another aspect ratio needs new boxes.
+
+Crops are area-downsampled by `HUD_SCALE`. At 0.5 a 2560x1440 capture keeps digits about 12 px tall -- ample
+for template matching against a fixed bitmap font -- for 144 KB a decision, ~2.6 GB per 20 minutes, instead
+of four times that.
+"""
+
+import numpy as np
+
+from zombiesai.demos.frames import area_resize
+
+# name -> (left, top, width, height) as fractions of the captured frame
+HUD_REGIONS: dict[str, tuple[float, float, float, float]] = {
+    # points (with the "+N" popups), weapon name, grenade count, magazine ticks and reserve ammo
+    "points_ammo": (0.8516, 0.8125, 0.1484, 0.1875),
+    # the round counter: red tally marks early, numerals later
+    "round": (0.0, 0.8056, 0.125, 0.1944),
+}
+HUD_SCALE = 0.5
+
+
+def region_box(height: int, width: int, frac: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
+    """(left, top, width, height) in pixels, clipped to the frame."""
+    fx, fy, fw, fh = frac
+    left, top = int(round(fx * width)), int(round(fy * height))
+    right, bottom = min(width, int(round((fx + fw) * width))), min(height, int(round((fy + fh) * height)))
+    if right <= left or bottom <= top:
+        raise ValueError(f"HUD region {frac} is empty on a {width}x{height} frame")
+    return left, top, right - left, bottom - top
+
+
+def crop_shape(height: int, width: int, frac, scale: float = HUD_SCALE) -> tuple[int, int, int]:
+    _, _, w, h = region_box(height, width, frac)
+    return max(1, int(round(h * scale))), max(1, int(round(w * scale))), 3
+
+
+def crop_regions(
+    frame: np.ndarray, regions: dict = HUD_REGIONS, scale: float = HUD_SCALE
+) -> dict[str, np.ndarray]:
+    """Every HUD region of one full-resolution RGB frame, area-downsampled by `scale`."""
+    height, width = frame.shape[:2]
+    out = {}
+    for name, frac in regions.items():
+        left, top, w, h = region_box(height, width, frac)
+        out_h, out_w, _ = crop_shape(height, width, frac, scale)
+        out[name] = area_resize(frame[top : top + h, left : left + w], out_h, out_w)
+    return out
