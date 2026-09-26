@@ -63,6 +63,10 @@ DEFAULT_BINDINGS = {
 # Codes the recorder logs but nothing can send: the virtual device has no wheel, and the action space has
 # one "swap" whichever way you scroll. See inverse_bindings.
 WHEEL_CODES = ("wheelup", "wheeldown", "wheelleft", "wheelright")
+# The desktop's own modifier. While it is down, keys and the mouse drive the compositor -- Super+1..4 switches
+# workspace, Super+drag moves a window -- and the game never sees them, so they must not become labels ("1"
+# is weapon swap). "key125"/"key126" are how logs from before the key had a name spell it.
+COMPOSITOR_MODIFIERS = ("super", "key125", "key126")
 # One button head, several buttons possible in one 67 ms window. Buying beats everything (it is rare, and
 # mislabelling it teaches the policy that the prompt means nothing); a swap loses to every other press.
 # Presses of one control collapse the same way: three wheel notches inside a window are one "swap" label,
@@ -175,6 +179,7 @@ class InputFolder:
     def __init__(self, config: InputConfig | None = None):
         self.config = config or InputConfig()
         self._down: list[float | None] = [None] * len(CONTROLS)
+        self._chord: set[str] = set()  # compositor modifiers currently down
 
     @property
     def held_controls(self) -> tuple[str, ...]:
@@ -187,13 +192,21 @@ class InputFolder:
         counts = np.zeros(2)
         for event in events:
             kind = event.get("type")
+            code = str(event.get("code", "")).lower()
+            if kind == "key" and code in COMPOSITOR_MODIFIERS:
+                (self._chord.add if event["down"] else self._chord.discard)(code)
+                continue
             if kind == "mouse":
-                counts += (event.get("dx", 0), event.get("dy", 0))
+                if not self._chord:
+                    counts += (event.get("dx", 0), event.get("dy", 0))
                 continue
             if kind not in ("key", "button"):
                 continue
             t = min(max(float(event["t"]), start), end)
-            code = str(event["code"]).lower()
+            if self._chord and event["down"]:
+                # A chord the compositor took. Its release still lands below, but finds nothing held: a key
+                # that was already down before Super keeps its hold, one pressed under Super never starts one.
+                continue
             control = self.config.bindings.get(code)
             if control is None:
                 continue

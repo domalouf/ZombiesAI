@@ -360,3 +360,44 @@ def test_the_quality_check_reports_marked_time_and_describes_only_play(tmp_path)
     report = quality_report(clip)
     assert report["not_playing_steps"] == 4
     assert report["behaviour"]["steps"] == clip.n_steps - 4
+
+
+class InterruptedAfter:
+    """A screen that is closed on the recorder (Ctrl-C, or SIGTERM/SIGHUP turned into one) after n frames."""
+
+    def __init__(self, n):
+        self.n = n
+
+    def read(self):
+        self.n -= 1
+        if self.n < 0:
+            raise KeyboardInterrupt
+        return np.zeros(spec.PIXELS_SHAPE, dtype=np.uint8)
+
+    def close(self):
+        pass
+
+
+def test_an_interrupted_recording_still_closes_with_its_labels(tmp_path):
+    config = RecorderConfig(max_steps=50, realtime=False, input=CONFIG)
+    try:
+        record(InterruptedAfter(6), ReplayInput([]), tmp_path / "demo", config, progress_every=0)
+    except KeyboardInterrupt:
+        pass
+    clip = load_clip(tmp_path / "demo")
+    assert clip.manifest["status"] == "closed" and clip.labelled and clip.n_steps == 5
+
+
+def test_a_recording_that_never_closed_is_requantized_against_its_own_start(tmp_path):
+    """Killed outright, a clip has no summary -- but the t0 written at the start keeps the labels on the
+    recorder's decision boundaries instead of the first event's timestamp."""
+    import json
+
+    clip, _ = recorded(tmp_path)
+    manifest = json.loads((clip.path / "clip.json").read_text())
+    assert manifest["t0_mono"] == manifest["summary"]["t0_mono"]
+    before = clip.actions.copy()
+    manifest["summary"] = {}
+    (clip.path / "clip.json").write_text(json.dumps(manifest))
+    requantize(clip.path, CONFIG)
+    np.testing.assert_array_equal(load_clip(clip.path).actions, before)

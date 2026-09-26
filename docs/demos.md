@@ -16,7 +16,20 @@ took while looking at it.
 ```sh
 uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 \
     --notes "camping the help room, deliberately bad positioning after round 8"
+
+# On the Linux machine, with its standing settings (window, bindings, counts per degree, --wait, --audio):
+scripts/record_waw.sh 20 "camping the help room, deliberately bad positioning after round 8"
 ```
+
+Every recording also carries the game's own settings -- sensitivity, `m_yaw`, resolution, key bindings --
+read from WaW's `config.cfg` (`demos/game_settings.py`), and the recorder warns before you play when they
+disagree with `--counts-per-degree`, or when mouse smoothing or toggle-ADS would spoil the labels. The game
+writes that file on exit, so a setting changed mid-session shows up in the next recording's copy.
+
+Keys pressed while Super is held are the desktop's, not the game's (Super+1 switches workspace; `1` is
+weapon swap), so they and the mouse under Super never become labels. Closing the terminal or killing the
+recorder stops it as cleanly as Ctrl-C: the clip is closed with its labels, and a clip that was killed
+outright can still be re-quantized, because its start time is written before the first step.
 
 The command is the same on either OS. Add `--wait` to launch it from a terminal elsewhere: it starts once the
 game window can be captured, after a three-second countdown ([`linux.md`](./linux.md) says why). On Linux the pixels come from the game's XWayland window and the input

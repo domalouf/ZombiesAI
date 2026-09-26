@@ -56,6 +56,7 @@ VK_NAMES = {
     0xA5: "alt", 0x25: "left", 0x26: "up", 0x27: "right", 0x28: "down",
 }
 VK_NAMES.update({code: chr(code).lower() for code in range(0x30, 0x5B)})  # 0-9 and A-Z
+VK_NAMES.update({0x5B: "super", 0x5C: "super"})  # VK_LWIN/VK_RWIN, named as evdev names them
 VK_NAMES.update({0x70 + i: f"f{i + 1}" for i in range(12)})
 
 # RAWINPUTHEADER is 16 bytes on 32-bit and 24 on 64-bit (HANDLE and WPARAM both widen).

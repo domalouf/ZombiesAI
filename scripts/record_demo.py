@@ -137,6 +137,8 @@ def main() -> None:
                         help="don't save full-resolution HUD crops (they cost ~2.6 GB per 20 minutes at 1440p)")
     parser.add_argument("--mark-key", default=MARK_KEY,
                         help="key that toggles 'not playing' (menus, pause, loading, game over); 'none' disables")
+    parser.add_argument("--game-config", type=Path,
+                        help="WaW config.cfg to stamp into the recording; default: the newest profile found")
     parser.add_argument("--audio", action="store_true",
                         help="Linux: also record the default output's monitor (never a microphone), aligned to "
                              "the frames; raw 11.5 MB/min while recording, lossless FLAC after a clean stop")
@@ -168,6 +170,18 @@ def main() -> None:
         if args.counts_per_degree == 1.0:
             print("warning: --counts-per-degree is still 1.0, so every look label is scaled wrong.")
             print("         Run scripts/calibrate_mouse.py first (spike S4).")
+        from zombiesai.demos.game_settings import read_settings, settings_warnings
+
+        # Read before anyone plays: a wrong sensitivity or toggle-ADS is worth hearing about now, not after.
+        game_settings = read_settings(args.game_config)
+        if game_settings is not None:
+            d = game_settings["dvars"]
+            age_h = game_settings["config_age_s"] / 3600
+            print(f"game settings: sensitivity {d.get('sensitivity')}, m_yaw {d.get('m_yaw')}, "
+                  f"{d.get('r_mode')}, fov {d.get('cg_fov', '?')} (config.cfg written {age_h:.1f} h ago; "
+                  "the game only saves it on exit)")
+        for warning in settings_warnings(game_settings, args.counts_per_degree):
+            print(f"warning: {warning}")
         window = args.window
         if isinstance(window, str) and window.startswith("0x"):
             window = int(window, 16)
@@ -256,10 +270,31 @@ def main() -> None:
             max_seconds=args.minutes * 60, max_steps=int(args.minutes * 60 * 15) + 10,
             input=input_config, notes=args.notes,
         )
+        # Closing the terminal (SIGHUP) or a kill (SIGTERM) would end Python without running record()'s cleanup,
+        # so the labels, the summary and the audio's compression would never be written. Treat both as Ctrl-C,
+        # which record() already turns into a clean stop -- and only the first: `uv run` forwards what it gets
+        # to this process and a closing terminal signals the whole session, so a second signal typically lands
+        # mid-cleanup and would abort exactly the writes this is for. Everything after the first is ignored.
+        import signal
+
+        stops = [s for s in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGHUP", None)) if s is not None]
+
+        def stop_cleanly(signum, _frame):
+            for sig in stops:
+                signal.signal(sig, signal.SIG_IGN)
+            raise KeyboardInterrupt(signal.Signals(signum).name)
+
+        for sig in stops:
+            signal.signal(sig, stop_cleanly)
         try:
-            path = record(capture, inputs, out, config, audio=audio)
+            path = record(
+                capture, inputs, out, config, audio=audio,
+                annotations={"game_settings": game_settings} if game_settings is not None else None,
+            )
         except KeyboardInterrupt:
-            raise SystemExit("\nstopped") from None
+            # record() has already closed the clip; say where it is and check it, as for a full-length session.
+            path = out
+            print("\nstopped early")
         print(f"wrote {path}")
         clip = load_clip(path)
         for name in clip.hud_regions:

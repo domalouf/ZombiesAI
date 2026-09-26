@@ -84,10 +84,13 @@ def record(
     stop=None,
     progress_every: int = 150,
     audio=None,
+    annotations: dict | None = None,
 ) -> Path:
     """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished sim).
 
-    `audio` is an optional `demos.audio.AudioRecorder`; without it the clip is exactly what it always was."""
+    `audio` is an optional `demos.audio.AudioRecorder`; without it the clip is exactly what it always was.
+    `annotations` are extra top-level clip.json entries (the game's settings), written before the first step
+    so a recording that never closes still has them."""
     config = config or RecorderConfig()
     dt = config.dt
     writer = ClipWriter(
@@ -99,6 +102,8 @@ def record(
         label_source="input_log",
         config={"recorder": asdict(config), "decision_hz": spec.DECISION_HZ},
     )
+    for key, value in (annotations or {}).items():
+        writer.annotate(key, value)
     log = open(Path(out_dir) / "inputs.jsonl", "a", buffering=1)
     folder = InputFolder(config.input)
     overruns = stale_steps = outages = outage_run = 0
@@ -119,6 +124,9 @@ def record(
             writer.close(summary={"error": "audio failed to start"})
             raise
     t0 = time.monotonic()
+    # Also in the summary at close; written now so that a recording killed mid-session (the terminal closed,
+    # a crash) can still have its labels rebuilt from inputs.jsonl against the right decision boundaries.
+    writer.annotate("t0_mono", t0)
     if audio is not None:
         # Written now rather than at close: a recording killed mid-session still knows where its step 0 was.
         writer.annotate("audio", {**audio_meta, "t0_mono": t0})
@@ -306,6 +314,8 @@ def requantize(clip_dir: str | Path, config: InputConfig, *, dt: float | None = 
     # first event's timestamp would shift every label by up to one decision, which is exactly the misalignment
     # the yaw-versus-flow check exists to catch -- so prefer the recorded t0 and say so when it is missing.
     t0 = clip.manifest.get("summary", {}).get("t0_mono")
+    if t0 is None:  # never closed: the copy written at the start, or the audio's, which recorded the same t0
+        t0 = clip.manifest.get("t0_mono", clip.manifest.get("audio", {}).get("t0_mono"))
     if t0 is None:
         t0 = min(e["t"] for e in events)
     from zombiesai.demos.inputs import quantize

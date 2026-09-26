@@ -321,3 +321,38 @@ def test_not_playing_marks_from_the_window_of_one_press_to_the_window_of_the_nex
     np.testing.assert_array_equal(np.flatnonzero(marked), [2, 3, 4, 5, 8])
     off = inputs.not_playing(events, 0.0, 10, inputs.InputConfig(counts_per_degree=10.0, mark_key=None), DT)
     assert not off.any()
+
+
+def test_keys_and_mouse_under_the_compositors_super_key_are_not_labels():
+    """Super+1 switches Hyprland workspace; the game never sees the 1, which is bound to weapon swap."""
+    config = inputs.InputConfig(counts_per_degree=10.0, bindings={"1": "swap", "w": "forward"})
+    folder = inputs.InputFolder(config)
+    events = [
+        {"t": 0.00, "type": "key", "code": "w", "down": True},  # held before Super: keeps its hold
+        {"t": 0.01, "type": "key", "code": "super", "down": True},
+        {"t": 0.02, "type": "key", "code": "1", "down": True},
+        {"t": 0.03, "type": "mouse", "dx": 500, "dy": 0},  # Super+drag moves a window
+        {"t": 0.04, "type": "key", "code": "1", "down": False},
+        {"t": 0.05, "type": "key", "code": "super", "down": False},
+    ]
+    held, presses, counts = folder.feed(events, 0.0, 0.066)
+    assert presses[inputs.CONTROL_INDEX["swap"]] == 0
+    assert held[inputs.CONTROL_INDEX["forward"]] == 1.0
+    assert counts[0] == 0
+    # ...and once Super is up, the same key is a swap again.
+    later = [{"t": 0.07, "type": "key", "code": "1", "down": True}, {"t": 0.08, "type": "key", "code": "1", "down": False}]
+    _, presses, _ = folder.feed(later, 0.066, 0.133)
+    assert presses[inputs.CONTROL_INDEX["swap"]] == 1
+
+
+def test_logs_from_before_super_had_a_name_are_read_the_same():
+    config = inputs.InputConfig(counts_per_degree=10.0, bindings={"1": "swap"})
+    folder = inputs.InputFolder(config)
+    events = [
+        {"t": 0.00, "type": "key", "code": "key125", "down": True},
+        {"t": 0.01, "type": "key", "code": "1", "down": True},
+        {"t": 0.02, "type": "key", "code": "1", "down": False},
+        {"t": 0.03, "type": "key", "code": "key125", "down": False},
+    ]
+    _, presses, _ = folder.feed(events, 0.0, 0.066)
+    assert presses.sum() == 0
