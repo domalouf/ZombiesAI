@@ -664,6 +664,10 @@ uncertainty about which wins; don't pre-commit.
     proximity growls are extremely informative when the agent sees only ~65° of a
     360° threat space. **Reserve the `audio` key in `spec.py` now** so adding it
     is a profile flag, not a spec migration that invalidates the replay buffer.
+    *Now:* screen recordings keep the raw game audio on the recorder's clock
+    (`record_demo.py --audio`, Linux monitor capture; `demos/audio.py`), so the
+    feature can be built later from footage already recorded. WASAPI loopback
+    on Windows is still to do.
 12. **Scope creep and motivation loss** — the actual leading cause of death for
     hobby projects. Structural mitigation: M1–M3 are the stated learning goal
     (PPO and DQN from scratch) and are **entirely achievable on Linux with no

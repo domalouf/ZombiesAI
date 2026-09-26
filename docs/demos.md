@@ -72,6 +72,39 @@ capture are out of step in time: stop and fix it, because no amount of training 
 `--source sim` the number runs lower — the raycast view is flat-shaded, so there is less for the optical-flow
 estimate to lock onto.)
 
+### Game audio (`--audio`, Linux)
+
+`--audio` also keeps the sound, for the audio features the plan reserves the `audio` observation key for
+(PLAN.md, risk 11). The policy does not hear it yet; the point is that a recording made without it can never
+be given it later.
+
+```sh
+uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 --audio
+```
+
+- **What is recorded:** the default sink's *monitor* through `parec` (PipeWire via pipewire-pulse, or
+  PulseAudio), s16le 48 kHz stereo. **Everything playing through that output is recorded, not only the
+  game** -- mute music, videos and voice chat, or point `--audio-device` at another `<sink>.monitor`
+  (`pactl list short sources`). Only a `.monitor` is ever opened; a microphone name is refused. Capturing
+  the game alone would mean one `parec --monitor-stream=<sink-input>` per stream the game opens (World at
+  War under Proton opens four) and a mix, or routing it to its own null sink -- not done.
+- **Alignment:** every chunk read off the pipe (10 ms) is stamped with `time.monotonic()` -- the clock of
+  `t0_mono` and the input log -- and indexed in `audio_index.bin`. Loading replaces each chunk's clock
+  offset with the promptest chunk's in the next second, which strips read jitter (measured here: 0-5 ms,
+  median 2 ms) and follows crystal drift and dropouts. What no timestamp can see is the audio graph's own
+  buffering before the pipe; it is *estimated* at 5 ms (one 256-sample PipeWire quantum), not measured, and
+  sits in `clip.json["audio"]["latency_s"]` so a better number fixes old recordings on load. The game's own
+  output buffering under Wine is unmeasured too and plays the same role as display latency on the frames;
+  expect the pair to agree within ~20 ms, a third of a decision.
+- **Files:** `audio.s16` raw while recording (11.5 MB/min, append-only, so a crash keeps everything up to
+  the last read), replaced by lossless `audio.flac` after a clean stop when `ffmpeg` is installed
+  (`--audio-raw` skips that). `clip.json["audio"]` holds rate, channels, device, latency and chunk stats.
+- **Reading it:** `clip.audio_for_step(k, window_s=0.2)` is the 200 ms that had played by the time step k's
+  frame was grabbed -- causal, like the frame -- as `(9600, 2)` int16, silence where nothing was captured.
+  `clip.audio()` gives the whole stream with `sample_at(t)` / `time_of(sample)` on the monotonic clock.
+- **Windows:** not implemented. `demos/audio.py` takes any stream with `read() -> (bytes, t_mono)`, so WASAPI
+  loopback slots in as one more class.
+
 **Play deliberately varied games.** Camping, trains, bad positioning, early deaths, running out of ammo. A
 policy cloned from expert-only play has no idea what to do the moment it drifts off-distribution, and there
 is no DAgger loop here to rescue it.
@@ -117,6 +150,8 @@ data/clips/<name>/
   labels.npz   actions (T, 8), per-step confidence, raw pre-quantization yaw/pitch degrees
   inputs.jsonl raw input log (Route A only)
   hud_<name>.u8  full-resolution HUD crops, (T, h, w, 3), same step index as frames.u8 (Route A only)
+  audio.flac   game audio, 48 kHz stereo (audio.s16 raw if not compressed), with --audio (Route A only)
+  audio_index.bin  per-chunk (sample, monotonic time) map that aligns it to the steps
 ```
 
 The policy's 128×72 frame turns the points and ammo counters into a smear, so screen recordings also keep

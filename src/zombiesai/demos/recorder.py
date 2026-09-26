@@ -16,6 +16,9 @@ The loop is the same discipline the real environment will run under, and for the
   screen, a loading screen or the game-over card, and again coming back; those steps are kept, flagged
   FLAG_NOT_PLAYING, and left out of training. Which step a press lands on is `inputs.PlayMarker`'s rule.
 
+Game audio, when an `audio` recorder is given, is captured on its own thread into the same clip directory and
+stamped on the same monotonic clock, so step k maps to the samples playing at `t0 + k/15` (demos/audio.py).
+
 The raw input log is written alongside the clip, so the labels can be recomputed later under different
 bindings, a different `counts_per_degree`, or different bins, without asking anyone to play again.
 """
@@ -80,8 +83,11 @@ def record(
     *,
     stop=None,
     progress_every: int = 150,
+    audio=None,
 ) -> Path:
-    """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished sim)."""
+    """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished sim).
+
+    `audio` is an optional `demos.audio.AudioRecorder`; without it the clip is exactly what it always was."""
     config = config or RecorderConfig()
     dt = config.dt
     writer = ClipWriter(
@@ -100,7 +106,22 @@ def record(
     marker = PlayMarker(config.input.mark_key)
     idle = 0  # steps marked not playing
     was_idle = False
+    if audio is not None:
+        # Started before t0 so capture is already flowing when step 0's frame is grabbed (the first few windows
+        # are still partly silence -- nothing before the stream opened exists). A stream that will not open
+        # fails here, before anyone has played a minute for nothing.
+        try:
+            audio_meta = audio.start(out_dir)
+        except BaseException:
+            log.close()
+            frame_source.close()
+            input_source.close()
+            writer.close(summary={"error": "audio failed to start"})
+            raise
     t0 = time.monotonic()
+    if audio is not None:
+        # Written now rather than at close: a recording killed mid-session still knows where its step 0 was.
+        writer.annotate("audio", {**audio_meta, "t0_mono": t0})
     try:
         pending = frame_source.read()
         # A source that cuts full-resolution HUD crops from each grab exposes the latest set as `last_hud`,
@@ -180,6 +201,11 @@ def record(
         log.close()
         frame_source.close()
         input_source.close()
+        if audio is not None:
+            try:
+                writer.annotate("audio", {**audio.stop(), "t0_mono": t0})
+            except Exception as exc:  # losing the audio must not lose the frames and labels with it
+                writer.annotate("audio", {**audio.meta(), "t0_mono": t0, "error": f"stop failed: {exc}"})
         seconds = writer.n_steps * dt
         path = writer.close(
             summary={
