@@ -12,8 +12,9 @@ def header(kind: int) -> bytes:
     return struct.pack("=IIQQ" if SIXTY_FOUR_BIT else "=IIII", kind, 0, 0, 0)
 
 
-def mouse_report(dx=0, dy=0, button_flags=0, flags=0) -> bytes:
-    return header(raw.RIM_TYPEMOUSE) + struct.pack("=HxxHHIiiI", flags, button_flags, 0, 0, dx, dy, 0)
+def mouse_report(dx=0, dy=0, button_flags=0, flags=0, button_data=0) -> bytes:
+    data = button_data & 0xFFFF  # a signed wheel delta travels in an unsigned short
+    return header(raw.RIM_TYPEMOUSE) + struct.pack("=HxxHHIiiI", flags, button_flags, data, 0, dx, dy, 0)
 
 
 def key_report(vkey: int, up: bool = False, extended: bool = False) -> bytes:
@@ -46,6 +47,29 @@ def test_every_mouse_button_edge_decodes():
     for bit, (code, down) in raw.MOUSE_BUTTONS.items():
         (event,) = raw.decode_raw_input(mouse_report(button_flags=bit), t=0.0)
         assert (event["code"], event["down"]) == (code, down)
+
+
+def test_a_wheel_notch_decodes_as_a_press_and_release_of_its_direction():
+    down = raw.decode_raw_input(mouse_report(button_flags=raw.RI_MOUSE_WHEEL, button_data=-120), t=1.0)
+    assert down == [
+        {"t": 1.0, "type": "button", "code": "wheeldown", "down": True},
+        {"t": 1.0, "type": "button", "code": "wheeldown", "down": False},
+    ]
+    (up, _) = raw.decode_raw_input(mouse_report(button_flags=raw.RI_MOUSE_WHEEL, button_data=120), t=0.0)
+    assert up["code"] == "wheelup"
+    (left, _) = raw.decode_raw_input(mouse_report(button_flags=raw.RI_MOUSE_HWHEEL, button_data=-120), t=0.0)
+    assert left["code"] == "wheelleft"
+
+
+def test_a_fast_scroll_in_one_report_is_several_notches_and_a_fraction_is_none():
+    fast = raw.decode_raw_input(mouse_report(button_flags=raw.RI_MOUSE_WHEEL, button_data=-360), t=0.0)
+    assert [e["down"] for e in fast] == [True, False] * 3
+    assert raw.decode_raw_input(mouse_report(button_flags=raw.RI_MOUSE_WHEEL, button_data=40), t=0.0) == []
+
+
+def test_the_wheel_data_is_ignored_when_the_wheel_flag_is_not_set():
+    """usButtonData is only a wheel delta under RI_MOUSE_WHEEL; otherwise it is noise to be left alone."""
+    assert raw.decode_raw_input(mouse_report(button_data=120), t=0.0) == []
 
 
 def test_keys_decode_to_the_names_the_bindings_use():

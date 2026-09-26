@@ -58,7 +58,8 @@ def test_keys_decode_to_the_names_the_bindings_use():
     assert ev.key_name(17) == "w" and ev.key_name(30) == "a" and ev.key_name(31) == "s" and ev.key_name(32) == "d"
     assert ev.key_name(42) == "shift" and ev.key_name(19) == "r" and ev.key_name(33) == "f"
     assert ev.key_name(0x110) == "mouse1" and ev.key_name(0x111) == "mouse2"
-    assert set(DEFAULT_BINDINGS) <= set(ev.KEY_NAMES.values()) | set(ev.BUTTON_NAMES.values())
+    names = set(ev.KEY_NAMES.values()) | set(ev.BUTTON_NAMES.values()) | set(ev.WHEEL_NAMES.values())
+    assert set(DEFAULT_BINDINGS) <= names
 
 
 def test_key_presses_and_releases_decode_but_auto_repeat_does_not():
@@ -76,6 +77,46 @@ def test_key_presses_and_releases_decode_but_auto_repeat_does_not():
 def test_buttons_are_buttons_and_keys_are_keys():
     events = ev.decode_events(event(ev.EV_KEY, 0x110, 1) + event(ev.EV_KEY, 33, 1))
     assert [e["type"] for e in events] == ["button", "key"]
+
+
+def test_a_wheel_notch_decodes_as_a_press_and_release_of_its_direction():
+    down = ev.decode_events(event(ev.EV_REL, ev.REL_WHEEL, -1, 2.0))
+    assert down == [
+        {"t": 2.0, "type": "button", "code": "wheeldown", "down": True},
+        {"t": 2.0, "type": "button", "code": "wheeldown", "down": False},
+    ]
+    (up, _) = ev.decode_events(event(ev.EV_REL, ev.REL_WHEEL, 1))
+    assert up["code"] == "wheelup"
+    (right, _) = ev.decode_events(event(ev.EV_REL, ev.REL_HWHEEL, 1))
+    assert right["code"] == "wheelright"
+
+
+def test_several_notches_in_one_record_are_several_presses():
+    events = ev.decode_events(event(ev.EV_REL, ev.REL_WHEEL, -3))
+    assert [(e["code"], e["down"]) for e in events] == [("wheeldown", True), ("wheeldown", False)] * 3
+
+
+def test_the_hi_res_wheel_is_ignored_so_a_notch_is_not_counted_twice():
+    """Modern kernels report every notch on both axes: 1 on REL_WHEEL and 120 on REL_WHEEL_HI_RES."""
+    buffer = (
+        event(ev.EV_REL, ev.REL_WHEEL_HI_RES, -120)
+        + event(ev.EV_REL, ev.REL_WHEEL, -1)
+        + event(ev.EV_REL, ev.REL_HWHEEL_HI_RES, 60)
+        + event(ev.EV_SYN, 0, 0)
+    )
+    events = ev.decode_events(buffer)
+    assert [e["down"] for e in events if e["code"] == "wheeldown"] == [True, False]
+    assert len(events) == 2
+
+
+def test_a_wheel_notch_is_labelled_as_a_swap():
+    """WaW's stock config cycles weapons on the wheel; unlabelled, a scrolled swap looks spontaneous."""
+    from zombiesai import spec
+    from zombiesai.demos.inputs import quantize
+
+    buffer = event(ev.EV_REL, ev.REL_WHEEL, -1, 0.15) + event(ev.EV_REL, ev.REL_WHEEL, 1, 0.35)
+    labels = quantize(ev.decode_events(buffer), 0.0, 5, dt=0.1)
+    assert [spec.BUTTONS[a[spec.BUTTON]] for a in labels.actions] == ["none", "swap", "none", "swap", "none"]
 
 
 def test_a_clock_offset_is_applied_when_the_kernel_reports_wall_time():

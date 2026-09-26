@@ -13,6 +13,10 @@ Two details decide whether the timestamps are usable:
 * **Key auto-repeat is dropped.** Holding W produces a stream of repeat events; treating them as presses
   would turn one press into thirty, which the `button` head would read as thirty reloads.
 
+The wheel is logged too, because World at War binds it to weapon cycling: each notch becomes a press and
+release of the pseudo-button `wheelup`/`wheeldown`, so the bindings and the quantizer treat it exactly like
+a tap of `1`. Only the classic one-per-notch axis is read -- see `decode_events` for why.
+
 Requires read access to the device nodes: `sudo usermod -aG input $USER` and a re-login, or a udev rule.
 See docs/linux.md.
 """
@@ -26,6 +30,7 @@ from pathlib import Path
 
 EV_SYN, EV_KEY, EV_REL, EV_MSC = 0x00, 0x01, 0x02, 0x04
 REL_X, REL_Y, REL_HWHEEL, REL_WHEEL = 0x00, 0x01, 0x06, 0x08
+REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES = 0x0B, 0x0C  # read deliberately never: see decode_events
 KEY_UP, KEY_DOWN, KEY_REPEAT = 0, 1, 2
 EV_REP = 0x14
 
@@ -50,6 +55,14 @@ _SCANCODE_ORDER = (
 KEY_NAMES = {code: name for code, name in enumerate(_SCANCODE_ORDER, start=1)}
 KEY_NAMES.update({59 + i: f"f{i + 1}" for i in range(10)})
 KEY_NAMES.update({97: "ctrl", 100: "alt", 103: "up", 105: "left", 106: "right", 108: "down"})
+# The wheel as pseudo-buttons, keyed by (axis, sign of the count). Positive REL_WHEEL is away from the
+# player (up), positive REL_HWHEEL is right -- the same convention Windows uses for its wheel deltas.
+WHEEL_NAMES = {
+    (REL_WHEEL, 1): "wheelup",
+    (REL_WHEEL, -1): "wheeldown",
+    (REL_HWHEEL, 1): "wheelright",
+    (REL_HWHEEL, -1): "wheelleft",
+}
 
 
 def key_name(code: int) -> str:
@@ -62,6 +75,12 @@ def decode_events(buffer: bytes, offset: float = 0.0) -> list[dict]:
     `offset` is added to every kernel timestamp; it is zero once the device is on CLOCK_MONOTONIC, and the
     realtime-to-monotonic difference when the ioctl was refused. Mouse motion is reported per axis, so a
     diagonal flick arrives as two records and is summed by the caller, not here.
+
+    A wheel count of n becomes n press/release pairs of `wheelup`/`wheeldown` at the same instant: one per
+    notch, since that is what the game does with them (one `weapnext` each). Kernels since 5.0 also send
+    `REL_WHEEL_HI_RES` (120 per notch, finer on free-spinning wheels) for the *same* movement, right beside
+    the classic record; reading both would count every notch twice, so the hi-res axes are ignored. The
+    classic axis is what the game reacts to anyway -- it fires on whole notches.
     """
     events = []
     for start in range(0, len(buffer) - EVENT_SIZE + 1, EVENT_SIZE):
@@ -72,6 +91,11 @@ def decode_events(buffer: bytes, offset: float = 0.0) -> list[dict]:
                 events.append({"t": t, "type": "mouse", "dx": int(value), "dy": 0})
             elif code == REL_Y:
                 events.append({"t": t, "type": "mouse", "dx": 0, "dy": int(value)})
+            elif code in (REL_WHEEL, REL_HWHEEL) and value:
+                name = WHEEL_NAMES[code, 1 if value > 0 else -1]
+                for _ in range(abs(int(value))):
+                    events.append({"t": t, "type": "button", "code": name, "down": True})
+                    events.append({"t": t, "type": "button", "code": name, "down": False})
         elif kind == EV_KEY and value in (KEY_UP, KEY_DOWN):  # value 2 is auto-repeat, not a press
             name = key_name(code)
             events.append(

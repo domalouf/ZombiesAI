@@ -63,6 +63,65 @@ def test_the_most_important_button_in_a_window_wins():
     assert spec.BUTTONS[labels.actions[0][spec.BUTTON]] == "use"
 
 
+def wheel(t, code="wheeldown"):
+    return [{"t": t, "type": "button", "code": code, "down": d} for d in (True, False)]
+
+
+def test_a_wheel_notch_is_a_swap_press_like_the_swap_key():
+    labels = inputs.quantize(wheel(0.5 * DT) + wheel(1.5 * DT, "wheelup"), 0.0, 3, CONFIG, DT)
+    assert [spec.BUTTONS[a[spec.BUTTON]] for a in labels.actions] == ["swap", "swap", "none"]
+    assert labels.presses[0][inputs.CONTROL_INDEX["swap"]] == 1
+
+
+def test_several_notches_in_one_window_are_one_swap_label():
+    """The head can say a swap happened, not how many; the raw count is kept in `presses`."""
+    labels = inputs.quantize(wheel(0.2 * DT) + wheel(0.5 * DT) + wheel(0.8 * DT), 0.0, 1, CONFIG, DT)
+    assert spec.BUTTONS[labels.actions[0][spec.BUTTON]] == "swap"
+    assert labels.presses[0][inputs.CONTROL_INDEX["swap"]] == 3
+
+
+def test_a_wheel_swap_still_loses_to_a_more_important_press():
+    events = wheel(0.1 * DT) + [
+        {"t": 0.3 * DT, "type": "key", "code": "r", "down": True},
+        {"t": 0.4 * DT, "type": "key", "code": "r", "down": False},
+    ]
+    assert spec.BUTTONS[inputs.quantize(events, 0.0, 1, CONFIG, DT).actions[0][spec.BUTTON]] == "reload"
+
+
+def test_scrolling_while_the_swap_key_is_held_does_not_release_it():
+    """Two codes share one control; a notch has no duration and must not end the key's hold."""
+    events = [{"t": 0.0, "type": "key", "code": "q", "down": True}] + wheel(0.2 * DT)
+    labels = inputs.quantize(events, 0.0, 2, CONFIG, DT)
+    assert labels.held[1][inputs.CONTROL_INDEX["swap"]] == pytest.approx(1.0)
+    assert labels.presses[0][inputs.CONTROL_INDEX["swap"]] == 2
+
+
+def test_the_inverse_map_emits_the_swap_key_not_the_wheel_whatever_the_order():
+    """The virtual device has no wheel, so the key must win even when a config lists the wheel first."""
+    assert inputs.inverse_bindings(inputs.DEFAULT_BINDINGS)["swap"] == "q"
+    assert inputs.inverse_bindings({"wheeldown": "swap", "wheelup": "swap", "1": "swap"})["swap"] == "1"
+    # With nothing else bound the wheel is still the answer, rather than no answer at all.
+    assert inputs.inverse_bindings({"wheelup": "swap"})["swap"] == "wheelup"
+
+
+def test_a_wheel_only_swap_still_round_trips_through_synthesize():
+    bindings = {c: b for c, b in inputs.DEFAULT_BINDINGS.items() if c != "q"}
+    config = inputs.InputConfig(counts_per_degree=10.0, bindings=bindings)
+    events = inputs.synthesize(spec.make_action(button="swap"), 0.0, DT, config)
+    assert [(e["type"], e["code"]) for e in events][0] == ("button", "wheeldown")
+    labels = inputs.quantize(events, 0.0, 1, config, DT)
+    assert spec.BUTTONS[labels.actions[0][spec.BUTTON]] == "swap"
+
+
+def test_the_shipped_waw_bindings_cycle_weapons_on_the_wheel():
+    import json
+    from pathlib import Path
+
+    bindings = json.loads((Path(__file__).parents[1] / "configs" / "waw_bindings.json").read_text())
+    assert bindings["wheeldown"] == bindings["wheelup"] == bindings["1"] == "swap"
+    assert inputs.inverse_bindings(bindings)["swap"] == "1"
+
+
 def test_a_flick_wider_than_the_widest_bin_is_clamped_and_flagged():
     events = [{"t": 0.5 * DT, "type": "mouse", "dx": int(180 * CONFIG.counts_per_degree), "dy": 0}]
     labels = inputs.quantize(events, 0.0, 1, CONFIG, DT)

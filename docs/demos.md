@@ -35,6 +35,9 @@ model that makes Route B possible. Two things decide whether the labels are wort
   event devices and `demos/win32_input.py` reads Windows Raw Input
   (`WM_INPUT`), which reports the device's own relative counts — the same unit the agent's synthetic mouse
   will emit. That symmetry is the reason a human's action means anything to the policy.
+- **The wheel is a button.** WaW cycles weapons on the mouse wheel, so each notch is logged as a tap of
+  `wheelup`/`wheeldown`, and the default bindings (and `configs/waw_bindings.json`) map both to `swap`.
+  Several notches inside one decision are still one `swap` label.
 
 The raw log is stored next to the clip as `inputs.jsonl`, so a wrong sensitivity, a rebound key, or a change
 to the spec's yaw bins costs a re-quantization, not another evening of play:

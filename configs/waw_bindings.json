@@ -11,5 +11,7 @@
   "v": "melee",
   "g": "grenade",
   "mouse3": "grenade",
-  "1": "swap"
+  "1": "swap",
+  "wheeldown": "swap",
+  "wheelup": "swap"
 }
