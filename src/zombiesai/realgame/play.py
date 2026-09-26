@@ -183,7 +183,10 @@ def play(
     ended = "time limit"
     fresh = True  # the next written step has no usable history before it
     smooth_look = config.look == "mean" and hasattr(agent, "last_look")
-    smoother = LookSmoother(config.look_smoothing)
+    motor = getattr(dispatcher, "motor", None)
+    # A mouse motor smooths in continuous time on its own; smoothing per tick as well would only add lag.
+    smoother = LookSmoother(1.0 if motor is not None else config.look_smoothing)
+    sent_before = motor.sent_counts.copy() if motor is not None else None
     t0 = clock()
     k = 0
 
@@ -248,6 +251,13 @@ def play(
                 action = np.asarray(spec.NEUTRAL_ACTION, dtype=np.int64)
                 flags = FLAG_BAD_STEP
                 fresh = True
+            if motor is not None:
+                # Label what the motor actually sent during this tick, not what was asked of it.
+                counts = motor.sent_counts - sent_before
+                sent_before = motor.sent_counts.copy()
+                if reason is None and look is not None:
+                    look = (float(counts[0]) / motor.cpd, float(counts[1]) / motor.cpd)
+                    action = nearest_bins(action, look)
             if writer is not None:
                 sent = look if reason is None and look is not None else (0.0, 0.0)
                 writer.add(frame, action, flags=flags, hud=getattr(capture, "last_hud", None),

@@ -74,10 +74,12 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--look", choices=("mean", "sample"), default="mean",
                         help="turn by the smoothed mean look (default) or a fresh sample every tick")
-    parser.add_argument("--look-smoothing", type=float, default=PlayConfig.look_smoothing,
-                        help="0-1: how far each tick moves toward the new look; lower is smoother but laggier")
-    parser.add_argument("--submoves", type=int, default=6,
-                        help="mouse moves per decision; about one per frame at WaW's 85 fps cap")
+    parser.add_argument("--smoothness", type=float, default=0.08,
+                        help="mouse motor time constant in seconds: higher is smoother and laggier "
+                             "(lag is about twice this)")
+    parser.add_argument("--private-device", action="store_true",
+                        help="create and destroy a virtual device for this run instead of borrowing the "
+                             "session's -- destroying one while the game is focused can unlock its pointer")
     parser.add_argument("--kill-key", default=KILL_KEY)
     parser.add_argument("--toggle-key", default=TOGGLE_KEY)
     parser.add_argument("--quiet", action="store_true", help="no sound cues")
@@ -107,10 +109,9 @@ def main() -> None:
     agent = BCAgent(args.checkpoint, deterministic=args.deterministic, device=device,
                     temperature=args.temperature)
     bindings = json.loads(args.bindings.read_text()) if args.bindings.exists() else dict(DEFAULT_BINDINGS)
-    dispatch_config = DispatchConfig(counts_per_degree=args.counts_per_degree, bindings=bindings,
-                                     submoves=args.submoves)
+    dispatch_config = DispatchConfig(counts_per_degree=args.counts_per_degree, bindings=bindings)
     config = PlayConfig(max_seconds=args.minutes * 60, kill_key=args.kill_key.lower(),
-                        toggle_key=args.toggle_key.lower(), look=args.look, look_smoothing=args.look_smoothing)
+                        toggle_key=args.toggle_key.lower(), look=args.look)
     focus = HyprlandFocus()
     human = HumanWatch(EvdevInput(), config)  # excludes our own virtual device by name
 
@@ -128,11 +129,19 @@ def main() -> None:
 
     if args.dry_run:
         sink = FakeSink()
-    else:
+    elif args.private_device:
         from zombiesai.realgame.uinput import UinputDevice
 
         sink = UinputDevice(dispatch_config.codes.values())
-    dispatcher = ActionDispatcher(sink, dispatch_config)
+    else:
+        from zombiesai.realgame.input_service import RemoteSink, ensure_running
+
+        # One virtual device for the whole session, started on first use and left running: unplugging a
+        # mouse under a focused fullscreen game is what made the human's clicks jump after quitting.
+        sink = RemoteSink(ensure_running())
+    # The motor sends mouse motion every 4 ms at a smoothly varying rate -- a hand, not a burst per decision.
+    dispatcher = ActionDispatcher(sink, dispatch_config, motor=args.look == "mean",
+                                  motor_time_constant_s=args.smoothness)
     out = next_dir(args.out, "dry" if args.dry_run else "play")
     writer = ClipWriter(
         out,
@@ -158,7 +167,7 @@ def main() -> None:
         summary = play(capture, agent, dispatcher, focus=focus, human=human, config=config, writer=writer,
                        on_state=None if args.quiet else cue)
     finally:
-        dispatcher.close()  # releases everything again and destroys the virtual device
+        dispatcher.close()  # releases everything again; hangs up on the service (the device stays)
         capture.close()
         human.source.close()
 

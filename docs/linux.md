@@ -148,6 +148,21 @@ Most of it is about when *not* to send input, because input goes to whatever win
 - touching your own mouse or keyboard hands the controls back until you have been idle for 1.5 s;
 - **F9 stops it**, and every exit path releases every key.
 
+It starts in standby: **F7** in the game hands the AI the controls and takes them back, **F9** quits, and a
+system sound says which (the fullscreen game hides notifications).
+
+**Aim** goes through a mouse motor (`dispatch.MouseMotor`): the policy sets a turn *rate* from its
+probability-weighted look, and a thread sends motion every 4 ms through two cascaded low-pass stages, so
+speed and acceleration are continuous, with a soft dead zone that holds the view still through the policy's
+idle drift. `--smoothness` is the stage time constant (default 0.08 s; lag is about twice it).
+
+**The virtual device belongs to a session service** (`realgame/input_service.py`), started on first use and
+left running; each player run borrows it over a Unix socket. Destroying a uinput device while the fullscreen
+game has focus appears to drop its pointer lock -- after the first live runs quit, the human's clicks
+jumped the view -- so the device is created once and never unplugged mid-session. Start the service before
+launching the game if you can (`uv run python -m zombiesai.realgame.input_service &`); stop it with the game
+closed. If a client dies mid-press the service releases every key it left down.
+
 Each run is recorded to `runs/play/` like a demo (`label_source="agent"`), with the steps it did not play
 flagged bad. Spike S1 -- does the engine see the virtual device at all -- is the first live run's real test.
 

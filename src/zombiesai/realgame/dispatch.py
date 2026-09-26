@@ -16,8 +16,11 @@ The unit is the mouse count, the same unit `demos/evdev_input.py` reads off the 
 is what makes a demonstration and a policy rollout the same kind of thing.
 """
 
+import threading
 import time
 from dataclasses import dataclass, field
+
+import numpy as np
 
 from zombiesai import spec
 from zombiesai.demos.inputs import DEFAULT_BINDINGS, inverse_bindings
@@ -66,6 +69,97 @@ class FakeSink:
         pass
 
 
+class MouseMotor:
+    """Turns the view the way a hand moves a mouse: continuously, at a speed that changes smoothly.
+
+    The decision loop only sets a target turn rate. A thread sends mouse motion every `period_s` (4 ms,
+    several reports per game frame) at a rate that follows the target through two cascaded low-pass stages,
+    so velocity *and* acceleration are continuous -- no step in speed at a decision boundary, no silent gap
+    while the loop is busy capturing and running the model, then a burst. Two things a policy's mean look has
+    and a hand does not are taken out on the way in: a slow wobble around zero (a person holds the mouse
+    still a quarter of the time; the half-hour policy never does), by a soft dead zone that subtracts the
+    threshold rather than cutting at it, so small turns start gently instead of snapping on.
+
+    Counts are integers; the fractional remainder is carried, so a slow turn goes out as evenly spaced single
+    counts rather than being lost. Every write takes `lock`, shared with the dispatcher's key writes, so a key
+    press and a motion report can never interleave inside one sync.
+    """
+
+    def __init__(
+        self,
+        sink,
+        counts_per_degree: float,
+        lock,
+        *,
+        period_s: float = 0.004,
+        time_constant_s: float = 0.08,
+        dead_zone_deg_s: tuple[float, float] = (6.0, 2.25),
+        clock=time.monotonic,
+        sleep=time.sleep,
+    ):
+        import threading
+
+        self.sink, self.cpd, self.lock = sink, counts_per_degree, lock
+        self.period_s, self.tau = period_s, time_constant_s
+        self.dead_zone = np.asarray(dead_zone_deg_s, dtype=np.float64)
+        self.clock, self.sleep = clock, sleep
+        self.target = np.zeros(2)  # deg/s (yaw right, pitch up), set by the decision loop
+        self.stage = np.zeros(2)  # first low-pass stage
+        self.rate = np.zeros(2)  # what is being sent, deg/s
+        self._residue = np.zeros(2)
+        self.sent_counts = np.zeros(2)  # running total, read by the loop to label what actually went out
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="mouse-motor", daemon=True)
+        self._last = None
+
+    def start(self) -> "MouseMotor":
+        self._last = self.clock()
+        self._thread.start()
+        return self
+
+    def set_rate(self, yaw_deg_s: float, pitch_deg_s: float) -> None:
+        target = np.array([yaw_deg_s, pitch_deg_s], dtype=np.float64)
+        self.target = np.sign(target) * np.maximum(np.abs(target) - self.dead_zone, 0.0)
+
+    def halt(self) -> None:
+        """Stop turning now -- not eased out: this is what release_all and a pause call."""
+        self.target = np.zeros(2)
+        self.stage = np.zeros(2)
+        self.rate = np.zeros(2)
+        self._residue = np.zeros(2)
+
+    def step(self, now: float) -> None:
+        """Advance to `now` and send whatever whole counts have accumulated (the thread calls this)."""
+        dt = min(max(now - self._last, 0.0), 0.1)
+        self._last = now
+        if dt <= 0.0:
+            return
+        k = 1.0 - np.exp(-dt / self.tau)
+        self.stage += k * (self.target - self.stage)
+        self.rate += k * (self.stage - self.rate)
+        # Screen-down is positive dy, positive pitch looks up: the same flip as _schedule_move.
+        counts = self.rate * dt * self.cpd * np.array([1.0, -1.0]) + self._residue
+        whole = np.round(counts)
+        self._residue = counts - whole
+        if whole.any():
+            with self.lock:
+                self.sink.move(int(whole[0]), int(whole[1]), now)
+                self.sink.sync()
+            self.sent_counts += whole * np.array([1.0, -1.0])
+
+    def _run(self) -> None:
+        next_at = self.clock()
+        while not self._stop.is_set():
+            self.step(self.clock())
+            next_at += self.period_s
+            self.sleep(max(0.0, next_at - self.clock()))
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+
 class ActionDispatcher:
     """Holds the current input state and moves it to whatever the policy asked for.
 
@@ -74,9 +168,25 @@ class ActionDispatcher:
     it has anyway, so no part of this sleeps on the hot path.
     """
 
-    def __init__(self, sink, config: DispatchConfig | None = None, *, clock=time.monotonic):
+    def __init__(
+        self,
+        sink,
+        config: DispatchConfig | None = None,
+        *,
+        clock=time.monotonic,
+        motor: bool = False,
+        motor_time_constant_s: float = 0.08,
+    ):
         self.sink = sink
         self.config = config or DispatchConfig()
+        # With a motor, a continuous look (look_deg) becomes a turn *rate* the motor thread follows; without
+        # one, looks go out as per-tick sub-moves, which is what the tests and the recorder's round trip use.
+        self.lock = threading.Lock()
+        self.motor = (
+            MouseMotor(sink, self.config.counts_per_degree, self.lock, clock=clock,
+                       time_constant_s=motor_time_constant_s).start()
+            if motor else None
+        )
         self.codes = self.config.codes  # inverted once, not per key event on the hot path
         self.clock = clock
         self.held: set[str] = set()
@@ -106,7 +216,10 @@ class ActionDispatcher:
             self._send_key(button, True, now)
             self._tap_until[button] = now + self.config.tap_hold_s
 
-        self._schedule_move(values, now, dt, look_deg)
+        if self.motor is not None and look_deg is not None:
+            self.motor.set_rate(look_deg[0] / dt, look_deg[1] / dt)
+        else:
+            self._schedule_move(values, now, dt, look_deg)
         self.pump(now)
 
     def _wanted(self, values: tuple[int, ...]) -> set[str]:
@@ -150,9 +263,10 @@ class ActionDispatcher:
         due = [move for move in self._pending if move[0] <= now]
         if due:
             self._pending = [move for move in self._pending if move[0] > now]
-            for _, dx, dy in due:
-                self.sink.move(dx, dy, now)
-            self.sink.sync()
+            with self.lock:
+                for _, dx, dy in due:
+                    self.sink.move(dx, dy, now)
+                self.sink.sync()
         for control, until in list(self._tap_until.items()):
             if until <= now:
                 self._send_key(control, False, now)
@@ -171,16 +285,19 @@ class ActionDispatcher:
         """Send every scheduled sub-move at once, ignoring its due time."""
         if self._pending:
             now = self.clock()
-            for _, dx, dy in self._pending:
-                self.sink.move(dx, dy, now)
+            with self.lock:
+                for _, dx, dy in self._pending:
+                    self.sink.move(dx, dy, now)
+                self.sink.sync()
             self._pending.clear()
-            self.sink.sync()
 
     def release_all(self) -> None:
         """Drop everything: the focus guard, the end of an episode, and the last thing any crash handler
         should do. A key left held after the process dies is a keyboard nobody can use."""
         now = self.clock()
         self._pending.clear()
+        if self.motor is not None:
+            self.motor.halt()
         for control in sorted(self.held):
             self._send_key(control, False, now)
         for control in list(self._tap_until):
@@ -193,10 +310,13 @@ class ActionDispatcher:
         code = self.codes.get(control)
         if code is None:
             raise KeyError(f"no binding for {control!r}; give DispatchConfig a bindings map that covers it")
-        self.sink.key(code, down, t)
-        self.sink.sync()
+        with self.lock:
+            self.sink.key(code, down, t)
+            self.sink.sync()
         self.held.add(control) if down else self.held.discard(control)
 
     def close(self) -> None:
         self.release_all()
+        if self.motor is not None:
+            self.motor.stop()
         self.sink.close()

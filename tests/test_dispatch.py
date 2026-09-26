@@ -189,3 +189,86 @@ def test_the_virtual_device_sets_its_capability_bits_by_value(monkeypatch):
     uinput.UinputDevice(["w", "mouse1"], fd=99, create=True)
     bits = [(r, a) for r, a in calls if r in (uinput.UI_SET_EVBIT, uinput.UI_SET_KEYBIT, uinput.UI_SET_RELBIT)]
     assert bits and all(isinstance(a, int) for _, a in bits)
+
+
+def motor(**kwargs):
+    import threading
+
+    from zombiesai.realgame.dispatch import MouseMotor
+
+    sink = FakeSink()
+    m = MouseMotor(sink, 9.09, threading.Lock(), **kwargs)
+    m._last = 0.0
+    return m, sink
+
+
+def drive(m, seconds, period=0.004):
+    t, rates = 0.0, []
+    for _ in range(round(seconds / period)):
+        t += period
+        m.step(t)
+        rates.append(m.rate.copy())
+    return np.array(rates)
+
+
+def test_the_motor_turns_at_the_rate_asked_once_it_has_eased_in():
+    m, sink = motor(dead_zone_deg_s=(0.0, 0.0))
+    m.set_rate(30.0, 0.0)  # 2 degrees a decision
+    drive(m, 2.0)
+    assert m.rate[0] == pytest.approx(30.0, rel=0.01)
+    # And over the last second it sent 30 degrees' worth of counts, not a count more or less than rounding.
+    m.sent_counts[:] = 0
+    drive(m, 1.0)
+    assert m.sent_counts[0] == pytest.approx(30.0 * 9.09, rel=0.01)
+
+
+def test_the_motors_speed_and_acceleration_never_jump():
+    """Two cascaded stages: a step in the target is a smooth S-curve in speed, not a step or a kink."""
+    m, _ = motor(dead_zone_deg_s=(0.0, 0.0))
+    m.set_rate(90.0, 0.0)
+    rates = drive(m, 0.5)[:, 0]
+    accel = np.diff(rates)
+    assert rates[0] < 1.0  # no jump at the start
+    # One low-pass stage would jump its acceleration by k*90 (about 5.9) the instant the target changes; the
+    # second stage makes it several times gentler (about 8x from rest, at these settings).
+    one_stage_jump = (1 - np.exp(-0.004 / 0.06)) * 90.0
+    assert np.abs(np.diff(accel, prepend=0.0)).max() < one_stage_jump / 5
+
+
+def test_a_slow_wobble_around_zero_is_held_still():
+    m, sink = motor()
+    for target in [4.0, -5.0, 3.0, -2.0] * 20:  # under 6 deg/s either way: the policy's idle drift
+        m.set_rate(target, 1.0)
+        drive(m, 0.067)
+    assert not [e for e in sink.events if e["type"] == "mouse"]
+
+
+def test_a_turn_past_the_dead_zone_starts_gently_not_with_a_snap():
+    m, _ = motor()
+    m.set_rate(8.0, 0.0)
+    assert m.target[0] == pytest.approx(2.0)  # soft: the threshold is subtracted, not cut at
+
+
+def test_halting_stops_the_turn_at_once():
+    m, sink = motor(dead_zone_deg_s=(0.0, 0.0))
+    m.set_rate(60.0, 0.0)
+    drive(m, 0.5)
+    m.halt()
+    before = len(sink.events)
+    drive(m, 0.2)
+    assert len(sink.events) == before
+
+
+def test_the_motor_thread_runs_and_stops():
+    import threading
+    import time
+
+    from zombiesai.realgame.dispatch import MouseMotor
+
+    sink = FakeSink()
+    m = MouseMotor(sink, 9.09, threading.Lock(), dead_zone_deg_s=(0.0, 0.0)).start()
+    m.set_rate(300.0, 0.0)
+    time.sleep(0.3)
+    m.stop()
+    moves = [e for e in sink.events if e["type"] == "mouse"]
+    assert len(moves) > 20 and not m._thread.is_alive()

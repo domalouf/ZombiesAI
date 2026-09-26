@@ -115,7 +115,10 @@ class UinputDevice:
         os.write(self.fd, _EVENT.pack(0, 0, kind, code, value))  # the kernel stamps uinput events itself
 
     def key(self, code: str, down: bool, t: float = 0.0) -> None:
-        self._write(EV_KEY, code_for(code), 1 if down else 0)
+        self.key_code(code_for(code), down)
+
+    def key_code(self, code: int, down: bool) -> None:
+        self._write(EV_KEY, int(code), 1 if down else 0)
 
     def move(self, dx: int, dy: int, t: float = 0.0) -> None:
         if dx:
