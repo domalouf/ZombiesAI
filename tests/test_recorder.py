@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+import pytest
 
 from zombiesai import spec
 from zombiesai.agents.scripted import ScriptedAgent
@@ -14,6 +15,7 @@ from zombiesai.demos.clips import (
 from zombiesai.demos.inputs import InputConfig, read_log, synthesize
 from zombiesai.demos.recorder import RecorderConfig, quality_report, record, requantize, wait_to_start
 from zombiesai.sim.nacht_sim import NachtSim, SimConfig
+from zombiesai.sim.render import FOV_DEG
 
 CONFIG = InputConfig(counts_per_degree=10.0)
 
@@ -116,16 +118,45 @@ def test_a_finished_recording_reports_whether_it_is_worth_keeping(tmp_path):
     flow = report["yaw_flow"]
     # The scripted agent turns, the frames move with it, and the response is immediate in the sim's own
     # timing here -- so the best-fitting lag is the one the recorder's pairing implies.
-    assert flow["lag"] == 0 and flow["correlation"] > 0.5
+    assert flow["verdict"] == "ok" and flow["lag"] == 0 and flow["rank_correlation"] > 0.5
+    # ...and the pixels per degree give back the renderer's lens, to within the integer-pixel search.
+    assert flow["fov_deg"] == pytest.approx(FOV_DEG, abs=6.0)
     assert set(report["behaviour"]) >= {"fire_duty", "abs_yaw_deg_per_s"}
+
+
+def test_the_quality_check_expects_the_sims_own_input_latency(tmp_path):
+    """A sim episode can draw a latency of a decision or two; that is the lag its recording should peak at,
+    and the manifest says so rather than the check calling it misaligned."""
+    source = SimSource(ScriptedAgent(), seed=2, hardness=0.4, max_steps=300)
+    assert source.describe()["latency_steps"] == 1
+    config = RecorderConfig(max_steps=300, realtime=False, input=CONFIG)
+    clip = load_clip(record(source, source, tmp_path / "demo", config, stop=lambda: source.done, progress_every=0))
+    flow = quality_report(clip)["yaw_flow"]
+    assert flow["expected_lag"] == 1 and flow["lag"] == 1 and flow["verdict"] == "ok"
 
 
 def test_the_quality_check_catches_labels_that_belong_to_another_recording(tmp_path):
     clip, _ = recorded(tmp_path, steps=300)
     rng = np.random.default_rng(0)
     clip.labels["yaw_deg"] = rng.permutation(clip.labels["yaw_deg"])
-    scrambled = quality_report(clip)["yaw_flow"]["correlation"]
-    assert not (scrambled > 0.5)  # NaN or low: either way it does not pass for aligned
+    assert quality_report(clip)["yaw_flow"]["verdict"] == "no_signal"
+
+
+def test_the_quality_check_catches_a_log_one_decision_out_of_step(tmp_path):
+    clip, _ = recorded(tmp_path, steps=300)
+    yaw = np.asarray(clip.labels["yaw_deg"])
+    for steps in (-1, 1):
+        clip.labels["yaw_deg"] = np.roll(yaw, steps)
+        assert quality_report(clip)["yaw_flow"]["verdict"] == "misaligned"
+
+
+def test_the_quality_check_catches_a_counts_per_degree_off_by_two(tmp_path):
+    clip, _ = recorded(tmp_path, steps=300)
+    yaw = np.asarray(clip.labels["yaw_deg"])
+    for scale in (0.5, 2.0):
+        clip.labels["yaw_deg"] = yaw * scale
+        flow = quality_report(clip)["yaw_flow"]
+        assert flow["verdict"] == "wrong_scale", flow["reasons"]
 
 
 class FakeClock:

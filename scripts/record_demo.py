@@ -24,6 +24,7 @@ has no idea what to do the moment it drifts off-distribution, and there is no DA
 
 import argparse
 import json
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -58,19 +59,35 @@ def check(path: Path) -> None:
         f"  fire {behaviour['fire_duty']:.2f} duty, |yaw| {behaviour['abs_yaw_deg_per_s']:.0f} deg/s, "
         f"reloads {behaviour['reload_per_min']:.1f}/min, clamped looks {report['clamped_looks']:.1%}"
     )
-    correlation = flow["correlation"]
-    rough = f" (only {flow['n']} turning steps sampled, so this is rough)" if flow["n"] < 60 else ""
-    if correlation != correlation:  # NaN: the player barely turned, so there is nothing to check against
+    rough = f", only {flow['n']} turning steps sampled so this is rough" if flow["n"] < 60 else ""
+    if flow["verdict"] == "too_little_turning":
         print("  yaw vs image motion: not enough turning to check")
-    elif correlation < 0.9:
-        print(f"  WARNING yaw vs image motion is only {correlation:.2f}{rough} -- the input log and the")
-        print("          capture look misaligned in time, or counts-per-degree is wrong. Fix it before")
-        print("          recording more. (On --source sim it runs lower: the raycast view is flat-shaded.)")
-    else:
+        return
+    if flow["lag"] is not None:
         print(
-            f"  yaw vs image motion: {correlation:.2f}{rough} at a lag of {flow['lag']} decisions "
-            f"({flow['lag'] * 1000 / 15:.0f} ms of closed-loop delay)"
+            f"  yaw vs image motion: rank correlation {flow['rank_correlation']:.2f} at a lag of {flow['lag']} "
+            f"decisions ({flow['lag'] * 1000 / 15:.0f} ms), expected {flow['expected_lag']}{rough}"
         )
+    if not math.isnan(flow["fov_deg"]):  # NaN when too few 2-8 degree turns moved the image
+        print(
+            f"  scale: {flow['px_per_deg']:.2f} px per labelled degree = a {flow['fov_deg']:.0f} degree "
+            "horizontal FOV on the 128-px frame (WaW is 81-96, the sim 80)"
+        )
+    if flow["verdict"] == "ok":
+        for reason in flow["reasons"]:  # e.g. the scale could not be checked
+            print(f"  note: {reason}")
+        return
+    what = {
+        "no_signal": "yaw does not track the image at any lag -- wrong log for these frames, flipped sign, or a"
+        " dead capture",
+        "misaligned": "the input log and the capture are out of step in time",
+        "wrong_scale": "counts-per-degree is wrong; fix it with requantize (docs/demos.md), no need to re-record",
+    }[flow["verdict"]]
+    print(f"  WARNING {what}.")
+    for reason in flow["reasons"]:
+        print(f"          {reason}")
+    if flow["verdict"] != "wrong_scale":
+        print("          Fix it before recording more: no amount of training absorbs a timing bug.")
 
 
 def notify(message: str, seconds: float = 3.0) -> None:

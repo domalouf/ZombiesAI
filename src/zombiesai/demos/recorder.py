@@ -332,18 +332,29 @@ def requantize(clip_dir: str | Path, config: InputConfig, *, dt: float | None = 
 def quality_report(clip, sample: int = 400) -> dict:
     """Check a finished recording before trusting it: are the labels aligned with the pixels?
 
-    The cheap version of the plan's cross-validation. Yaw must correlate with the direction the image
-    actually moved; below about 0.9 the input log and the capture are out of step in time, and no amount of
-    training absorbs that. (The other half, firing against the magazine counter, needs the HUD parser M4
-    brings, so it is not here yet.)
+    The cheap version of the plan's cross-validation. Yaw must track the direction the image actually moved,
+    at the lag the recording's closed-loop delay implies, and by the number of pixels per degree the game's
+    field of view implies; `yaw_flow_agreement` says which of those fails. A timing bug or a wrong sensitivity
+    is not something any amount of training absorbs. (The other half, firing against the magazine counter,
+    needs the HUD parser M4 brings, so it is not here yet.)
+
+    The expected lag is 0 for the real game -- the recorder shares one clock between log and capture, and
+    WaW answers a turn before the next frame (demo_0000 peaks sharply at 0) -- and the sim's own input
+    latency for a sim recording, which its manifest carries.
     """
     from zombiesai.demos import stats
 
     if not clip.labelled:
         raise ValueError(f"{clip.path} has no labels to check")
     summary = clip.manifest.get("summary", {})
-    flow = yaw_flow_agreement(clip.labels["yaw_deg"], clip.frames, sample=sample)
+    expected_lag = int(clip.manifest.get("source", {}).get("latency_steps", 0))
     idle = (clip.flags & FLAG_NOT_PLAYING) != 0
+    # Only play steps with a real frame: a repeated frame during a capture outage shows no motion whatever the
+    # hand did, and a menu turns nothing -- either would read as a timing fault that is not there. Zeroing
+    # their yaw keeps them out of the turning sample while leaving the step index (and so every lag) intact.
+    checkable = ((clip.flags & FLAG_BAD_STEP) == 0) & ~idle
+    yaw = np.where(checkable, np.asarray(clip.labels["yaw_deg"], dtype=np.float64), 0.0)
+    flow = yaw_flow_agreement(yaw, clip.frames, sample=sample, expected_lag=expected_lag)
     # Menu time says nothing about how someone plays; describe the hands over the steps that were play.
     played = clip.actions[~idle] if (~idle).any() else clip.actions
     return {
