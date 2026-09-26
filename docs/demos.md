@@ -45,7 +45,16 @@ from zombiesai.demos.inputs import InputConfig
 requantize("data/demos/demo_0000", InputConfig(counts_per_degree=6.9))
 ```
 
+**Tap F8 when you stop playing, and again when you start.** Menus, the pause screen, loading, the game-over
+card, alt-tabbing out: tap the mark key (`--mark-key`, F8 by default, which World at War leaves unbound) on
+the way in and on the way out, and the terminal says `NOT PLAYING` / `playing again`. A step is marked if any
+part of its input window was not play -- so the step holding each press is excluded, and play resumes on the
+step after the second one. Marked steps stay in the clip (flag `FLAG_NOT_PLAYING`) but never reach training,
+and frame stacks don't reach back across them. The key presses are in `inputs.jsonl` like any other, so
+`requantize` re-derives the marking, under a different key if you pass `InputConfig(mark_key=...)`.
+
 `record_demo.py` checks the recording the moment it finishes, while the game is still open: overrun rate,
+time marked not playing,
 label confidence, what your hands did, and — the one that matters — whether your yaw labels correlate with
 the direction the image actually moved, at which lag. The lag is the closed-loop delay measured from your own
 recording, and it should match spike S3. Below about 0.9 correlation at every lag, the input log and the

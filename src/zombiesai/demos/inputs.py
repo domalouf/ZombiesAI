@@ -15,6 +15,11 @@ The log itself is newline-delimited JSON on one monotonic clock, shared with wha
     {"t": 1234.6, "type": "button", "code": "mouse1", "down": true}
     {"t": 1234.7, "type": "mouse",  "dx": 42, "dy": -3}
     {"t": 1240.0, "type": "marker", "name": "round_start"}
+
+One key is not a control at all: the **mark key** (F8 unless changed). The player taps it on the way into a
+menu, the pause screen, a loading screen or the game-over card, and again on the way back, and the steps in
+between are flagged as not playing (`not_playing` below; `clips.FLAG_NOT_PLAYING`). It stays in the raw log
+like every other key, so the marking is recomputed from the log exactly as the actions are.
 """
 
 import json
@@ -49,6 +54,9 @@ DEFAULT_BINDINGS = {
 # mislabelling it teaches the policy that the prompt means nothing); a swap loses to every other press.
 BUTTON_PRIORITY = ("use", "grenade", "reload", "melee", "swap")
 HOLD_FRACTION = 0.5  # a control counts as held for a decision if it was down for at least half of it
+# F8 because World at War binds nothing to it by default (F5, F10 and F12 are taken), and it sits where a
+# hand can find it without looking. It must never be a control: see InputConfig.__post_init__.
+MARK_KEY = "f8"
 YAW_LIMIT_DEG = max(spec.YAW_BINS_DEG)
 PITCH_LIMIT_DEG = max(spec.PITCH_BINS_DEG)
 
@@ -68,6 +76,15 @@ class InputConfig:
     # cannot express. Clamp it, and flag the step so it can be dropped from training instead of teaching a
     # 30-degree turn where the human turned 90.
     flag_clamped: bool = True
+    # The key that toggles "not playing" (see `PlayMarker`). None turns the marking off.
+    mark_key: str | None = MARK_KEY
+
+    def __post_init__(self):
+        if self.mark_key is not None:
+            object.__setattr__(self, "mark_key", self.mark_key.lower())
+            if self.mark_key in {str(code).lower() for code in self.bindings}:
+                # A mark key that is also bound would pause the dataset every time the player reloaded.
+                raise ValueError(f"mark key {self.mark_key!r} is bound to {self.bindings[self.mark_key]!r}")
 
 
 @dataclass
@@ -198,24 +215,83 @@ def actions_from(held: np.ndarray, presses: np.ndarray, counts: np.ndarray, conf
     )
 
 
-def quantize(
-    events, t0: float, n_steps: int, config: InputConfig | None = None, dt: float | None = None
-) -> Labels:
-    """Fold a raw input log into one factored action per decision, on deadlines t0 + k*dt."""
-    config = config or InputConfig()
-    dt = dt or 1.0 / spec.DECISION_HZ
+class PlayMarker:
+    """Streaming fold of the mark key into "was this decision play?", one decision at a time.
+
+    Recording starts in "playing"; each press of the mark key flips it. A decision counts as not playing if
+    the state was "not playing" at *any* moment of its input window -- so the step whose window holds the
+    press that stops play is already excluded, and so is the one whose window holds the press that resumes
+    it. Play resumes on the step after that: its frame was captured at the end of the resuming window, after
+    the player had said they were back. Both edges round towards exclusion because a menu frame mislabelled
+    as play costs more than one real step thrown away.
+
+    Only down-edges count, and a key already down does not count again: Windows Raw Input repeats the make
+    code while a key is held (evdev's value-2 repeats are dropped at decode), and a held F8 is one toggle.
+    """
+
+    def __init__(self, key: str | None = MARK_KEY):
+        self.key = None if key is None else key.lower()
+        self.playing = True
+        self._down = False
+
+    def feed(self, events) -> bool:
+        """One window's events (already in time order) -> True if any part of the window was not play."""
+        not_playing = not self.playing
+        if self.key is None:
+            return not_playing
+        for event in events:
+            if event.get("type") != "key" or str(event.get("code", "")).lower() != self.key:
+                continue
+            if event["down"] and not self._down:
+                self.playing = not self.playing
+                not_playing = True
+            self._down = bool(event["down"])
+        return not_playing
+
+
+def _windows(events, t0: float, n_steps: int, dt: float):
+    """The log cut into decision windows on deadlines t0 + k*dt: (k, start, end, events in the window).
+
+    Shared by the action quantizer and the not-playing marker, so an event can never count towards one
+    step's action and another step's marking."""
     events = sorted((e for e in events if e.get("type") in ("key", "button", "mouse")), key=lambda e: e["t"])
-    folder = InputFolder(config)
-    held = np.zeros((n_steps, len(CONTROLS)))
-    presses = np.zeros((n_steps, len(CONTROLS)), dtype=np.int64)
-    counts = np.zeros((n_steps, 2))
     cursor = 0
     for k in range(n_steps):
         start, end = t0 + k * dt, t0 + (k + 1) * dt
         first = cursor
         while cursor < len(events) and events[cursor]["t"] < end:
             cursor += 1
-        held[k], presses[k], counts[k] = folder.feed(events[first:cursor], start, end)
+        yield k, start, end, events[first:cursor]
+
+
+def not_playing(
+    events, t0: float, n_steps: int, config: InputConfig | None = None, dt: float | None = None
+) -> np.ndarray:
+    """(T,) bool: which decisions of a raw log the player marked as not playing, by `PlayMarker`'s rule.
+
+    The recorder applies the same marker live; this is the offline half, so `requantize` can re-derive the
+    marking -- under a different mark key, if the one recorded with was wrong."""
+    config = config or InputConfig()
+    dt = dt or 1.0 / spec.DECISION_HZ
+    marker = PlayMarker(config.mark_key)
+    out = np.zeros(n_steps, dtype=bool)
+    for k, _start, _end, window in _windows(events, t0, n_steps, dt):
+        out[k] = marker.feed(window)
+    return out
+
+
+def quantize(
+    events, t0: float, n_steps: int, config: InputConfig | None = None, dt: float | None = None
+) -> Labels:
+    """Fold a raw input log into one factored action per decision, on deadlines t0 + k*dt."""
+    config = config or InputConfig()
+    dt = dt or 1.0 / spec.DECISION_HZ
+    folder = InputFolder(config)
+    held = np.zeros((n_steps, len(CONTROLS)))
+    presses = np.zeros((n_steps, len(CONTROLS)), dtype=np.int64)
+    counts = np.zeros((n_steps, 2))
+    for k, start, end, window in _windows(events, t0, n_steps, dt):
+        held[k], presses[k], counts[k] = folder.feed(window, start, end)
     return actions_from(held, presses, counts, config)
 
 

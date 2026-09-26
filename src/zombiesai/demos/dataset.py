@@ -4,7 +4,8 @@ Two rules here are load-bearing rather than stylistic:
 
 * **Frames are stored once and stacked by index arithmetic at sample time, clamped at clip boundaries.**
   Stacking at write time is 4x the storage for zero information, and an unclamped stack quietly teaches the
-  network that the end of one clip causes the start of the next.
+  network that the end of one clip causes the start of the next. A FLAG_CLIP_START mid-clip (play resuming
+  after a stretch the player marked as a menu) is a boundary too: history clamps there as well.
 * **Held-out data is held out by clip, never by step.** Neighbouring frames of one clip are nearly identical,
   so a step-level split reports a validation accuracy that is really a memorisation score.
 """
@@ -44,6 +45,8 @@ class ClipDataset:
         self.clips = [c for c in clips if c.n_steps > 0]
         self.config = config or DataConfig()
         self.before, self.after = before, after
+        # Where each step's history begins, per clip: computed once, read on every sample.
+        self._segment_start = [clip.segment_start for clip in self.clips]
         index = []
         for ci, clip in enumerate(self.clips):
             usable = clip.usable(self.config.min_confidence)
@@ -67,12 +70,13 @@ class ClipDataset:
         return np.stack([self.clips[c].actions[t] for c, t in self.index]).astype(np.int64)
 
     def frames(self, rows: np.ndarray) -> np.ndarray:
-        """(B, window, 72, 128, 3) uint8. Steps before a clip's start repeat its first frame."""
+        """(B, window, 72, 128, 3) uint8. Steps before a clip's (or a resumed segment's) start repeat its
+        first frame."""
         out = np.empty((len(rows), self.window, *spec.PIXELS_SHAPE), dtype=np.uint8)
         offsets = np.arange(-self.before, self.after + 1)
         for i, (ci, t) in enumerate(rows):
             clip = self.clips[ci]
-            taps = np.clip(t + offsets, 0, clip.n_steps - 1)
+            taps = np.clip(t + offsets, self._segment_start[ci][t], clip.n_steps - 1)
             out[i] = clip.frames[taps]
         return out
 
@@ -109,11 +113,14 @@ class ClipDataset:
         return out
 
     def prev_actions(self, clip_index: int, step: int) -> np.ndarray:
-        """The spec's prev-action encoding, built from the clip's own labels, clamped at the clip start."""
+        """The spec's prev-action encoding, built from the clip's own labels, clamped at the segment start."""
         clip = self.clips[clip_index]
-        if step == 0 or not clip.labelled:
+        first = int(self._segment_start[clip_index][step])
+        if step == first or not clip.labelled:
             return spec.encode_prev_actions([spec.NEUTRAL_ACTION] * spec.PREV_ACTION_HISTORY)
-        history = [tuple(int(v) for v in clip.actions[max(step - 1 - i, 0)]) for i in range(spec.PREV_ACTION_HISTORY)]
+        history = [
+            tuple(int(v) for v in clip.actions[max(step - 1 - i, first)]) for i in range(spec.PREV_ACTION_HISTORY)
+        ]
         return spec.encode_prev_actions(history)
 
     def epoch(self, batch_size: int, rng: np.random.Generator, shuffle: bool = True, drop_last: bool = True):

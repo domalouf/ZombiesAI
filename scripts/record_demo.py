@@ -10,6 +10,9 @@ Demos recorded this way are the only labels good enough to train the IDM, which 
 ordinary gameplay video. `--counts-per-degree` is spike S4's number for the sensitivity you play at; the raw
 input log is stored beside the clip, so getting it wrong costs a re-quantization rather than a re-recording.
 
+Tap F8 (`--mark-key`) going into a menu, the pause screen, a loading screen or the game-over card, and again
+coming back. Those steps stay in the recording but are flagged and never trained on.
+
 Play deliberately varied games -- camping, trains, bad positioning, early deaths. A clone of expert-only play
 has no idea what to do the moment it drifts off-distribution, and there is no DAgger loop here to save it.
 """
@@ -19,7 +22,7 @@ import json
 from pathlib import Path
 
 from zombiesai.demos.clips import load_clip
-from zombiesai.demos.inputs import DEFAULT_BINDINGS, InputConfig
+from zombiesai.demos.inputs import DEFAULT_BINDINGS, MARK_KEY, InputConfig
 from zombiesai.demos.recorder import RecorderConfig, quality_report, record
 
 
@@ -31,6 +34,12 @@ def check(path: Path) -> None:
         f"  {report['steps']} steps ({report['seconds'] / 60:.1f} min), "
         f"overruns {report['overrun_rate']:.1%}, label confidence {report['mean_confidence']:.2f}"
     )
+    if report["not_playing_steps"]:
+        share = report["not_playing_steps"] / max(report["steps"], 1)
+        minutes = report["not_playing_seconds"] / 60
+        print(f"  not playing (marked): {minutes:.1f} min ({share:.0%}), left out of training")
+    else:
+        print("  not playing (marked): none -- every step counts as play")
     print(
         f"  fire {behaviour['fire_duty']:.2f} duty, |yaw| {behaviour['abs_yaw_deg_per_s']:.0f} deg/s, "
         f"reloads {behaviour['reload_per_min']:.1f}/min, clamped looks {report['clamped_looks']:.1%}"
@@ -71,6 +80,8 @@ def main() -> None:
     parser.add_argument("--monitor", type=int, default=1)
     parser.add_argument("--no-hud", action="store_true",
                         help="don't save full-resolution HUD crops (they cost ~2.6 GB per 20 minutes at 1440p)")
+    parser.add_argument("--mark-key", default=MARK_KEY,
+                        help="key that toggles 'not playing' (menus, pause, loading, game over); 'none' disables")
     parser.add_argument("--notes", default="", help="what you were trying to do -- camping, training, dying early")
     # Sim source only.
     parser.add_argument("--episodes", type=int, default=1, help="how many sim games to record")
@@ -82,7 +93,11 @@ def main() -> None:
     args = parser.parse_args()
 
     bindings = json.loads(args.bindings.read_text()) if args.bindings else dict(DEFAULT_BINDINGS)
-    input_config = InputConfig(counts_per_degree=args.counts_per_degree, bindings=bindings)
+    mark_key = None if args.mark_key.lower() == "none" else args.mark_key
+    try:
+        input_config = InputConfig(counts_per_degree=args.counts_per_degree, bindings=bindings, mark_key=mark_key)
+    except ValueError as err:
+        raise SystemExit(f"--mark-key: {err}; pick a key the game does not use") from None
 
     if args.source == "screen":
         import sys
@@ -119,6 +134,8 @@ def main() -> None:
                 print("         converted from wall clock, so a clock step mid-recording would shift labels.")
         out = next_dir(args.out, "demo")
         print(f"recording to {out} -- play; ctrl-c to stop early")
+        if mark_key:
+            print(f"tap {mark_key} going into a menu, pause, loading or game-over screen, and again coming back")
         config = RecorderConfig(
             max_seconds=args.minutes * 60, max_steps=int(args.minutes * 60 * 15) + 10,
             input=input_config, notes=args.notes,

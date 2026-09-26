@@ -9,6 +9,9 @@ The loop is the same discipline the real environment will run under, and for the
 * **Alignment is explicit.** The frame captured at deadline k is paired with the input collected over
   [t_k, t_k+1) -- what the player could see, and what they did about it. Off by one here is the bug that
   looks like "the model is bad at aiming" for a week.
+* **Not every second of a session is play.** The player taps the mark key (F8) going into a menu, the pause
+  screen, a loading screen or the game-over card, and again coming back; those steps are kept, flagged
+  FLAG_NOT_PLAYING, and left out of training. Which step a press lands on is `inputs.PlayMarker`'s rule.
 
 The raw input log is written alongside the clip, so the labels can be recomputed later under different
 bindings, a different `counts_per_degree`, or different bins, without asking anyone to play again.
@@ -23,12 +26,20 @@ import numpy as np
 
 from zombiesai import spec
 from zombiesai.demos.capture import sleep_until
-from zombiesai.demos.clips import FLAG_BAD_STEP, ClipWriter, load_clip
+from zombiesai.demos.clips import (
+    FLAG_BAD_STEP,
+    FLAG_CLIP_START,
+    FLAG_NOT_PLAYING,
+    ClipWriter,
+    load_clip,
+)
 from zombiesai.demos.inputs import (
     InputConfig,
     InputFolder,
+    PlayMarker,
     actions_from,
     label_confidence,
+    not_playing,
     read_log,
     yaw_flow_agreement,
 )
@@ -77,7 +88,10 @@ def record(
     )
     log = open(Path(out_dir) / "inputs.jsonl", "a", buffering=1)
     folder = InputFolder(config.input)
+    marker = PlayMarker(config.input.mark_key)
     overruns = 0
+    idle = 0  # steps marked not playing
+    was_idle = False
     t0 = time.monotonic()
     try:
         pending = frame_source.read()
@@ -99,13 +113,27 @@ def record(
             labels = actions_from(held, presses, counts, config.input)
             late = overshoot > (config.overrun_factor - 1.0) * dt
             overruns += late
+            # The same fold `requantize` runs offline (`inputs.not_playing`), fed the same window, and the
+            # same flag rule as `clips.with_play_marks` -- so the marking is recomputable from the log.
+            playing_before = marker.playing
+            is_idle = marker.feed(events)
+            idle += is_idle
+            if marker.playing != playing_before:
+                state = "playing again" if marker.playing else "NOT PLAYING"
+                print(f"  [{k * dt:6.0f}s] {state} ({config.input.mark_key} toggles)", flush=True)
+            flags = (
+                (FLAG_BAD_STEP if late else 0)
+                | (FLAG_NOT_PLAYING if is_idle else 0)
+                | (FLAG_CLIP_START if was_idle and not is_idle else 0)
+            )
+            was_idle = is_idle
             writer.add(
                 pending,
                 labels.actions[0],
                 confidence=float(label_confidence(labels, config.input)[0]),
                 yaw_deg=float(labels.yaw_deg[0]),
                 pitch_deg=float(labels.pitch_deg[0]),
-                flags=FLAG_BAD_STEP if late else 0,
+                flags=flags,
                 hud=pending_hud,
             )
             pending, pending_hud = frame, getattr(frame_source, "last_hud", None)
@@ -123,6 +151,9 @@ def record(
                 "seconds": seconds,
                 "overruns": int(overruns),
                 "overrun_rate": overruns / max(writer.n_steps, 1),
+                "not_playing_steps": int(idle),
+                "not_playing_seconds": idle * dt,
+                "mark_key": config.input.mark_key,
                 # The clock the input log is stamped on, so the labels can be rebuilt against the same
                 # decision boundaries the recorder used rather than guessed ones.
                 "t0_mono": t0,
@@ -136,9 +167,11 @@ def requantize(clip_dir: str | Path, config: InputConfig, *, dt: float | None = 
     """Recompute a recorded demo's labels from its raw input log and write them back.
 
     This is what keeping the log buys: a corrected `counts_per_degree`, a rebound key, or a change to the
-    yaw bins costs a second of arithmetic instead of another evening at the game.
+    yaw bins costs a second of arithmetic instead of another evening at the game. The not-playing marking
+    is re-derived from the same log under `config.mark_key` -- so a clip recorded with a different mark key
+    wants that key passed here, and `mark_key=None` clears the marking. Every other flag is carried over.
     """
-    from zombiesai.demos.clips import attach_labels
+    from zombiesai.demos.clips import attach_labels, with_play_marks
 
     clip_dir = Path(clip_dir)
     clip = load_clip(clip_dir)
@@ -155,15 +188,20 @@ def requantize(clip_dir: str | Path, config: InputConfig, *, dt: float | None = 
     from zombiesai.demos.inputs import quantize
 
     labels = quantize(events, t0, clip.n_steps, config, dt)
+    flags = with_play_marks(clip.flags, not_playing(events, t0, clip.n_steps, config, dt))
     attach_labels(
         clip_dir,
         labels.actions,
         label_confidence(labels, config),
         label_source="input_log",
-        flags=clip.flags,
+        flags=flags,
         yaw_deg=labels.yaw_deg,
         pitch_deg=labels.pitch_deg,
-        detail={"requantized_unix": time.time(), "counts_per_degree": config.counts_per_degree},
+        detail={
+            "requantized_unix": time.time(),
+            "counts_per_degree": config.counts_per_degree,
+            "mark_key": config.mark_key,
+        },
     )
     return labels.actions
 
@@ -182,12 +220,17 @@ def quality_report(clip, sample: int = 400) -> dict:
         raise ValueError(f"{clip.path} has no labels to check")
     summary = clip.manifest.get("summary", {})
     flow = yaw_flow_agreement(clip.labels["yaw_deg"], clip.frames, sample=sample)
+    idle = (clip.flags & FLAG_NOT_PLAYING) != 0
+    # Menu time says nothing about how someone plays; describe the hands over the steps that were play.
+    played = clip.actions[~idle] if (~idle).any() else clip.actions
     return {
         "steps": clip.n_steps,
         "seconds": clip.n_steps / spec.DECISION_HZ,
+        "not_playing_steps": int(idle.sum()),
+        "not_playing_seconds": float(idle.sum()) / spec.DECISION_HZ,
         "overrun_rate": summary.get("overrun_rate"),
         "mean_confidence": float(clip.confidence.mean()),
         "clamped_looks": float((np.abs(clip.labels["yaw_deg"]) > max(spec.YAW_BINS_DEG)).mean()),
         "yaw_flow": flow,
-        "behaviour": stats.behaviour_stats(clip.actions),
+        "behaviour": stats.behaviour_stats(played),
     }
