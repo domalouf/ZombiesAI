@@ -145,6 +145,8 @@ Most of it is about when *not* to send input, because input goes to whatever win
 
 - only while the game is the focused window, asked of Hyprland over its IPC socket every tick;
 - only while the picture is live -- a frozen or lost frame (pause menu, hidden workspace) pauses it;
+- every pause, standby and takeover also wipes the policy's frame history, so it never acts on a stack
+  that reaches across the gap (the recording marks the same step with `FLAG_CLIP_START`);
 - touching your own mouse or keyboard hands the controls back until you have been idle for 1.5 s;
 - **F9 stops it**, and every exit path releases every key.
 

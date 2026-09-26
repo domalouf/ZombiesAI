@@ -220,12 +220,26 @@ cannot.
 ```sh
 uv run python scripts/train_bc.py data/clips/session1 data/demos --out runs/bc1
 uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2        # plus your corrections
+uv run python scripts/train_bc.py data/demos --val-clips data/demos/demo_0001 --out runs/bc3   # fixed held-out clip
 uv run python scripts/eval_bc.py runs/bc1/bc.pt --clips data/demos-heldout --episodes 20
 uv run python scripts/watch.py --checkpoint runs/bc1/bc.pt      # watch it play NachtSim
 ```
 
 The policy sees a causal stack of 4 decision frames — nothing you could not see, in nothing but pixels — and
 predicts the eight action heads. Details that are decisions rather than defaults:
+
+- **Memory is a choice of which past frames to stack.** `--frame-offsets 0 1 2 4 8 16 30` feeds the network
+  frames from those many steps back (two seconds in seven frames) instead of the last `--frame-stack`
+  (`frame_stack=4` is exactly offsets 0-3, and checkpoints from before the option load unchanged). Every
+  offset clamps at the step's segment start — a clip start, or play resuming after a pause, outage or marked
+  menu — and the live `BCAgent` keeps just enough frames to reach the oldest offset, clamping the same way and
+  forgetting them all on `reset()`, which the live loop calls exactly where its recording sets
+  `FLAG_CLIP_START`; `tests/test_bc_memory.py` checks the two inputs are identical frame for frame. It is
+  **off by default because it did not help yet**: on 32 minutes of play, strided histories (0,1,2,4,8,16,30
+  and 0,1,2,3,8,15,30) lost 0.01–0.025 mean balanced accuracy to the plain 4-stack on every held-out split
+  and seed, with lower training loss — more input to memorise, not more to learn from. A GRU prototype over
+  per-step embeddings (hidden state carried and reset at segment starts) tied the 4-stack. Re-run the
+  comparison when there are hours of data, not minutes.
 
 - **Class-balanced, focal cross-entropy.** `button` is `none` ~95% of the time; plain cross-entropy answers
   that by never reloading. `class_balance_power` controls how hard the correction is; the default softens it
@@ -252,6 +266,8 @@ Per-frame accuracy lies. A policy at 70% per-frame accuracy can be one that neve
 
 1. **Balanced per-head accuracy against the majority baseline.** If a head does not beat its baseline, it has
    learned nothing, whatever the raw number says.
+   Training also logs each head's plain held-out cross-entropy (`val.nll` in `metrics.jsonl`, no class
+   weights or focal term), which moves before the accuracies do and shows overfitting first.
 2. **Rollout statistics within 2× of the human's** — fire duty cycle, mean |yaw|/s, reload rate, how often a
    button is pressed at all. Measured from *sampled* actions, because that is what the policy will do in the
    game; an argmax policy systematically under-fires.
