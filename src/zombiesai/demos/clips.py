@@ -277,6 +277,30 @@ class Clip:
         return ok
 
 
+def clip_span(clip: Clip, start: int, stop: int) -> Clip:
+    """Steps [start, stop) of a clip as a clip of its own -- the held-out tail of a long recording, say --
+    keeping its step clock and its audio, so step k of the span hears what step start+k of the clip did.
+    Its first step starts a history segment (nothing before the span is visible from inside it). HUD crops
+    are not carried over."""
+    stop = min(int(stop), clip.n_steps)
+    start = max(0, min(int(start), stop))
+    manifest = json.loads(json.dumps(clip.manifest, default=str))
+    manifest.pop("hud", None)
+    if clip.n_steps:
+        try:
+            manifest.setdefault("summary", {})["t0_mono"] = float(clip.step_time(start))
+        except ValueError:
+            pass  # no step clock to shift; the span has none either
+    manifest["span"] = {"of": str(clip.path), "start": start, "stop": stop}
+    labels = None
+    if clip.labels is not None:
+        labels = {key: np.array(value[start:stop]) for key, value in clip.labels.items()}
+        if stop > start:
+            labels["flags"][0] |= FLAG_CLIP_START
+    clip.audio()  # load once, share with the span
+    return Clip(clip.path, manifest, clip.frames[start:stop], labels, _audio=clip._audio)
+
+
 def with_play_marks(flags: np.ndarray, not_playing: np.ndarray) -> np.ndarray:
     """Rewrite a clip's play marking from a (T,) not-playing mask, leaving every other flag alone.
 

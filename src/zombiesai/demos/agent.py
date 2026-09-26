@@ -4,6 +4,11 @@ The frame stack lives here rather than in the environment, and it is built exact
 loader builds it -- most recent frame last, the first frame repeated when there is no history yet -- because
 any disagreement between the two shows up as a policy that plays worse than its validation accuracy says it
 should, and nothing points at the cause.
+
+A checkpoint that hears (`config.use_audio`) reads `obs["audio"]`, the feature `demos/hearing.py` computes for
+the frame's moment -- `LiveAudio.observe` in the real game -- with `obs["audio_mask"]` saying whether there
+was any. An observation without audio (the sim, or a dead stream) is played deaf: the mask is 0, which the
+network learned from the clips recorded without sound.
 """
 
 from collections import deque
@@ -14,6 +19,7 @@ import torch
 
 from zombiesai import spec
 from zombiesai.demos import bc
+from zombiesai.demos.hearing import AudioFeatureConfig, feature_config, silence
 from zombiesai.rl.distributions import FactoredCategorical
 
 
@@ -32,6 +38,11 @@ class BCAgent:
     ):
         self.device = torch.device(device)
         self.net, self.config, self.meta = bc.load(checkpoint, self.device)
+        # The feature config it was trained on: what a live audio source must compute for it. None if deaf.
+        self.audio_features = None
+        if self.config.use_audio:
+            self.audio_features = feature_config(self.meta.get("audio_features")) or AudioFeatureConfig()
+        self._silence = silence(self.audio_features) if self.audio_features is not None else None
         self.deterministic = deterministic
         self.temperature = temperature
         self.env = "nacht-render"
@@ -64,7 +75,14 @@ class BCAgent:
         if self.config.use_prev_actions:
             encoded = spec.encode_prev_actions(self._history)[None]
             vector = torch.from_numpy(encoded).to(self.device)
-        logits, _, _ = self.net(pixels, vector)
+        audio = mask = None
+        if self.audio_features is not None:
+            heard = obs.get("audio")
+            mask = float(obs.get("audio_mask", 1.0)) if heard is not None else 0.0
+            heard = self._silence if heard is None else np.asarray(heard, dtype=np.float32)
+            audio = torch.from_numpy(heard[None]).to(self.device)
+            mask = torch.tensor([mask], device=self.device)
+        logits, _, _ = self.net(pixels, vector, audio, mask)
         dist = FactoredCategorical(logits / (1.0 if self.deterministic else self.temperature), spec.ACTION_NVEC)
         action = dist.mode()[0] if self.deterministic else dist.sample()[0]
         self.last_look = tuple(

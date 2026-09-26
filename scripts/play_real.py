@@ -83,6 +83,10 @@ def main() -> None:
     parser.add_argument("--kill-key", default=KILL_KEY)
     parser.add_argument("--toggle-key", default=TOGGLE_KEY)
     parser.add_argument("--quiet", action="store_true", help="no sound cues")
+    parser.add_argument("--deaf", action="store_true",
+                        help="a policy trained with audio plays without it (as on the clips recorded silent)")
+    parser.add_argument("--audio-device", help="sink monitor the policy listens to (default: the default "
+                        "sink's .monitor; only a .monitor is ever opened)")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--out", type=Path, default=Path("runs/play"))
     args = parser.parse_args()
@@ -116,6 +120,15 @@ def main() -> None:
     # Follows the window by title: WaW's intro window dies and the real one replaces it, and a player that held
     # the first one crashed the moment it was handed the controls.
     capture = FollowWindow(lambda: ScreenCapture(window=args.window, hud_regions=HUD_REGIONS, hud_scale=HUD_SCALE))
+    hearing = None
+    if agent.audio_features is not None and not args.deaf:
+        from zombiesai.demos.audio import PulseMonitorStream
+        from zombiesai.demos.hearing import LiveAudio
+
+        # The game's sound as the policy learned it: the output sink's monitor, never a microphone.
+        hearing = LiveAudio(PulseMonitorStream(args.audio_device, stream_name="policy hearing"),
+                            agent.audio_features).start()
+        print(f"  listening to {hearing.stream.device} ({agent.audio_features.window_s:.2f} s log-mel)")
 
     if args.dry_run:
         sink = FakeSink()
@@ -155,8 +168,10 @@ def main() -> None:
     human.source.drain()  # keys pressed while the model loaded are not commands
     try:
         summary = play(capture, agent, dispatcher, focus=focus, human=human, config=config, writer=writer,
-                       on_state=None if args.quiet else cue)
+                       on_state=None if args.quiet else cue, hearing=hearing)
     finally:
+        if hearing is not None:
+            hearing.close()
         dispatcher.close()  # releases everything again; hangs up on the service (the device stays)
         capture.close()
         human.source.close()
@@ -172,6 +187,11 @@ def main() -> None:
           f"paused unfocused {summary['unfocused']} / frozen {summary['frozen']} / you {summary['human']}, "
           f"overruns {summary['overruns']}")
     print(f"  what it did: {describe_actions(clip.actions[acted])}")
+    if "hearing" in summary:
+        h = summary["hearing"]
+        print(f"  hearing: {h['observed'] - h['no_audio']}/{h['observed']} ticks heard, window ends "
+              f"{h['lag_ms_median']:.0f} ms (p95 {h['lag_ms_p95']:.0f}) before the frame, "
+              f"{h['cost_ms_median']:.1f} ms a tick{', ' + h['error'] if h['error'] else ''}")
     if clip.hud_regions:
         from zombiesai.demos.hud_video import PackError, pack_hud
 

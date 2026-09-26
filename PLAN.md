@@ -667,7 +667,9 @@ uncertainty about which wins; don't pre-commit.
     *Now:* screen recordings keep the raw game audio on the recorder's clock
     (`record_demo.py --audio`, Linux monitor capture; `demos/audio.py`), so the
     feature can be built later from footage already recorded. WASAPI loopback
-    on Windows is still to do.
+    on Windows is still to do. *Built:* `demos/hearing.py` — a (2, 25, 64) stereo
+    log-mel over 0.5 s, `train_bc.py --audio`, live in `play_real.py`; the spec's
+    reserved (2, 64) entry is left alone so SPEC_VERSION does not move.
 12. **Scope creep and motivation loss** — the actual leading cause of death for
     hobby projects. Structural mitigation: M1–M3 are the stated learning goal
     (PPO and DQN from scratch) and are **entirely achievable on Linux with no

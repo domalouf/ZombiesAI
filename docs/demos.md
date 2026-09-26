@@ -92,9 +92,8 @@ recording (demo_0000 scores 0.74, where the old Pearson threshold of 0.9 read 0.
 
 ### Game audio (`--audio`, Linux)
 
-`--audio` also keeps the sound, for the audio features the plan reserves the `audio` observation key for
-(PLAN.md, risk 11). The policy does not hear it yet; the point is that a recording made without it can never
-be given it later.
+`--audio` also keeps the sound, which a policy trained with `train_bc.py --audio` hears (PLAN.md, risk 11;
+see "Hearing" under Behavioural cloning). A recording made without it can never be given it later.
 
 ```sh
 uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 --audio
@@ -226,6 +225,43 @@ predicts the eight action heads. Details that are decisions rather than defaults
   it on with `--prev-actions` and watch the copy rate.
 - **Augmentation is random shift ±4 px and brightness jitter, applied identically across a stack. Never
   horizontal flips** — a flip inverts the yaw label and mirrors the HUD, and Nacht is not mirror-symmetric.
+
+### Hearing (`--audio`)
+
+```sh
+uv run python scripts/train_bc.py data/demos --out runs/bc_audio --audio
+uv run python scripts/compare_audio.py --out runs/audio_compare --train data/demos/demo_0000 \
+    data/demos/demo_0002:0:0.8 --val data/demos/demo_0002:0.8:1 data/demos/demo_0001 --seeds 0 1
+```
+
+`--audio` adds the `audio` key: for every step, a **stereo log-mel of the 0.5 s that ended at the step's
+frame** (`demos/hearing.py`) — 25 frames of 21 ms Hann windows every 20 ms, 64 mel bands to 16 kHz, left and
+right kept as separate channels (their difference is the only direction cue), dB floored at -100 and scaled
+by fixed constants. Half a second rather than the plan's 200 ms because a growl, a plank being torn off or a
+run of footsteps lasts about that long. A small conv encoder turns it into a 128-d embedding that joins the
+pixel features in the mixer.
+
+- **One feature function for training and play.** `features_at(audio, t)` is called per step on a recording
+  (cached per clip under `~/.cache/zombiesai/audio_features`, `--audio-cache` to move it — never beside the
+  clips) and per tick on the live ring buffer; a test checks the two agree to the bit on the same PCM. The
+  feature config is saved in the checkpoint.
+- **Clips without audio still train**, with their audio *masked*: the embedding is multiplied by a has-audio
+  flag that also goes into the mixer. Excluding them would throw away vision data (demo_0000 is a third of
+  the footage); padding them with silence would teach that silence means "nothing is coming". The mask also
+  lets a hearing policy play deaf — in the sim, or when the live stream dies.
+- **Random ±6 dB gain** on training features, so the policy does not hinge on where the volume sat.
+- **Causal and aligned.** Gunfire shows up 25-30 ms after the fire button in the recorded audio and never
+  before it (demo_0001, demo_0002), i.e. in the step after the press.
+- **Caveat: audio carries an echo of the player's own actions** — gunshots, reloads, footsteps — much as
+  prev-actions do. `compare_audio.py` therefore also reports accuracy on *change steps* (the label differs
+  from the step before) and the copy rate, next to a `masked` arm: the audio network with nothing to hear.
+- Checkpoints from before audio load exactly as they were (same modules, same outputs).
+- **First result: no gain yet.** Trained on demo_0000 + the first 80% of demo_0002, validated on the last 20%
+  of demo_0002 + demo_0001 (5212 steps), 8 epochs, 2 seeds: mean balanced accuracy 0.413/0.419 (vision),
+  0.408/0.411 (audio), 0.418/0.416 (masked); final val NLL 0.541/0.549, 0.592/0.599, 0.560/0.559. The audio
+  arm reaches the lowest val NLL of any run early (0.516 at epoch 2-3, against 0.521 for vision) and then
+  overfits fastest (training loss 0.49 against 0.63): ~15 minutes of audio is enough to memorise, not to
+  generalise. More recorded audio, or audio dropout / a smaller encoder, before this is worth switching on.
 
 ## Reading the evaluation
 

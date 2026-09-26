@@ -1,10 +1,10 @@
 """Game audio kept beside a screen recording, on the same clock as the frames and the input log.
 
-The policy does not hear anything yet. This exists because audio is the plan's best cheap upgrade to the
-damage detector (PLAN.md, risk 11): the hurt grunt, the heartbeat and the growls of a zombie behind you are
-information the ~65 degree view simply does not carry. A recording without audio can never be given it
-afterwards, so screen recordings keep the raw stream now, and the 64-bin log-mel the plan reserves the
-`audio` observation key for can be computed later, under whatever window and filterbank turns out to work.
+This exists because audio is the plan's best cheap upgrade to the damage detector (PLAN.md, risk 11): the
+hurt grunt, the heartbeat and the growls of a zombie behind you are information the ~65 degree view simply
+does not carry. A recording without audio can never be given it afterwards, so screen recordings keep the
+raw stream, and the features a policy hears are computed from it later (`demos/hearing.py`: a stereo
+log-mel of the half second before each frame, the same function for training and for live play).
 
 **Alignment is the whole job.** Samples are only useful if step k's frame -- grabbed at `t0 + k/15` on
 `time.monotonic()` -- maps to the samples that were playing at that moment. A sound card counts samples on
@@ -87,8 +87,10 @@ class PulseMonitorStream:
     """
 
     def __init__(self, device: str | None = None, *, rate: int = SAMPLE_RATE, channels: int = CHANNELS,
-                 fragment_ms: int = FRAGMENT_MS, latency_s: float = DEFAULT_LATENCY_S):
+                 fragment_ms: int = FRAGMENT_MS, latency_s: float = DEFAULT_LATENCY_S,
+                 stream_name: str = "demo recording"):
         self.device = device
+        self.stream_name = stream_name
         self.rate, self.channels = rate, channels
         self.fragment_ms = fragment_ms
         self.latency_s = latency_s
@@ -107,7 +109,7 @@ class PulseMonitorStream:
         return [
             "parec", f"--device={self.device}", "--raw", f"--format={SAMPLE_FORMAT}", f"--rate={self.rate}",
             f"--channels={self.channels}", f"--latency-msec={self.fragment_ms}", "--client-name=zombiesai",
-            "--stream-name=demo recording",
+            f"--stream-name={self.stream_name}",
         ]
 
     def open(self) -> None:
@@ -292,6 +294,9 @@ class ClipAudio:
     chunk_end: np.ndarray  # one past its last sample
     chunk_origin: np.ndarray  # monotonic time of sample 0 according to this chunk, latency removed
     meta: dict
+    # Sample number of samples[0]. Always 0 for a recording; a live ring buffer (demos/hearing.py) keeps only
+    # the last seconds but numbers them as the stream did, so its times come out of the same arithmetic.
+    first_sample: int = 0
 
     @property
     def channels(self) -> int:
@@ -314,7 +319,7 @@ class ClipAudio:
         starts = self.chunk_origin + self.chunk_start / self.rate
         i = np.clip(np.searchsorted(starts, t, side="right") - 1, 0, len(starts) - 1)
         s = np.floor((t - self.chunk_origin[i]) * self.rate + 1e-6).astype(np.int64)
-        ok = (s >= self.chunk_start[i]) & (s < self.chunk_end[i]) & (t >= starts[0])
+        ok = (s >= self.chunk_start[i]) & (s < self.chunk_end[i]) & (t >= starts[0]) & (s >= self.first_sample)
         return np.where(ok, s, -1)
 
     def window(self, t_end: float, seconds: float) -> np.ndarray:
@@ -327,7 +332,7 @@ class ClipAudio:
         s = self.sample_at(t_end + (np.arange(n) - n) / self.rate)
         out = np.zeros((n, self.channels), dtype=self.samples.dtype)
         ok = s >= 0
-        out[ok] = self.samples[s[ok]]
+        out[ok] = self.samples[s[ok] - self.first_sample]
         return out
 
 
