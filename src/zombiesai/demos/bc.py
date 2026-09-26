@@ -20,6 +20,11 @@ Three things here are the difference between a cloned policy and a policy-shaped
   belongs in the real env -- but in BC it is also the strongest single predictor of the label, and a policy
   that learns to copy its last action looks excellent on per-frame accuracy and stands still in the game.
   Turn it on when the copy rate is being watched (see `stats.inertia_report`).
+
+**Hearing is optional** (`use_audio`): a stereo log-mel of the half second before each frame
+(`demos/hearing.py`) through a small audio encoder, fused with the pixels. Clips recorded without sound still
+train -- their audio is masked out, not faked -- so the network also learns to play deaf, which is what it
+does if the live stream dies.
 """
 
 import json
@@ -35,6 +40,7 @@ from zombiesai import spec
 from zombiesai.demos import stats
 from zombiesai.demos.clips import DPOINTS_EDGES, Clip
 from zombiesai.demos.dataset import ClipDataset, DataConfig, class_weights, split_clips
+from zombiesai.demos.hearing import DEFAULT_CACHE, AudioFeatureConfig, clip_features, feature_config
 from zombiesai.demos.idm import resolve_device
 from zombiesai.demos.losses import factored_cross_entropy, head_predictions, split_heads
 from zombiesai.rl.distributions import FactoredCategorical
@@ -71,6 +77,8 @@ class BCConfig:
     correction_weight: float = 2.0
     seed: int = 0
     device: str = "auto"
+    use_audio: bool = False  # hear the game: the `audio` key, features from demos/hearing.py
+    audio_dim: int = 128
 
     def __post_init__(self):
         if self.frame_offsets is None:
@@ -96,10 +104,13 @@ class BCConfig:
 
     @property
     def obs_keys(self) -> tuple[str, ...]:
-        return ("pixels", "prev_actions") if self.use_prev_actions else ("pixels",)
+        keys = ("pixels", "prev_actions") if self.use_prev_actions else ("pixels",)
+        return keys + (("audio",) if self.use_audio else ())
 
 
-def build_net(config: BCConfig) -> PixelActorCritic:
+def build_net(config: BCConfig, audio: AudioFeatureConfig | None = None) -> PixelActorCritic:
+    if config.use_audio and audio is None:
+        audio = AudioFeatureConfig()
     return PixelActorCritic(
         spec.ACTION_NVEC,
         frame_stack=len(config.offsets),
@@ -107,6 +118,8 @@ def build_net(config: BCConfig) -> PixelActorCritic:
         hidden=config.hidden,
         width=config.width,
         aux_heads=dict(AUX_HEADS),
+        audio_shape=audio.shape if config.use_audio else None,
+        audio_dim=config.audio_dim,
     )
 
 
@@ -118,6 +131,9 @@ def batch_tensors(batch: dict, config: BCConfig, device: torch.device) -> dict[s
     }
     if config.use_prev_actions:
         out["vector"] = torch.from_numpy(batch["prev_actions"]).to(device)
+    if config.use_audio:
+        out["audio"] = torch.from_numpy(batch["audio"]).to(device)
+        out["audio_mask"] = torch.from_numpy(batch["audio_mask"]).to(device)
     for key in ("mc_return", *AUX_HEADS):
         if key in batch:
             out[key] = torch.from_numpy(batch[key]).to(device)
@@ -126,7 +142,7 @@ def batch_tensors(batch: dict, config: BCConfig, device: torch.device) -> dict[s
 
 
 def compute_loss(net: PixelActorCritic, t: dict[str, torch.Tensor], config: BCConfig, weights) -> tuple:
-    logits, value, aux = net(t["pixels"], t.get("vector"))
+    logits, value, aux = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"))
     loss, per_head = factored_cross_entropy(
         logits, t["action"], class_weights=weights, sample_weights=t["weight"], focal_gamma=config.focal_gamma
     )
@@ -157,14 +173,12 @@ def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device:
     """
     was_training = net.training
     net.eval()
-    predicted, sampled, target = [], [], []
-    nll = np.zeros(len(spec.ACTION_NVEC))  # plain held-out cross-entropy per head: no class weights, no focal term
+    predicted, sampled, target, nll = [], [], [], []
     rng = np.random.default_rng(0)
     for rows in data.epoch(max(32, config.batch_size), rng, shuffle=False, drop_last=False):
         t = batch_tensors(data.batch(rows), config, device)
-        logits, _, _ = net(t["pixels"], t.get("vector"))
-        for head, chunk in enumerate(split_heads(logits)):
-            nll[head] += float(nn.functional.cross_entropy(chunk, t["action"][:, head], reduction="sum"))
+        logits, _, _ = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"))
+        nll.append(head_nll(logits, t["action"]).cpu().numpy())
         predicted.append(head_predictions(logits).cpu().numpy())
         sampled.append(FactoredCategorical(logits, spec.ACTION_NVEC).sample().cpu().numpy())
         target.append(t["action"].cpu().numpy())
@@ -174,21 +188,48 @@ def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device:
     predicted, sampled, target = np.concatenate(predicted), np.concatenate(sampled), np.concatenate(target)
     human = stats.behaviour_stats(target)
     policy = stats.behaviour_stats(sampled)
-    nll /= len(target)
+    nll = np.concatenate(nll).mean(axis=0)
     return {
         "accuracy": stats.accuracy_report(predicted, target),
-        "nll": {**{h: float(nll[i]) for i, h in enumerate(spec.ACTION_HEADS)}, "total": float(nll.sum())},
+        # Plain per-head cross-entropy -- no class weights, no focal term: a proper score, comparable between
+        # runs whatever their training loss was.
+        "nll": {"per_head": dict(zip(spec.ACTION_HEADS, map(float, nll))), "mean": float(nll.mean())},
         "behaviour": {"human": human, "policy": policy},
         "divergence": stats.divergence_report(policy, human),
         "inertia": stats.inertia_report(sampled, target),
     }
 
 
+def head_nll(logits: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
+    """(B, heads) unweighted cross-entropy of each head's label."""
+    out, start = [], 0
+    for head, n in enumerate(spec.ACTION_NVEC):
+        out.append(nn.functional.cross_entropy(logits[:, start : start + n], actions[:, head], reduction="none"))
+        start += n
+    return torch.stack(out, dim=1)
+
+
+def audio_source(config: BCConfig, features: AudioFeatureConfig | None = None,
+                 cache_dir: str | Path | None = DEFAULT_CACHE):
+    """What a dataset hears for each clip under this config: None for a policy that does not hear."""
+    if not config.use_audio:
+        return None
+    features = features or AudioFeatureConfig()
+    return lambda clip: clip_features(clip, features, cache_dir)
+
+
 def train(
-    clips: list[Clip], config: BCConfig, run_dir: str | Path, *, val_clips: list[Clip] | None = None
+    clips: list[Clip],
+    config: BCConfig,
+    run_dir: str | Path,
+    *,
+    val_clips: list[Clip] | None = None,
+    audio_features: AudioFeatureConfig | None = None,
+    audio_cache: str | Path | None = DEFAULT_CACHE,
+    audio=None,
 ) -> Path:
-    """Fit a policy to `clips`. Validation is a random clip-level split of them, or exactly `val_clips` when
-    given (then every one of `clips` trains) -- the way to compare configs on one fixed held-out set."""
+    """Fit a policy. `val_clips` fixes the held-out set instead of splitting `clips`; `audio` overrides what
+    the datasets hear (a clip -> features-or-None callable) -- an ablation passes `lambda clip: None`."""
     labelled = [c for c in clips if c.labelled]
     if not labelled:
         raise ValueError("behavioural cloning needs labelled clips: record with input logging or label with the IDM")
@@ -203,8 +244,12 @@ def train(
     else:
         train_clips, val_clips = labelled, [c for c in val_clips if c.labelled]
     data_config = DataConfig(min_confidence=config.min_confidence, correction_weight=config.correction_weight)
-    train_data = ClipDataset(train_clips, data_config, offsets=config.data_offsets)
-    val_data = ClipDataset(val_clips, data_config, offsets=config.data_offsets)
+    hearing = {}
+    if config.use_audio:
+        audio_features = audio_features or AudioFeatureConfig()
+        hearing = {"audio": audio or audio_source(config, audio_features, audio_cache), "audio_config": audio_features}
+    train_data = ClipDataset(train_clips, data_config, offsets=config.data_offsets, **hearing)
+    val_data = ClipDataset(val_clips, data_config, offsets=config.data_offsets, **hearing)
     if len(train_data) < config.batch_size:
         raise ValueError(f"only {len(train_data)} usable steps; need at least {config.batch_size}")
 
@@ -215,7 +260,7 @@ def train(
             torch.from_numpy(w)
             for w in class_weights(train_data.actions(), config.class_balance, config.class_balance_power)
         ]
-    net = build_net(config).to(device)
+    net = build_net(config, audio_features).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     (run_dir / "config.json").write_text(
         json.dumps(
@@ -229,6 +274,7 @@ def train(
                 "train_clips": [str(c.path) for c in train_clips],
                 "val_clips": [str(c.path) for c in val_clips],
                 "label_sources": sorted({c.label_source for c in labelled}),
+                "audio_features": asdict(audio_features) if config.use_audio else None,
                 "human_behaviour": human,
             },
             indent=2,
@@ -257,22 +303,23 @@ def train(
         balanced = report.get("accuracy", {}).get("mean_balanced", float("nan"))
         print(
             f"epoch {epoch:>3}/{config.epochs} | policy loss {mean.get('policy', float('nan')):.4f} | "
-            f"val balanced {balanced:.3f} | val nll {report.get('nll', {}).get('total', float('nan')):.3f} | "
+            f"val balanced {balanced:.3f} | val nll {report.get('nll', {}).get('mean', float('nan')):.3f} | "
             f"stats {'ok' if report.get('divergence', {}).get('passed', False) else 'off'}",
             flush=True,
         )
         score = balanced if np.isfinite(balanced) else -mean.get("policy", 0.0)
         if score >= best:
             best = score
-            save(checkpoint, net, config, epoch, report, human)
+            save(checkpoint, net, config, epoch, report, human, audio_features)
     log.close()
     if not checkpoint.exists():
-        save(checkpoint, net, config, config.epochs, report, human)
+        save(checkpoint, net, config, config.epochs, report, human, audio_features)
     (run_dir / "report.json").write_text(json.dumps({"human": human, "final": report}, indent=2))
     return checkpoint
 
 
-def save(path: Path, net: PixelActorCritic, config: BCConfig, epoch: int, report: dict, human: dict) -> None:
+def save(path: Path, net: PixelActorCritic, config: BCConfig, epoch: int, report: dict, human: dict,
+         audio: AudioFeatureConfig | None = None) -> None:
     tmp = path.with_suffix(".tmp")
     torch.save(
         {
@@ -284,6 +331,8 @@ def save(path: Path, net: PixelActorCritic, config: BCConfig, epoch: int, report
             "epoch": epoch,
             "val": report,
             "human_behaviour": human,
+            # Only in checkpoints that hear; `load` builds a deaf network when it is missing.
+            **({"audio_features": asdict(audio)} if config.use_audio and audio is not None else {}),
         },
         tmp,
     )
@@ -296,7 +345,7 @@ def load(path: str | Path, device: torch.device | str = "cpu") -> tuple[PixelAct
     if checkpoint.get("kind") != "bc":
         raise ValueError(f"{path} is a {checkpoint.get('kind')} checkpoint, not a BC policy")
     config = BCConfig(**checkpoint["config"])
-    net = build_net(config)
+    net = build_net(config, feature_config(checkpoint.get("audio_features")))
     net.load_state_dict(checkpoint["model"])
     net.eval()
     return net.to(device), config, checkpoint

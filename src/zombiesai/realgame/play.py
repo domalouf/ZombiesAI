@@ -19,6 +19,10 @@ send input*, and every one of those rules ends in `release_all()`:
   everything and stays out until the human has been idle for `human_idle_s`.
 * **Always released on the way out**, whatever the way out was.
 
+A policy that hears gets `hearing` (`demos.hearing.LiveAudio`): the audio thread runs all along, and each
+acting tick asks it for the half second that ended when the frame was grabbed -- a copy and ~2 ms of numpy,
+never a wait. Nothing about it is reset on a pause; see `LiveAudio` for why.
+
 Every tick outside standby is written to a clip (`label_source="play"`), so a run can be watched back and
 its HUD crops parsed later like any recording; standby is left out altogether, so an hour of waiting costs no
 disk. Each step records who acted (`clips.ACTOR_*`, labels.npz["actor"]):
@@ -246,6 +250,7 @@ def play(
     clock=time.monotonic,
     say=print,
     on_state=None,
+    hearing=None,
 ) -> dict:
     """Run until the kill key, the policy's time limit, or an interrupt. Starts in standby: nothing is sent
     until the toggle key. `on_state(state)` hears every change -- "standby", "acting", a pause reason, and
@@ -372,6 +377,7 @@ def play(
                 fresh = True
                 dispatcher.pump_until(deadline)
                 continue
+            t_frame = clock()
             frame = capture.read()
             stale = bool(getattr(capture, "last_stale", False))
             focused = focus.is_focused()
@@ -386,7 +392,10 @@ def play(
             look = None
             if reason is None:
                 announce("acting")
-                action = np.asarray(agent.act({"pixels": frame}), dtype=np.int64)
+                obs = {"pixels": frame}
+                if hearing is not None:
+                    obs["audio"], obs["audio_mask"] = hearing.observe(t_frame)
+                action = np.asarray(agent.act(obs), dtype=np.int64)
                 look = smoother(agent.last_look) if smooth_look else None
                 dispatcher.apply(action, now, dt, look_deg=look)
                 if look is not None:
@@ -421,6 +430,8 @@ def play(
         hand_back()
         summary = {**counts, "seconds": k * dt, "played_seconds": counts["acted"] * dt,
                    "correction_seconds": counts["corrections"] * dt, "ended": ended, "t0_mono": t0}
+        if hearing is not None:
+            summary["hearing"] = hearing.stats()
         if log is not None:
             log.close()
         if writer is not None:

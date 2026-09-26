@@ -61,6 +61,29 @@ class PixelEncoder(nn.Module):
         return self.fc(self.conv(x.float() / 255.0))
 
 
+class AudioEncoder(nn.Module):
+    """A stereo log-mel window (B, 2, frames, mels) -> (B, out_dim). Left and right are the two input
+    channels, so the first convolution can take their difference -- the only direction cue there is."""
+
+    def __init__(self, shape: tuple[int, int, int], out_dim: int = 128, norm: bool = True):
+        super().__init__()
+        channels = shape[0]
+        layers: list[nn.Module] = []
+        for in_c, out_c, stride in ((channels, 16, (1, 2)), (16, 32, (2, 2)), (32, 32, (2, 2))):
+            layers.append(layer_init(nn.Conv2d(in_c, out_c, 3, stride, padding=1)))
+            if norm:
+                layers.append(nn.GroupNorm(4, out_c))
+            layers.append(nn.ReLU(inplace=True))
+        self.conv = nn.Sequential(*layers)
+        with torch.no_grad():
+            flat = self.conv(torch.zeros(1, *shape)).flatten(1).shape[1]
+        self.fc = nn.Sequential(nn.Flatten(), layer_init(nn.Linear(flat, out_dim)), nn.ReLU(inplace=True))
+        self.shape, self.out_dim = tuple(shape), out_dim
+
+    def forward(self, audio: torch.Tensor) -> torch.Tensor:
+        return self.fc(self.conv(audio.float()))
+
+
 class PixelActorCritic(nn.Module):
     """Pixels (+ any vector observations) -> one categorical per action head, a value, and auxiliary heads.
 
@@ -79,15 +102,22 @@ class PixelActorCritic(nn.Module):
         width: int = 1,
         norm: bool = True,
         aux_heads: dict[str, int] | None = None,
+        audio_shape: tuple[int, int, int] | None = None,
+        audio_dim: int = 128,
     ):
         super().__init__()
         self.nvec = tuple(int(n) for n in nvec)
         self.frame_stack = frame_stack
         self.vector_dim = vector_dim
         self.encoder = PixelEncoder(3 * frame_stack, out_dim=hidden, width=width, norm=norm)
+        # Optional hearing: an audio embedding joins the mixer, gated by a has-audio mask so a clip recorded
+        # without sound (or a dead live stream) contributes exactly nothing rather than a silence it never had.
+        # Without it the module list is unchanged, so every checkpoint from before audio loads as it was.
+        self.audio_encoder = AudioEncoder(audio_shape, audio_dim, norm=norm) if audio_shape else None
+        fused = vector_dim + (audio_dim + 1 if audio_shape else 0)
         self.mixer = (
-            nn.Sequential(layer_init(nn.Linear(hidden + vector_dim, hidden)), nn.ReLU(inplace=True))
-            if vector_dim
+            nn.Sequential(layer_init(nn.Linear(hidden + fused, hidden)), nn.ReLU(inplace=True))
+            if fused
             else nn.Identity()
         )
         self.actor = layer_init(nn.Linear(hidden, sum(self.nvec)), std=0.01)
@@ -96,16 +126,34 @@ class PixelActorCritic(nn.Module):
             {name: layer_init(nn.Linear(hidden, dim), std=0.01) for name, dim in (aux_heads or {}).items()}
         )
 
-    def features(self, pixels: torch.Tensor, vector: torch.Tensor | None = None) -> torch.Tensor:
+    def features(
+        self,
+        pixels: torch.Tensor,
+        vector: torch.Tensor | None = None,
+        audio: torch.Tensor | None = None,
+        audio_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         h = self.encoder(pixels)
+        parts = [h]
         if self.vector_dim:
             if vector is None:
                 raise ValueError(f"this network was built with vector_dim={self.vector_dim} but got none")
-            h = self.mixer(torch.cat([h, vector.float()], dim=-1))
-        return h
+            parts.append(vector.float())
+        if self.audio_encoder is not None:
+            if audio is None:
+                raise ValueError("this network hears: pass audio (and audio_mask=0 where there is none)")
+            mask = torch.ones(len(h), device=h.device) if audio_mask is None else audio_mask.float()
+            parts += [self.audio_encoder(audio) * mask[:, None], mask[:, None]]
+        return self.mixer(torch.cat(parts, dim=-1)) if len(parts) > 1 else h
 
-    def forward(self, pixels: torch.Tensor, vector: torch.Tensor | None = None):
-        h = self.features(pixels, vector)
+    def forward(
+        self,
+        pixels: torch.Tensor,
+        vector: torch.Tensor | None = None,
+        audio: torch.Tensor | None = None,
+        audio_mask: torch.Tensor | None = None,
+    ):
+        h = self.features(pixels, vector, audio, audio_mask)
         aux = {name: head(h) for name, head in self.aux.items()}
         return self.actor(h), self.critic(h).squeeze(-1), aux
 
@@ -116,14 +164,18 @@ class PixelActorCritic(nn.Module):
         return self.critic(self.features(pixels, vector)).squeeze(-1)
 
 
+# Observations with an encoder of their own rather than a place in the flat vector.
+_ENCODED_KEYS = ("pixels", "audio")
+
+
 def vector_dim(obs_keys: tuple[str, ...]) -> int:
     """Width of the non-pixel observations a policy is configured to read."""
-    return sum(int(np.prod(spec.OBS_KEYS[k][0])) for k in obs_keys if k != "pixels")
+    return sum(int(np.prod(spec.OBS_KEYS[k][0])) for k in obs_keys if k not in _ENCODED_KEYS)
 
 
 def vector_from_obs(obs: dict, obs_keys: tuple[str, ...]) -> np.ndarray | None:
     """Concatenate the non-pixel observations, batched or not, in the order the network was built with."""
-    keys = [k for k in obs_keys if k != "pixels"]
+    keys = [k for k in obs_keys if k not in _ENCODED_KEYS]
     if not keys:
         return None
     parts = []

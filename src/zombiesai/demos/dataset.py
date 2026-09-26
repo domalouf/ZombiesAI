@@ -30,6 +30,7 @@ class DataConfig:
     # Loss weight of a human correction from a policy's play run (clips.Clip.corrections) relative to a demo
     # step. Neutral here; behavioural cloning sets its own (bc.BCConfig.correction_weight).
     correction_weight: float = 1.0
+    audio_gain_db: float = 6.0  # +/- random loudness, so the policy does not hinge on where the volume sat
     # No horizontal flips, ever: a flip inverts the yaw label and mirrors the HUD, and Nacht is not
     # mirror-symmetric (PLAN.md, "Demonstrations and BC").
 
@@ -46,9 +47,15 @@ class ClipDataset:
         after: int = 0,
         clamp_edges: bool = False,
         offsets: Sequence[int] | None = None,
+        audio=None,
+        audio_config=None,
     ):
         """`before`/`after` give the contiguous window [t - before, t + after]. `offsets` replaces it with any
-        set of relative steps (negative in the past), e.g. a strided history (-30, -16, -8, -4, -2, -1, 0)."""
+        set of relative steps (negative in the past), e.g. a strided history (-30, -16, -8, -4, -2, -1, 0).
+
+        `audio`, when given, is what each clip sounds like: a callable clip -> per-step features
+        (`hearing.clip_features`) or None for a clip without sound; batches then carry `audio` and
+        `audio_mask` (0 where there was nothing to hear, padded with the feature of silence)."""
         self.clips = [c for c in clips if c.n_steps > 0]
         self.config = config or DataConfig()
         if offsets is None:
@@ -59,6 +66,13 @@ class ClipDataset:
                 raise ValueError(f"offsets must be distinct relative steps, got {tuple(offsets)}")
             before, after = max(0, -int(self.offsets[0])), max(0, int(self.offsets[-1]))
         self.before, self.after = before, after
+        self._audio = None
+        if audio is not None:
+            from zombiesai.demos.hearing import AudioFeatureConfig, silence
+
+            self.audio_config = audio_config or AudioFeatureConfig()
+            self._audio = [audio(clip) for clip in self.clips]
+            self._silence = silence(self.audio_config)
         # Where each step's history begins, per clip: computed once, read on every sample.
         self._segment_start = [clip.segment_start for clip in self.clips]
         # A play run's usable steps are all corrections (`Clip.usable`), so its whole clip carries their weight.
@@ -112,7 +126,25 @@ class ClipDataset:
         prev = np.stack([self.prev_actions(c, t) for c, t in rows])
         batch = {"pixels": frames, "action": actions, "weight": weights, "prev_actions": prev}
         batch.update(self.extras(rows))
+        if self._audio is not None:
+            batch.update(self.audio(rows, (rng or np.random.default_rng()) if augment else None))
         return batch
+
+    def audio(self, rows: np.ndarray, rng: np.random.Generator | None = None) -> dict[str, np.ndarray]:
+        """(B, 2, frames, mels) features and a (B,) has-audio mask. With `rng`, a random gain per sample --
+        a constant in the log domain -- on the ones that have audio."""
+        out = np.empty((len(rows), *self._silence.shape), dtype=np.float32)
+        mask = np.zeros(len(rows), dtype=np.float32)
+        for i, (ci, t) in enumerate(rows):
+            features = self._audio[ci]
+            if features is None:
+                out[i] = self._silence
+            else:
+                out[i], mask[i] = features[t], 1.0
+        if rng is not None and self.config.audio_gain_db:
+            gain = rng.uniform(-self.config.audio_gain_db, self.config.audio_gain_db, size=len(rows))
+            out += (mask * gain / self.audio_config.scale_db)[:, None, None, None].astype(np.float32)
+        return {"audio": out, "audio_mask": mask}
 
     def extras(self, rows: np.ndarray) -> dict[str, np.ndarray]:
         """Value and auxiliary targets for the steps that have them, each with a mask of which ones do.

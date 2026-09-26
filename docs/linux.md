@@ -165,6 +165,15 @@ jumped the view -- so the device is created once and never unplugged mid-session
 launching the game if you can (`uv run python -m zombiesai.realgame.input_service &`); stop it with the game
 closed. If a client dies mid-press the service releases every key it left down.
 
+**A policy trained with `--audio` hears the game**, enabled automatically from the checkpoint: a background
+thread reads the default sink's *monitor* through `parec` (never a microphone; `--audio-device` picks another
+`.monitor`) into a 2 s ring buffer, and each acting tick takes the log-mel of the half second that ended when
+the frame was grabbed — ~2 ms of numpy, never a wait on the pipe. The window ends at the newest sample that
+has arrived (~5-15 ms before the frame) rather than zero-filling the rest. Pauses don't reset it: audio keeps
+flowing through standby as it does in the recordings. A dead or silent-for-0.25 s stream switches the policy
+to its vision-only mode (has-audio 0). `--deaf` forces that. The run summary prints how many ticks were heard,
+the window lag and the cost per tick. Game audio from the play run is not recorded into its clip yet.
+
 Each run is recorded to `runs/play/` like a demo (`label_source="play"`), with the steps nobody could play
 (unfocused, frozen) flagged bad. Spike S1 -- does the engine see the virtual device at all -- is the first
 live run's real test.

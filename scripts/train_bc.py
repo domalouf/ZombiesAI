@@ -20,8 +20,9 @@ import json
 from pathlib import Path
 
 from zombiesai.demos.bc import BCConfig, train
-from zombiesai.demos.clips import clip_from_episode
+from zombiesai.demos.clips import clip_from_episode, iter_clips
 from zombiesai.demos.dataset import training_clips
+from zombiesai.demos.hearing import DEFAULT_CACHE
 
 
 def main() -> None:
@@ -45,6 +46,11 @@ def main() -> None:
                         help="loss weight of a human correction from a play run, against a demo step's 1")
     parser.add_argument("--prev-actions", action="store_true",
                         help="condition on the last two actions (watch the copy rate if you do)")
+    parser.add_argument("--audio", action="store_true",
+                        help="hear the game too: a stereo log-mel of the 0.5 s before each frame (clips "
+                             "recorded without audio still train, with their audio masked out)")
+    parser.add_argument("--audio-cache", type=Path, default=DEFAULT_CACHE,
+                        help="where per-clip audio features are cached (never inside the clips)")
     parser.add_argument("--no-augment", action="store_true")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--seed", type=int, default=0)
@@ -73,8 +79,12 @@ def main() -> None:
         use_prev_actions=args.prev_actions, epochs=args.epochs,
         batch_size=args.batch_size, lr=args.lr, hidden=args.hidden, min_confidence=args.min_confidence,
         correction_weight=args.correction_weight, augment=not args.no_augment, device=args.device, seed=args.seed,
+        use_audio=args.audio,
     )
-    checkpoint = train(clips, config, args.out, val_clips=val_clips)
+    if args.audio:
+        heard = sum(c.audio() is not None for c in clips)
+        print(f"hearing: {heard}/{len(clips)} clips have audio; the rest train with it masked out")
+    checkpoint = train(clips, config, args.out, val_clips=val_clips, audio_cache=args.audio_cache)
     report = json.loads((args.out / "report.json").read_text())
     final = report.get("final", {})
     print(f"\ncheckpoint: {checkpoint}")
