@@ -6,7 +6,8 @@ and `X11Grabber.is_capturable` runs against a fake Xlib that answers the three q
 import numpy as np
 import pytest
 
-from zombiesai.demos.x11_capture import IS_VIEWABLE, X11Error, X11Grabber, region_on_screen
+from zombiesai.demos import x11_capture
+from zombiesai.demos.x11_capture import IS_VIEWABLE, WindowGone, X11Error, X11Grabber, region_on_screen
 
 ROOT, GAME = 0x100, 0x2A00005
 ROOT_SIZE = (2560, 1440)
@@ -103,3 +104,13 @@ def test_screen_capture_on_a_monitor_backend_is_always_capturable():
     capture = ScreenCapture.__new__(ScreenCapture)
     capture.backend = "mss"
     assert capture.is_capturable()
+
+
+def test_a_window_destroyed_while_waiting_is_gone_not_an_error(monkeypatch):
+    """WaW opens a window for its intro and destroys it; the first real session crashed asking after it."""
+    def bad_window(x, display, what):
+        raise X11Error(f"{what}: BadWindow on request 3.0 for resource 0x22000fa")
+
+    monkeypatch.setattr(x11_capture, "check_errors", bad_window)
+    with pytest.raises(WindowGone):
+        fake_grabber(FakeXlib()).is_capturable()

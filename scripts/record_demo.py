@@ -222,12 +222,17 @@ def main() -> None:
             )
 
         not_found: tuple[type[Exception], ...] = ()
+        gone: tuple[type[Exception], ...] = ()
         if args.wait and sys.platform.startswith("linux"):
             from zombiesai.demos.x11_capture import WindowNotFound
 
             # Only a window that isn't there yet is worth waiting for. No X display, or the wrong depth, stays
             # an immediate error rather than a five-minute timeout.
             not_found = (WindowNotFound,)
+            from zombiesai.demos.capture import CaptureLost
+            from zombiesai.demos.x11_capture import WindowGone
+
+            gone = (WindowGone, CaptureLost)
         try:
             capture = open_capture()
         except not_found:
@@ -269,7 +274,14 @@ def main() -> None:
                         capture = open_capture()
                     except not_found:
                         return False
-                return capture.is_capturable()
+                try:
+                    return capture.is_capturable()
+                except gone:
+                    # The window found was the game's start-up window, since destroyed (WaW opens one for its
+                    # intro, then the real one): let it go and look for the title again next time.
+                    capture.close()
+                    capture = None
+                    return False
 
             try:
                 ready = wait_to_start(

@@ -420,7 +420,14 @@ class X11Grabber:
         clear_errors()
         attributes = XWindowAttributes()
         ok = x.get_attributes(self.display, self.window, ctypes.byref(attributes))
-        check_errors(x, self.display, f"window 0x{self.window:x}")
+        try:
+            check_errors(x, self.display, f"window 0x{self.window:x}")
+        except X11Error as error:
+            # WaW under Proton opens a window for its intro, destroys it and opens the real one; asking after
+            # the first one is BadWindow, which means gone, not broken.
+            if "BadWindow" in str(error):
+                raise WindowGone(f"window 0x{self.window:x} no longer exists") from error
+            raise
         if not ok:
             raise WindowGone(f"window 0x{self.window:x} no longer exists")
         if attributes.map_state != IS_VIEWABLE:
