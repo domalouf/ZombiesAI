@@ -12,6 +12,10 @@ Three things here are the difference between a cloned policy and a policy-shaped
   They cost nothing at BC time and they hand RL a critic that is already worth something, plus an encoder
   that already represents the two features a critic needs. Both train only on the clips whose source could
   supply the targets, so a run mixing labelled video with sim episodes uses whatever each clip has.
+* **Memory is a strided frame history, not a longer stack.** `frame_offsets` picks which past decision
+  frames the network sees (steps back, e.g. 0, 1, 2, 4, 8, 16, 30 -- two seconds in seven frames), dense
+  where motion is read and sparse where it only has to remember what was there. Every offset clamps at the
+  step's segment start, in the loader and in the live agent alike. `frame_stack=n` is the offsets 0..n-1.
 * **Prev-action conditioning is off by default.** It is the sufficient statistic for a delayed MDP and it
   belongs in the real env -- but in BC it is also the strongest single predictor of the label, and a policy
   that learns to copy its last action looks excellent on per-frame accuracy and stands still in the game.
@@ -32,7 +36,7 @@ from zombiesai.demos import stats
 from zombiesai.demos.clips import DPOINTS_EDGES, Clip
 from zombiesai.demos.dataset import ClipDataset, DataConfig, class_weights, split_clips
 from zombiesai.demos.idm import resolve_device
-from zombiesai.demos.losses import factored_cross_entropy, head_predictions
+from zombiesai.demos.losses import factored_cross_entropy, head_predictions, split_heads
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.encoders import PixelActorCritic, vector_dim
 
@@ -42,6 +46,9 @@ AUX_HEADS = {"aux_dpoints": len(DPOINTS_EDGES) + 1, "aux_damage": 2}
 @dataclass(frozen=True)
 class BCConfig:
     frame_stack: int = 4
+    # Steps back of each input frame, e.g. (0, 1, 2, 4, 8, 16, 30). None is the plain stack of the last
+    # `frame_stack` frames; when set, it wins and frame_stack becomes the number of frames it names.
+    frame_offsets: tuple[int, ...] | None = None
     use_prev_actions: bool = False
     hidden: int = 512
     width: int = 1
@@ -61,6 +68,28 @@ class BCConfig:
     seed: int = 0
     device: str = "auto"
 
+    def __post_init__(self):
+        if self.frame_offsets is None:
+            if self.frame_stack < 1:
+                raise ValueError(f"frame_stack must be at least 1, got {self.frame_stack}")
+            return
+        offsets = tuple(int(o) for o in self.frame_offsets)  # a checkpoint or config.json hands back a list
+        if 0 not in offsets or min(offsets) < 0 or len(set(offsets)) != len(offsets):
+            raise ValueError(f"frame_offsets must be distinct steps back including 0 (now), got {offsets}")
+        object.__setattr__(self, "frame_offsets", tuple(sorted(offsets)))
+        object.__setattr__(self, "frame_stack", len(offsets))
+
+    @property
+    def offsets(self) -> tuple[int, ...]:
+        """Steps back of each frame the network sees, oldest first -- the order they are stacked in."""
+        back = self.frame_offsets if self.frame_offsets is not None else range(self.frame_stack)
+        return tuple(sorted(back, reverse=True))
+
+    @property
+    def data_offsets(self) -> tuple[int, ...]:
+        """The same frames as ClipDataset offsets: relative steps, negative in the past, oldest first."""
+        return tuple(-o for o in self.offsets)
+
     @property
     def obs_keys(self) -> tuple[str, ...]:
         return ("pixels", "prev_actions") if self.use_prev_actions else ("pixels",)
@@ -69,7 +98,7 @@ class BCConfig:
 def build_net(config: BCConfig) -> PixelActorCritic:
     return PixelActorCritic(
         spec.ACTION_NVEC,
-        frame_stack=config.frame_stack,
+        frame_stack=len(config.offsets),
         vector_dim=vector_dim(config.obs_keys),
         hidden=config.hidden,
         width=config.width,
@@ -125,10 +154,13 @@ def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device:
     was_training = net.training
     net.eval()
     predicted, sampled, target = [], [], []
+    nll = np.zeros(len(spec.ACTION_NVEC))  # plain held-out cross-entropy per head: no class weights, no focal term
     rng = np.random.default_rng(0)
     for rows in data.epoch(max(32, config.batch_size), rng, shuffle=False, drop_last=False):
         t = batch_tensors(data.batch(rows), config, device)
         logits, _, _ = net(t["pixels"], t.get("vector"))
+        for head, chunk in enumerate(split_heads(logits)):
+            nll[head] += float(nn.functional.cross_entropy(chunk, t["action"][:, head], reduction="sum"))
         predicted.append(head_predictions(logits).cpu().numpy())
         sampled.append(FactoredCategorical(logits, spec.ACTION_NVEC).sample().cpu().numpy())
         target.append(t["action"].cpu().numpy())
@@ -138,15 +170,21 @@ def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device:
     predicted, sampled, target = np.concatenate(predicted), np.concatenate(sampled), np.concatenate(target)
     human = stats.behaviour_stats(target)
     policy = stats.behaviour_stats(sampled)
+    nll /= len(target)
     return {
         "accuracy": stats.accuracy_report(predicted, target),
+        "nll": {**{h: float(nll[i]) for i, h in enumerate(spec.ACTION_HEADS)}, "total": float(nll.sum())},
         "behaviour": {"human": human, "policy": policy},
         "divergence": stats.divergence_report(policy, human),
         "inertia": stats.inertia_report(sampled, target),
     }
 
 
-def train(clips: list[Clip], config: BCConfig, run_dir: str | Path) -> Path:
+def train(
+    clips: list[Clip], config: BCConfig, run_dir: str | Path, *, val_clips: list[Clip] | None = None
+) -> Path:
+    """Fit a policy to `clips`. Validation is a random clip-level split of them, or exactly `val_clips` when
+    given (then every one of `clips` trains) -- the way to compare configs on one fixed held-out set."""
     labelled = [c for c in clips if c.labelled]
     if not labelled:
         raise ValueError("behavioural cloning needs labelled clips: record with input logging or label with the IDM")
@@ -156,11 +194,13 @@ def train(clips: list[Clip], config: BCConfig, run_dir: str | Path) -> Path:
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
 
-    train_clips, val_clips = split_clips(labelled, config.val_fraction, config.seed)
+    if val_clips is None:
+        train_clips, val_clips = split_clips(labelled, config.val_fraction, config.seed)
+    else:
+        train_clips, val_clips = labelled, [c for c in val_clips if c.labelled]
     data_config = DataConfig(min_confidence=config.min_confidence)
-    before = config.frame_stack - 1
-    train_data = ClipDataset(train_clips, data_config, before=before)
-    val_data = ClipDataset(val_clips, data_config, before=before)
+    train_data = ClipDataset(train_clips, data_config, offsets=config.data_offsets)
+    val_data = ClipDataset(val_clips, data_config, offsets=config.data_offsets)
     if len(train_data) < config.batch_size:
         raise ValueError(f"only {len(train_data)} usable steps; need at least {config.batch_size}")
 
@@ -212,7 +252,7 @@ def train(clips: list[Clip], config: BCConfig, run_dir: str | Path) -> Path:
         balanced = report.get("accuracy", {}).get("mean_balanced", float("nan"))
         print(
             f"epoch {epoch:>3}/{config.epochs} | policy loss {mean.get('policy', float('nan')):.4f} | "
-            f"val balanced {balanced:.3f} | "
+            f"val balanced {balanced:.3f} | val nll {report.get('nll', {}).get('total', float('nan')):.3f} | "
             f"stats {'ok' if report.get('divergence', {}).get('passed', False) else 'off'}",
             flush=True,
         )

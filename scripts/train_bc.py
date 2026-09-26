@@ -25,6 +25,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=BCConfig.batch_size)
     parser.add_argument("--lr", type=float, default=BCConfig.lr)
     parser.add_argument("--frame-stack", type=int, default=BCConfig.frame_stack)
+    parser.add_argument("--frame-offsets", type=int, nargs="+", default=BCConfig.frame_offsets,
+                        help="steps back of each input frame, e.g. 0 1 2 4 8 16 30 for two seconds of memory "
+                             "(overrides --frame-stack)")
+    parser.add_argument("--val-clips", nargs="*", type=Path, default=None,
+                        help="validate on exactly these clip roots and train on all the others")
     parser.add_argument("--hidden", type=int, default=BCConfig.hidden)
     parser.add_argument("--min-confidence", type=float, default=BCConfig.min_confidence,
                         help="skip steps whose label is worth less than this")
@@ -37,6 +42,11 @@ def main() -> None:
 
     clips = [c for root in args.clips for c in iter_clips(root) if c.labelled]
     clips += [clip_from_episode(path) for path in args.episodes]
+    val_clips = None
+    if args.val_clips is not None:
+        val_clips = [c for root in args.val_clips for c in iter_clips(root) if c.labelled]
+        held = {c.path.resolve() for c in val_clips}
+        clips = [c for c in clips if c.path.resolve() not in held]
     if not clips:
         raise SystemExit("no labelled clips found; record demos or label video with the IDM first")
     steps = sum(int(c.usable(args.min_confidence).sum()) for c in clips)
@@ -44,11 +54,12 @@ def main() -> None:
     print(f"{len(clips)} clips, {steps:,} usable decisions ({steps / 15 / 3600:.2f} h), labels from {sources}")
 
     config = BCConfig(
-        frame_stack=args.frame_stack, use_prev_actions=args.prev_actions, epochs=args.epochs,
+        frame_stack=args.frame_stack, frame_offsets=args.frame_offsets,
+        use_prev_actions=args.prev_actions, epochs=args.epochs,
         batch_size=args.batch_size, lr=args.lr, hidden=args.hidden, min_confidence=args.min_confidence,
         augment=not args.no_augment, device=args.device, seed=args.seed,
     )
-    checkpoint = train(clips, config, args.out)
+    checkpoint = train(clips, config, args.out, val_clips=val_clips)
     report = json.loads((args.out / "report.json").read_text())
     final = report.get("final", {})
     print(f"\ncheckpoint: {checkpoint}")

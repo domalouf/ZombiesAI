@@ -10,6 +10,7 @@ Two rules here are load-bearing rather than stylistic:
   so a step-level split reports a validation accuracy that is really a memorisation score.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -41,9 +42,19 @@ class ClipDataset:
         before: int = 3,
         after: int = 0,
         clamp_edges: bool = False,
+        offsets: Sequence[int] | None = None,
     ):
+        """`before`/`after` give the contiguous window [t - before, t + after]. `offsets` replaces it with any
+        set of relative steps (negative in the past), e.g. a strided history (-30, -16, -8, -4, -2, -1, 0)."""
         self.clips = [c for c in clips if c.n_steps > 0]
         self.config = config or DataConfig()
+        if offsets is None:
+            self.offsets = np.arange(-before, after + 1)
+        else:
+            self.offsets = np.array(sorted({int(o) for o in offsets}), dtype=np.int64)
+            if len(self.offsets) != len(offsets) or not len(self.offsets):
+                raise ValueError(f"offsets must be distinct relative steps, got {tuple(offsets)}")
+            before, after = max(0, -int(self.offsets[0])), max(0, int(self.offsets[-1]))
         self.before, self.after = before, after
         # Where each step's history begins, per clip: computed once, read on every sample.
         self._segment_start = [clip.segment_start for clip in self.clips]
@@ -63,17 +74,17 @@ class ClipDataset:
 
     @property
     def window(self) -> int:
-        return self.before + self.after + 1
+        return len(self.offsets)
 
     def actions(self) -> np.ndarray:
         """Every labelled action in the dataset, in index order -- the input to class weighting and stats."""
         return np.stack([self.clips[c].actions[t] for c, t in self.index]).astype(np.int64)
 
     def frames(self, rows: np.ndarray) -> np.ndarray:
-        """(B, window, 72, 128, 3) uint8. Steps before a clip's (or a resumed segment's) start repeat its
-        first frame."""
+        """(B, window, 72, 128, 3) uint8, oldest first. Steps before a clip's (or a resumed segment's) start
+        repeat its first frame."""
         out = np.empty((len(rows), self.window, *spec.PIXELS_SHAPE), dtype=np.uint8)
-        offsets = np.arange(-self.before, self.after + 1)
+        offsets = self.offsets
         for i, (ci, t) in enumerate(rows):
             clip = self.clips[ci]
             taps = np.clip(t + offsets, self._segment_start[ci][t], clip.n_steps - 1)

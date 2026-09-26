@@ -46,7 +46,7 @@ def main() -> None:
 
     held_out = [c for root in args.clips for c in iter_clips(root) if c.labelled]
     if held_out:
-        data = ClipDataset(held_out, DataConfig(), before=agent.config.frame_stack - 1)
+        data = ClipDataset(held_out, DataConfig(), offsets=agent.config.data_offsets)
         report["held_out"] = evaluate(agent.net, data, agent.config, resolve_device(args.device))
         accuracy = report["held_out"]["accuracy"]
         print(f"held-out clips: {len(data):,} steps")

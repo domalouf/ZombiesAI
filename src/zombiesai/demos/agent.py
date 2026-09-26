@@ -1,7 +1,9 @@
 """A trained pixel policy behind the same reset()/act(obs) interface the baselines and PPO use.
 
 The frame stack lives here rather than in the environment, and it is built exactly the way the training
-loader builds it -- most recent frame last, the first frame repeated when there is no history yet -- because
+loader builds it -- the checkpoint's frame offsets, most recent frame last, the first frame since reset()
+standing in for any offset that reaches further back than that (the loader clamps at the segment start the
+same way; the live loop calls reset() wherever a recording would set FLAG_CLIP_START) -- because
 any disagreement between the two shows up as a policy that plays worse than its validation accuracy says it
 should, and nothing points at the cause.
 """
@@ -36,7 +38,9 @@ class BCAgent:
         self.temperature = temperature
         self.env = "nacht-render"
         self.step = int(self.meta.get("epoch", 0))
-        self._frames: deque[np.ndarray] = deque(maxlen=self.config.frame_stack)
+        # Most recent frame last, and just enough of them to reach the oldest offset.
+        self._offsets = self.config.offsets
+        self._frames: deque[np.ndarray] = deque(maxlen=max(self._offsets) + 1)
         self._history = [spec.NEUTRAL_ACTION] * spec.PREV_ACTION_HISTORY
         # The probability-weighted mean turn, in degrees, from the last act(). Sampling a look bin afresh every
         # 67 ms jumps between 0, +6 and -2 degrees even when the policy is sure of a gentle turn; the mean
@@ -48,12 +52,10 @@ class BCAgent:
         self._history = [spec.NEUTRAL_ACTION] * spec.PREV_ACTION_HISTORY
 
     def stack(self, frame: np.ndarray) -> np.ndarray:
-        frame = np.asarray(frame, dtype=np.uint8)
-        if not self._frames:
-            self._frames.extend([frame] * self.config.frame_stack)
-        else:
-            self._frames.append(frame)
-        return np.stack(self._frames)
+        """Add this step's frame and return the network's input, (len(offsets), H, W, C), oldest first."""
+        self._frames.append(np.array(frame, dtype=np.uint8))  # a copy, in case the caller reuses its buffer
+        last = len(self._frames) - 1
+        return np.stack([self._frames[max(last - back, 0)] for back in self._offsets])
 
     @torch.no_grad()
     def act(self, obs) -> np.ndarray:
