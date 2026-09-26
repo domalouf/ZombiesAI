@@ -1,0 +1,8 @@
+{
+  "about": "One character per cluster of `scripts/build_hud_atlas.py harvest` (stride 3, seed 0, default k) over data/demos/demo_0001, data/demos/demo_0002 and runs/play/play_000{0,1,2}, labelled by eye from the contact sheets. sets: a digit, '?' for a reject template (scene texture, a glyph half gone), '-' to drop the cluster. tally: how many tally strokes the cluster's mean mask shows (0-8), '-' for a mixed cluster (mid-transition).",
+  "sets": {
+    "points": "814007250-7635963-84921?91342681051?????",
+    "ammo": "412846054?173?0138932?2662834?0495364?01"
+  },
+  "tally": "2780-5143468-584"
+}
