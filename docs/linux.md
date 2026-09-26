@@ -163,8 +163,23 @@ jumped the view -- so the device is created once and never unplugged mid-session
 launching the game if you can (`uv run python -m zombiesai.realgame.input_service &`); stop it with the game
 closed. If a client dies mid-press the service releases every key it left down.
 
-Each run is recorded to `runs/play/` like a demo (`label_source="agent"`), with the steps it did not play
-flagged bad. Spike S1 -- does the engine see the virtual device at all -- is the first live run's real test.
+Each run is recorded to `runs/play/` like a demo (`label_source="play"`), with the steps nobody could play
+(unfocused, frozen) flagged bad. Spike S1 -- does the engine see the virtual device at all -- is the first
+live run's real test.
+
+**Taking over is also teaching it** (HG-DAgger). Whenever you grab the controls, your input is decoded
+exactly as a demo's -- the same `--bindings`, `--counts-per-degree` and hold rule, through the recorder's own
+decoder -- and written as the label of those steps: the fix, in exactly the state the policy got itself into,
+which is the data behavioural cloning lacks most. Each step says who acted in `labels.npz["actor"]`
+(`clips.ACTOR_*`): the policy's own steps are kept to watch but never trained on; the step whose window
+holds your first touch is yours; the idle ~1.5 s before it takes back over is you waiting, not playing, and
+is left out (a shorter pause mid-takeover is kept). Holding a key counts as playing, so running with W held
+does not hand the controls back. F7, F8 and F9 are never labels. The run's summary says how many correction
+steps and seconds were captured; train on them beside the demos:
+
+```sh
+uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2   # --correction-weight 2 by default
+```
 
 ## What runs where
 

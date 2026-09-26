@@ -10,7 +10,8 @@ labels are worth -- instead of being forced into fields an episode needs and a v
     <root>/<clip_id>/
       frames.u8    (T, 72, 128, 3) uint8, decision rate, area-averaged
       clip.json    provenance: source video, crop box, fit, spec stamps, label source
-      labels.npz   actions (T, 8) uint8 + per-step confidence and raw pre-quantization yaw/pitch degrees
+      labels.npz   actions (T, 8) uint8 + per-step confidence and raw pre-quantization yaw/pitch degrees, plus
+                   any per-step extras its source writes (a play run's `actor` and `t_mono`; see below)
       hud_<name>.u8  optional (T, h, w, 3) uint8 full-resolution HUD crops, one file per region, same step
                      index as frames.u8; shapes and boxes in clip.json["hud"] (see demos/hud_crops.py)
       hud_<name>/    the same crops once packed as verified video chunks after the session, replacing the
@@ -22,6 +23,12 @@ labels are worth -- instead of being forced into fields an episode needs and a v
 
 Frames and labels are versioned separately on purpose: a spec change that touches the HUD layout must not
 invalidate a weekend of ingested video, but one that moves the yaw bins must invalidate its labels.
+
+A policy's live run (`realgame/play.py`, label_source "play") is the one clip whose labels come from two
+places. Each step says who acted in labels.npz["actor"] (the ACTOR_* codes): where the policy drove, the label
+is the action it sent, which teaches it nothing and is never trained on; where the human took the controls
+back, the label is their input, decoded exactly as a demo's -- a correction in precisely the state the policy
+got itself into, the most valuable label there is (HG-DAgger). `Clip.usable` keeps only those.
 """
 
 import json
@@ -39,7 +46,16 @@ FLAG_LOW_CONFIDENCE = 2  # pseudo-label below the keep threshold
 FLAG_CLIP_START = 4  # no usable history before this step, so a frame stack must clamp here
 FLAG_NOT_PLAYING = 8  # the player marked this stretch as menus/pause/loading (the mark key): not gameplay
 
-LABEL_SOURCES = ("input_log", "agent", "idm", "none")
+# "play": a policy's live run, labelled per step by whoever acted (labels.npz["actor"]).
+LABEL_SOURCES = ("input_log", "agent", "play", "idm", "none")
+
+# Who produced a play-run step's label (labels.npz["actor"], uint8). Only ACTOR_HUMAN is a training label.
+ACTOR_NONE = 0  # nobody: the game was unfocused or its picture frozen (the step is flagged bad as well)
+ACTOR_POLICY = 1  # the policy drove; the label is what it sent
+ACTOR_HUMAN = 2  # the human had taken over; the label is their input, decoded as a demo's
+# The human still held the controls but had stopped touching them: the idle stretch before the policy takes
+# them back. That is someone waiting, not playing, and as a label it would teach standing still.
+ACTOR_HUMAN_IDLE = 3
 _FRAME_BYTES = int(np.prod(spec.PIXELS_SHAPE))
 
 
@@ -94,7 +110,10 @@ class ClipWriter:
         pitch_deg: float = 0.0,
         flags: int = 0,
         hud: dict[str, np.ndarray] | None = None,
+        extras: dict[str, object] | None = None,
     ) -> None:
+        """Append one step. `extras` are further per-step label columns (numpy scalars keep their dtype);
+        like the HUD crops, the set of them is fixed by the first step, so no column can fall out of step."""
         frame = np.ascontiguousarray(frame, dtype=np.uint8)
         if frame.shape != spec.PIXELS_SHAPE:
             raise ValueError(f"frame shaped {frame.shape}, expected {spec.PIXELS_SHAPE}")
@@ -118,9 +137,27 @@ class ClipWriter:
                 "pitch_deg": np.float32(pitch_deg),
                 "flags": np.uint8(flags | (FLAG_CLIP_START if self.n_steps == 0 else 0)),
             }
+            for key, value in (extras or {}).items():
+                if key in row:
+                    raise ValueError(f"extra {key!r} would overwrite a standard label column")
+                row[key] = np.asarray(value)
+            if self._labels and set(row) != set(self._labels):
+                raise ValueError(f"every step needs label columns {sorted(self._labels)}, got {sorted(row)}")
             for key, value in row.items():
                 self._labels.setdefault(key, []).append(value)
         self.n_steps += 1
+
+    def amend(self, step: int, **columns) -> None:
+        """Rewrite label columns of a step already added, before `close` writes them out.
+
+        For labels whose meaning is only known later: the play loop learns that a stretch of the human's steps
+        was the idle wait before handing back only when the policy takes over again."""
+        if step >= self.n_steps:
+            raise IndexError(f"step {step} has not been written (the clip has {self.n_steps})")
+        for key, value in columns.items():
+            if key not in self._labels:
+                raise KeyError(f"this clip has no label column {key!r}")
+            self._labels[key][step] = np.asarray(value, dtype=np.asarray(self._labels[key][step]).dtype)
 
     def _check_hud(self, hud: dict[str, np.ndarray] | None) -> dict[str, np.ndarray]:
         """HUD crops follow the same rule as actions: once a clip has them, every step must, or the crops
@@ -189,6 +226,15 @@ class Clip:
     @property
     def label_source(self) -> str:
         return self.manifest.get("label_source", "none")
+
+    @property
+    def is_play_run(self) -> bool:
+        """A policy's live run, where only the human's corrections are labels. Runs recorded before the
+        per-step `actor` existed were written as label_source "agent" with the play config; they are play
+        runs too, and have no corrections to offer -- their human steps were written as neutral actions."""
+        return self.label_source == "play" or (
+            self.label_source == "agent" and "play" in (self.manifest.get("config") or {})
+        )
 
     @property
     def actions(self) -> np.ndarray | None:
@@ -270,11 +316,22 @@ class Clip:
 
     def usable(self, min_confidence: float = 0.0) -> np.ndarray:
         """Boolean mask of steps fit to train on: not flagged bad, not marked as out of play, and confidently
-        enough labelled."""
+        enough labelled -- and, in a play run, the human's corrections only (`corrections`)."""
         ok = (self.flags & (FLAG_BAD_STEP | FLAG_NOT_PLAYING)) == 0
         if self.labelled:
             ok &= self.confidence >= min_confidence
+        if self.is_play_run:
+            ok &= self.corrections
         return ok
+
+    @property
+    def corrections(self) -> np.ndarray:
+        """(T,) bool: the steps the human acted on while a policy played (ACTOR_HUMAN) -- whatever their
+        flags. All False for any other clip, and for a play run from before the per-step actor was kept."""
+        actor = self.extra("actor") if self.is_play_run else None
+        if actor is None:
+            return np.zeros(self.n_steps, dtype=bool)
+        return np.asarray(actor) == ACTOR_HUMAN
 
 
 def with_play_marks(flags: np.ndarray, not_playing: np.ndarray) -> np.ndarray:

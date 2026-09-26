@@ -19,9 +19,33 @@ send input*, and every one of those rules ends in `release_all()`:
   everything and stays out until the human has been idle for `human_idle_s`.
 * **Always released on the way out**, whatever the way out was.
 
-Every tick outside standby is written to a clip (`label_source="agent"`), so a run can be watched back and
-its HUD crops parsed later like any recording; steps the policy did not act on are flagged bad, and standby
-is left out altogether, so an hour of waiting costs no disk.
+Every tick outside standby is written to a clip (`label_source="play"`), so a run can be watched back and
+its HUD crops parsed later like any recording; standby is left out altogether, so an hour of waiting costs no
+disk. Each step records who acted (`clips.ACTOR_*`, labels.npz["actor"]):
+
+* **The policy's steps** carry the action it sent. They are there to watch, never to train on: a policy
+  cloned from its own actions learns nothing.
+* **The human's steps are corrections, and they are training data** -- the fix, in exactly the state the
+  policy drove itself into, which no demo covers (HG-DAgger). The events `HumanWatch` reads to notice the
+  takeover go through the recorder's own decoder (`inputs.InputFolder`, the same bindings, counts per degree
+  and hold fraction), so a correction is labelled exactly as a demo step would be. The kill, toggle and mark
+  keys are taken out first and are never a label.
+* **Alignment is the recorder's**: the frame read at a tick is paired with the input over the window from
+  that tick to the next, so a step is written one tick late, once its window has closed. The window's edges
+  are the loop's own poll instants -- the deadlines whenever the loop keeps time, and still the truth when a
+  tick runs late.
+* **The first step of a takeover is the human's.** Its window holds their first touch: their reaction to
+  what the policy was doing, which is the whole point. The frames behind it are the policy's, and meant to
+  be -- that history is the state the correction answers.
+* **The idle tail is not.** The policy takes the controls back only after `human_idle_s` of nothing, and
+  those last untouched steps are the human waiting for it, not playing: they are rewritten `ACTOR_HUMAN_IDLE`
+  when the takeover ends, and never trained on. A pause *inside* a takeover (the human moves again before
+  handing back) is play and stays.
+* Steps nobody acted on -- the game unfocused, the picture frozen -- are flagged bad, whoever held the
+  controls.
+
+The raw events of every written step's window go to the clip's `inputs.jsonl`, and each step's poll instant
+to labels.npz["t_mono"], so a correction's label can be rebuilt from the log like a demo's.
 """
 
 import json
@@ -34,8 +58,16 @@ from pathlib import Path
 import numpy as np
 
 from zombiesai import spec
-from zombiesai.demos.capture import sleep_until
-from zombiesai.demos.clips import FLAG_BAD_STEP, FLAG_CLIP_START, ClipWriter
+from zombiesai.demos.clips import (
+    ACTOR_HUMAN,
+    ACTOR_HUMAN_IDLE,
+    ACTOR_NONE,
+    ACTOR_POLICY,
+    FLAG_BAD_STEP,
+    FLAG_CLIP_START,
+    ClipWriter,
+)
+from zombiesai.demos.inputs import InputConfig, InputFolder, Labels, actions_from, label_confidence
 
 KILL_KEY = "f9"  # WaW binds nothing to it; F8 is the recorder's mark key
 TOGGLE_KEY = "f7"  # nor to this one (F5, F10 and F12 are taken)
@@ -123,38 +155,83 @@ def nearest_bins(action: np.ndarray, look: tuple[float, float]) -> np.ndarray:
 
 
 class HumanWatch:
-    """Reads the real mouse and keyboard (never our own virtual device) for two things: the kill key, and
-    any sign the human has taken the controls back."""
+    """Reads the real mouse and keyboard (never our own virtual device) for three things: the kill and toggle
+    keys, any sign the human has taken the controls back, and -- through the demo recorder's own decoder --
+    what they did with them, one window per poll.
 
-    def __init__(self, source, config: PlayConfig):
+    The decoder is fed every window, the policy's and standby's included, so it always knows which keys are
+    down: a key pressed before a takeover and still held is a held key in the first correction, as it would be
+    in a demo. Holding a control is the human playing too (running down a corridor with W held sends nothing
+    after the press), so a held control keeps them in control as surely as moving does."""
+
+    def __init__(self, source, config: PlayConfig, input_config: InputConfig | None = None):
         self.source, self.config = source, config
+        self.input = input_config or InputConfig()
+        bound = {str(code).lower() for code in self.input.bindings}
+        self.kill_key, self.toggle_key = config.kill_key.lower(), config.toggle_key.lower()
+        commands = {self.kill_key, self.toggle_key}
+        if commands & bound:
+            # A command key that is also a control would be the game's input and a label at once.
+            raise ValueError(f"the kill/toggle keys {sorted(commands & bound)} are bound to game controls")
+        # Never a label and never a takeover: the loop's own commands, and the recorder's mark key, which
+        # means nothing here (a stray tap must not become a step of standing still).
+        self.reserved = commands | ({self.input.mark_key} if self.input.mark_key else set())
+        self.folder = InputFolder(self.input)
         self.last_human = -float("inf")
+        self.last_poll: float | None = None
+        self.events: list[dict] = []  # everything the last poll drained, raw, for the clip's input log
+        self.labels: Labels | None = None  # the human's input over the last poll's window, as an action
+        self.touched = False  # that window held a sign of the human: a press, real motion, a held control
 
     def poll(self, now: float) -> str | None:
         """Drain what the human did since the last poll: "kill" or "toggle" if they pressed one of those
-        keys (the kill key wins), otherwise None. Any other input marks the human as holding the controls."""
-        events = self.source.drain(0.0, now)
+        keys (the kill key wins), otherwise None. The window [last poll, now) is also decoded into `labels`,
+        and any other input marks the human as holding the controls."""
+        self.events = self.source.drain(0.0, now)
+        start = now - self.config.dt if self.last_poll is None else self.last_poll
+        self.last_poll = now
         moved = [0, 0]
-        toggles = 0
-        for event in events:
+        toggles, kill, pressed = 0, False, False
+        controls = []
+        for event in self.events:
             kind = event.get("type")
+            code = str(event.get("code", "")).lower()
+            if kind in ("key", "button") and code in self.reserved:
+                if event.get("down"):
+                    kill |= code == self.kill_key
+                    toggles += code == self.toggle_key
+                continue
+            controls.append(event)
             if kind == "mouse":
                 moved[0] += abs(event.get("dx", 0))
                 moved[1] += abs(event.get("dy", 0))
             elif kind in ("key", "button") and event.get("down"):
-                code = str(event.get("code", "")).lower()
-                if code == self.config.kill_key:
-                    return "kill"
-                if code == self.config.toggle_key:
-                    toggles += 1
-                    continue
-                self.last_human = now
-        if max(moved) >= self.config.human_motion_counts:
+                pressed = True
+        held, presses, counts = self.folder.feed(controls, start, now)
+        self.labels = actions_from(held, presses, counts, self.input)
+        self.touched = pressed or max(moved) >= self.config.human_motion_counts or bool(np.any(held > 0))
+        if self.touched:
             self.last_human = now
+        if kill:
+            return "kill"
         return "toggle" if toggles % 2 else None  # two taps inside one tick cancel out
 
     def in_control(self, now: float) -> bool:
         return now - self.last_human < self.config.human_idle_s
+
+
+@dataclass
+class _Tick:
+    """A step whose input window is still open: it is written once the next poll has closed it."""
+
+    frame: np.ndarray
+    hud: dict | None
+    actor: int
+    flags: int
+    action: np.ndarray  # the policy's, as sent; replaced by the human's label if they acted
+    look: tuple[float, float] | None  # the continuous turn the policy sent, if it sent one
+    sent: np.ndarray | None  # the mouse motor's running total when the tick began
+    t: float  # the poll instant that opened the window (the frame was read just after)
 
 
 def play(
@@ -174,10 +251,15 @@ def play(
     until the toggle key. `on_state(state)` hears every change -- "standby", "acting", a pause reason, and
     "stopped" -- for cues the player can hear over a fullscreen game, and must not block.
 
+    `writer`, if given, must be a label_source="play" clip: its steps are labelled by whoever acted.
     Returns a summary of the run (also written into the clip)."""
     config = config or PlayConfig()
+    if writer is not None and writer.label_source != "play":
+        # Any other source would make the policy's own steps look like demonstrations to the trainer.
+        raise ValueError(f"a play run is written as label_source='play', not {writer.label_source!r}")
     dt = config.dt
-    counts = {"acted": 0, "unfocused": 0, "frozen": 0, "human": 0, "overruns": 0, "toggles": 0}
+    counts = {"acted": 0, "unfocused": 0, "frozen": 0, "human": 0, "overruns": 0, "toggles": 0,
+              "corrections": 0, "human_idle": 0}
     armed = False  # the human has handed over the controls with the toggle key
     state = "standby"
     ended = "time limit"
@@ -186,7 +268,10 @@ def play(
     motor = getattr(dispatcher, "motor", None)
     # A mouse motor smooths in continuous time on its own; smoothing per tick as well would only add lag.
     smoother = LookSmoother(1.0 if motor is not None else config.look_smoothing)
-    sent_before = motor.sent_counts.copy() if motor is not None else None
+    log = open(writer.path / "inputs.jsonl", "a", buffering=1) if writer is not None else None
+    pending: _Tick | None = None
+    n_written = 0
+    idle_run: list[tuple[int, bool]] = []  # (step, was it usable) for the human's untouched steps so far
     t0 = clock()
     k = 0
 
@@ -205,6 +290,64 @@ def play(
         if on_state is not None:
             on_state(new)
 
+    def hand_back() -> None:
+        """The takeover is over: the untouched steps at its end were the human waiting, not playing."""
+        for step, was_usable in idle_run:
+            counts["corrections"] -= was_usable
+            counts["human_idle"] += 1
+            if writer is not None:
+                writer.amend(step, actor=ACTOR_HUMAN_IDLE)
+        idle_run.clear()
+
+    def settle(tick: _Tick, closed: bool) -> None:
+        """Label a tick from its now-closed input window and write it. `closed=False` is the last tick of a
+        run that ended before its window did: nothing is known of what the human did in it."""
+        nonlocal writer, log, n_written
+        actor, action, confidence, look = tick.actor, tick.action, 1.0, tick.look or (0.0, 0.0)
+        touched = closed and human.touched
+        if actor == ACTOR_POLICY and touched:
+            actor = ACTOR_HUMAN  # the takeover began inside this window: the human's first touch is here
+        if actor == ACTOR_HUMAN:
+            if closed:
+                labels = human.labels
+                action = labels.actions[0]
+                confidence = float(label_confidence(labels, human.input)[0])
+                look = (float(labels.yaw_deg[0]), float(labels.pitch_deg[0]))
+            else:
+                action, look = np.asarray(spec.NEUTRAL_ACTION), (0.0, 0.0)
+            usable = not tick.flags & FLAG_BAD_STEP
+            counts["corrections"] += usable
+            if touched:
+                idle_run.clear()  # they are still at it: any pause before this was play
+            else:
+                idle_run.append((n_written, usable))
+        else:
+            hand_back()
+            if actor == ACTOR_POLICY and motor is not None and tick.look is not None:
+                # Label what the motor actually sent over this tick's window, not what was asked of it.
+                emitted = motor.sent_counts - tick.sent
+                look = (float(emitted[0]) / motor.cpd, float(emitted[1]) / motor.cpd)
+                action = nearest_bins(action, look)
+        n_written += 1
+        if writer is None:
+            return
+        if closed and log is not None:
+            for event in human.events:
+                log.write(json.dumps(event) + "\n")
+        try:
+            writer.add(tick.frame, action, confidence=confidence, yaw_deg=look[0], pitch_deg=look[1],
+                       flags=tick.flags, hud=tick.hud,
+                       extras={"actor": np.uint8(actor), "t_mono": np.float64(tick.t)})
+        except ValueError as error:
+            # The game came back at another resolution, so its HUD crops no longer fit this clip.
+            # Losing the rest of the recording is better than losing the controls mid-game.
+            say(f"  recording stopped ({error}); still playing")
+            hand_back()
+            writer.close(summary={**counts, "ended": "recording stopped: HUD shape changed"})
+            writer = None
+            log.close()
+            log = None
+
     say(f"  standby: press {config.toggle_key.upper()} in the game to hand it the controls, "
         f"{config.kill_key.upper()} to quit")
     try:
@@ -212,7 +355,10 @@ def play(
             k += 1
             deadline = t0 + k * dt
             now = clock()
-            command = human.poll(now)
+            command = human.poll(now)  # closes the pending tick's input window
+            if pending is not None:
+                settle(pending, closed=True)
+                pending = None
             if command == "kill":
                 ended = f"kill key ({config.kill_key.upper()})"
                 break
@@ -222,19 +368,22 @@ def play(
                 if not armed:
                     announce("standby")
             if not armed:
+                hand_back()
                 fresh = True
                 dispatcher.pump_until(deadline)
                 continue
             frame = capture.read()
             stale = bool(getattr(capture, "last_stale", False))
+            focused = focus.is_focused()
             if human.in_control(now):
                 reason = "human"
-            elif not focus.is_focused():
+            elif not focused:
                 reason = "unfocused"
             elif stale:
                 reason = "frozen"
             else:
                 reason = None
+            look = None
             if reason is None:
                 announce("acting")
                 action = np.asarray(agent.act({"pixels": frame}), dtype=np.int64)
@@ -243,32 +392,21 @@ def play(
                 if look is not None:
                     action = nearest_bins(action, look)
                 counts["acted"] += 1
-                flags = FLAG_CLIP_START if fresh else 0
+                actor, flags = ACTOR_POLICY, FLAG_CLIP_START if fresh else 0
                 fresh = False
             else:
                 announce(reason)
                 counts[reason] += 1
                 action = np.asarray(spec.NEUTRAL_ACTION, dtype=np.int64)
-                flags = FLAG_BAD_STEP
-                fresh = True
-            if motor is not None:
-                # Label what the motor actually sent during this tick, not what was asked of it.
-                emitted = motor.sent_counts - sent_before
-                sent_before = motor.sent_counts.copy()
-                if reason is None and look is not None:
-                    look = (float(emitted[0]) / motor.cpd, float(emitted[1]) / motor.cpd)
-                    action = nearest_bins(action, look)
-            if writer is not None and getattr(capture, "has_frame", True):
-                sent = look if reason is None and look is not None else (0.0, 0.0)
-                try:
-                    writer.add(frame, action, flags=flags, hud=getattr(capture, "last_hud", None),
-                               yaw_deg=sent[0], pitch_deg=sent[1])
-                except ValueError as error:
-                    # The game came back at another resolution, so its HUD crops no longer fit this clip.
-                    # Losing the rest of the recording is better than losing the controls mid-game.
-                    say(f"  recording stopped ({error}); still playing")
-                    writer.close(summary={**counts, "ended": "recording stopped: HUD shape changed"})
-                    writer = None
+                # The human playing a live, focused game is a step like any other, and its history is real;
+                # anything else is nobody's play, whoever held the controls.
+                live = reason == "human" and focused and not stale
+                actor = ACTOR_HUMAN if reason == "human" else ACTOR_NONE
+                flags = (FLAG_CLIP_START if fresh else 0) if live else FLAG_BAD_STEP
+                fresh = not live
+            if getattr(capture, "has_frame", True):
+                pending = _Tick(frame, getattr(capture, "last_hud", None), actor, flags, action, look,
+                                motor.sent_counts.copy() if motor is not None else None, now)
             if clock() > deadline + (config.overrun_factor - 1.0) * dt:
                 counts["overruns"] += 1
             if counts["acted"] * dt >= config.max_seconds:
@@ -278,8 +416,13 @@ def play(
         ended = "interrupted"
     finally:
         dispatcher.release_all()
-        summary = {**counts, "seconds": k * dt, "played_seconds": counts["acted"] * dt, "ended": ended,
-                   "t0_mono": t0}
+        if pending is not None:
+            settle(pending, closed=False)
+        hand_back()
+        summary = {**counts, "seconds": k * dt, "played_seconds": counts["acted"] * dt,
+                   "correction_seconds": counts["corrections"] * dt, "ended": ended, "t0_mono": t0}
+        if log is not None:
+            log.close()
         if writer is not None:
             writer.close(summary=summary)
         if on_state is not None:

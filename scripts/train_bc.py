@@ -3,9 +3,16 @@
     uv run python scripts/train_bc.py data/clips/session1 data/demos --out runs/bc1
 
 Takes any mix of clips -- demos with logged input, video labelled by the inverse dynamics model, sim
-recordings -- and fits one policy over pixels alone. The validation report is the one that matters:
-per-frame accuracy against the majority baseline, whether the policy's own behaviour statistics land within
-2x of the human's, and whether it has learned to copy its last action instead of looking at the screen.
+recordings, and a policy's live runs (runs/play/play_NNNN, or all of runs/play) -- and fits one policy over
+pixels alone. From a play run only the human's corrections are used: the steps where you took the controls
+back, labelled from your input exactly like a demo (the policy's own steps, and the idle wait before you
+handed back, are left out). They weigh --correction-weight times a demo step.
+
+    uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2
+
+The validation report is the one that matters: per-frame accuracy against the majority baseline, whether the
+policy's own behaviour statistics land within 2x of the human's, and whether it has learned to copy its last
+action instead of looking at the screen.
 """
 
 import argparse
@@ -13,7 +20,8 @@ import json
 from pathlib import Path
 
 from zombiesai.demos.bc import BCConfig, train
-from zombiesai.demos.clips import clip_from_episode, iter_clips
+from zombiesai.demos.clips import clip_from_episode
+from zombiesai.demos.dataset import training_clips
 
 
 def main() -> None:
@@ -28,6 +36,8 @@ def main() -> None:
     parser.add_argument("--hidden", type=int, default=BCConfig.hidden)
     parser.add_argument("--min-confidence", type=float, default=BCConfig.min_confidence,
                         help="skip steps whose label is worth less than this")
+    parser.add_argument("--correction-weight", type=float, default=BCConfig.correction_weight,
+                        help="loss weight of a human correction from a play run, against a demo step's 1")
     parser.add_argument("--prev-actions", action="store_true",
                         help="condition on the last two actions (watch the copy rate if you do)")
     parser.add_argument("--no-augment", action="store_true")
@@ -35,18 +45,23 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    clips = [c for root in args.clips for c in iter_clips(root) if c.labelled]
+    clips, empty = training_clips(args.clips, args.min_confidence)
     clips += [clip_from_episode(path) for path in args.episodes]
     if not clips:
         raise SystemExit("no labelled clips found; record demos or label video with the IDM first")
     steps = sum(int(c.usable(args.min_confidence).sum()) for c in clips)
     sources = sorted({c.label_source for c in clips})
     print(f"{len(clips)} clips, {steps:,} usable decisions ({steps / 15 / 3600:.2f} h), labels from {sources}")
+    plays = [c for c in clips if c.is_play_run]
+    if plays or empty:
+        corrections = sum(int(c.usable(args.min_confidence).sum()) for c in plays)
+        print(f"  of which {corrections:,} human corrections ({corrections / 15:.0f} s) from {len(plays)} play "
+              f"runs, weighted {args.correction_weight:g}x; {len(empty)} clips with nothing usable skipped")
 
     config = BCConfig(
         frame_stack=args.frame_stack, use_prev_actions=args.prev_actions, epochs=args.epochs,
         batch_size=args.batch_size, lr=args.lr, hidden=args.hidden, min_confidence=args.min_confidence,
-        augment=not args.no_augment, device=args.device, seed=args.seed,
+        correction_weight=args.correction_weight, augment=not args.no_augment, device=args.device, seed=args.seed,
     )
     checkpoint = train(clips, config, args.out)
     report = json.loads((args.out / "report.json").read_text())

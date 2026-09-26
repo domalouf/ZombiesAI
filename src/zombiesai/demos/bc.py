@@ -58,6 +58,10 @@ class BCConfig:
     val_fraction: float = 0.1
     augment: bool = True
     min_confidence: float = 0.0  # raise it to drop the IDM's least certain pseudo-labels
+    # Loss weight of a human correction from a policy's play run (HG-DAgger data; realgame/play.py) against a
+    # demo step's 1. Corrections are few, and they are the only labels for the states the policy actually
+    # drifts into; 2 lets them count without letting a handful of hurried fixes outweigh hours of real play.
+    correction_weight: float = 2.0
     seed: int = 0
     device: str = "auto"
 
@@ -157,7 +161,7 @@ def train(clips: list[Clip], config: BCConfig, run_dir: str | Path) -> Path:
     rng = np.random.default_rng(config.seed)
 
     train_clips, val_clips = split_clips(labelled, config.val_fraction, config.seed)
-    data_config = DataConfig(min_confidence=config.min_confidence)
+    data_config = DataConfig(min_confidence=config.min_confidence, correction_weight=config.correction_weight)
     before = config.frame_stack - 1
     train_data = ClipDataset(train_clips, data_config, before=before)
     val_data = ClipDataset(val_clips, data_config, before=before)
@@ -180,6 +184,7 @@ def train(clips: list[Clip], config: BCConfig, run_dir: str | Path) -> Path:
                 "obs_keys": list(config.obs_keys),
                 "spec_version": spec.SPEC_VERSION,
                 "train_steps": len(train_data),
+                "train_corrections": train_data.n_corrections,
                 "val_steps": len(val_data),
                 "train_clips": [str(c.path) for c in train_clips],
                 "val_clips": [str(c.path) for c in val_clips],

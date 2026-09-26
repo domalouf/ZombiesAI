@@ -15,7 +15,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from zombiesai import spec
-from zombiesai.demos.clips import Clip
+from zombiesai.demos.clips import Clip, iter_clips
 
 # Per-step targets beyond the action, present only when the clip's source could supply them.
 EXTRA_KEYS = {"mc_return": np.float32, "aux_dpoints": np.int64, "aux_damage": np.int64}
@@ -26,6 +26,9 @@ class DataConfig:
     min_confidence: float = 0.0  # drop steps whose label is worth less than this
     shift_px: int = 4  # random translation, the one augmentation that reliably helps pixel control
     brightness: float = 0.1  # +/- fraction of multiplicative brightness jitter
+    # Loss weight of a human correction from a policy's play run (clips.Clip.corrections) relative to a demo
+    # step. Neutral here; behavioural cloning sets its own (bc.BCConfig.correction_weight).
+    correction_weight: float = 1.0
     # No horizontal flips, ever: a flip inverts the yaw label and mirrors the HUD, and Nacht is not
     # mirror-symmetric (PLAN.md, "Demonstrations and BC").
 
@@ -47,6 +50,8 @@ class ClipDataset:
         self.before, self.after = before, after
         # Where each step's history begins, per clip: computed once, read on every sample.
         self._segment_start = [clip.segment_start for clip in self.clips]
+        # A play run's usable steps are all corrections (`Clip.usable`), so its whole clip carries their weight.
+        self._clip_weight = [self.config.correction_weight if clip.is_play_run else 1.0 for clip in self.clips]
         index = []
         for ci, clip in enumerate(self.clips):
             usable = clip.usable(self.config.min_confidence)
@@ -64,6 +69,11 @@ class ClipDataset:
     @property
     def window(self) -> int:
         return self.before + self.after + 1
+
+    @property
+    def n_corrections(self) -> int:
+        """How many of the steps are human corrections from play runs."""
+        return int(sum(self.clips[c].is_play_run for c, _ in self.index))
 
     def actions(self) -> np.ndarray:
         """Every labelled action in the dataset, in index order -- the input to class weighting and stats."""
@@ -86,7 +96,7 @@ class ClipDataset:
         if augment:
             frames = augment_frames(frames, self.config, rng or np.random.default_rng())
         actions = np.stack([self.clips[c].actions[t] for c, t in rows]).astype(np.int64)
-        weights = np.array([self.clips[c].confidence[t] for c, t in rows], dtype=np.float32)
+        weights = np.array([self.clips[c].confidence[t] * self._clip_weight[c] for c, t in rows], dtype=np.float32)
 
         prev = np.stack([self.prev_actions(c, t) for c, t in rows])
         batch = {"pixels": frames, "action": actions, "weight": weights, "prev_actions": prev}
@@ -158,6 +168,17 @@ def augment_frames(frames: np.ndarray, config: DataConfig, rng: np.random.Genera
         gain = rng.uniform(1.0 - config.brightness, 1.0 + config.brightness, size=(b, 1, 1, 1, 1))
         out = np.clip(out * gain, 0, 255).astype(np.uint8)
     return np.ascontiguousarray(out, dtype=np.uint8)
+
+
+def training_clips(roots, min_confidence: float = 0.0) -> tuple[list[Clip], list[Clip]]:
+    """Every labelled clip under `roots` with something to train on, and the labelled ones left out.
+
+    A root may be a clip, or any directory of them -- data/demos, runs/play, one runs/play/play_0003. A play
+    run offers only its human corrections (`Clip.usable`); one in which nobody took over offers nothing, and
+    is left out rather than risk being drawn as the held-out clip."""
+    labelled = [c for root in roots for c in iter_clips(root) if c.labelled]
+    keep = [c for c in labelled if c.usable(min_confidence).any()]
+    return keep, [c for c in labelled if not c.usable(min_confidence).any()]
 
 
 def split_clips(clips: list[Clip], val_fraction: float = 0.1, seed: int = 0) -> tuple[list[Clip], list[Clip]]:

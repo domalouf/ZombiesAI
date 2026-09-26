@@ -11,6 +11,12 @@ chime says which (the fullscreen game hides notifications). It only ever sends i
 focused window and its picture is live, and touching your own mouse or keyboard takes the controls back
 until you have been idle for 1.5 s. Every run is recorded to runs/play/ (frames, HUD crops, the actions
 chosen) -- watch it back with the same tools as a demo.
+
+Taking over is also how you teach it. Whenever you grab the controls, what you do is decoded exactly like a
+demo (same --bindings, same --counts-per-degree) and kept as a correction: your fix, in the very state the
+policy got itself into. The summary says how much was captured; train on it alongside the demos with
+
+    uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2
 """
 
 import argparse
@@ -21,7 +27,7 @@ from pathlib import Path
 import numpy as np
 
 from zombiesai import spec
-from zombiesai.demos.inputs import DEFAULT_BINDINGS
+from zombiesai.demos.inputs import DEFAULT_BINDINGS, InputConfig
 from zombiesai.realgame.play import KILL_KEY, TOGGLE_KEY, PlayConfig
 
 SOUNDS = Path("/usr/share/sounds/freedesktop/stereo")
@@ -110,7 +116,9 @@ def main() -> None:
     config = PlayConfig(max_seconds=args.minutes * 60, kill_key=args.kill_key.lower(),
                         toggle_key=args.toggle_key.lower(), look=args.look)
     focus = HyprlandFocus()
-    human = HumanWatch(EvdevInput(), config)  # excludes our own virtual device by name
+    # Your corrections are labelled exactly as a demo would be: the same bindings and counts per degree.
+    input_config = InputConfig(counts_per_degree=args.counts_per_degree, bindings=bindings)
+    human = HumanWatch(EvdevInput(), config, input_config)  # excludes our own virtual device by name
 
     print(f"policy {args.checkpoint} on {device}; {'DRY RUN: no input will be sent' if args.dry_run else 'LIVE'}")
     # Follows the window by title: WaW's intro window dies and the real one replaces it, and a player that held
@@ -137,8 +145,8 @@ def main() -> None:
         out,
         source={**capture.describe(), "policy": str(args.checkpoint), "dry_run": args.dry_run,
                 "temperature": args.temperature, "deterministic": args.deterministic},
-        label_source="agent",
-        config={"play": asdict(config),
+        label_source="play",
+        config={"play": asdict(config), "input": asdict(input_config), "decision_hz": spec.DECISION_HZ,
                 "counts_per_degree": args.counts_per_degree},
     )
     import signal
@@ -161,17 +169,25 @@ def main() -> None:
         capture.close()
         human.source.close()
 
-    from zombiesai.demos.clips import load_clip
+    from zombiesai.demos.clips import ACTOR_POLICY, FLAG_BAD_STEP, load_clip
 
     clip = load_clip(out)
     if not clip.n_steps:
         print(f"never handed the controls ({args.toggle_key.upper()}), so nothing was played or written")
         return
-    acted = clip.usable()
+    actor = clip.extra("actor")
+    live = (clip.flags & FLAG_BAD_STEP) == 0
     print(f"wrote {out}: played {summary['played_seconds']:.0f}s ({summary['acted']} steps), "
           f"paused unfocused {summary['unfocused']} / frozen {summary['frozen']} / you {summary['human']}, "
           f"overruns {summary['overruns']}")
-    print(f"  what it did: {describe_actions(clip.actions[acted])}")
+    print(f"  what it did: {describe_actions(clip.actions[live & (actor == ACTOR_POLICY)])}")
+    corrections = clip.usable()
+    if corrections.any() or summary["human_idle"]:
+        print(f"  your corrections: {int(corrections.sum())} steps ({corrections.sum() / spec.DECISION_HZ:.1f}s) "
+              f"kept for training, {summary['human_idle']} idle steps before handing back left out; "
+              f"{describe_actions(clip.actions[corrections])}")
+    else:
+        print("  no corrections: you never took the controls over while it played")
     if clip.hud_regions:
         from zombiesai.demos.hud_video import PackError, pack_hud
 

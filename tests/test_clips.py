@@ -128,3 +128,23 @@ def test_iter_clips_finds_every_clip_under_a_root(tmp_path):
     write_clip(tmp_path / "a" / "one")
     write_clip(tmp_path / "b" / "two")
     assert len(list(clipmod.iter_clips(tmp_path))) == 2
+
+
+def test_extra_label_columns_are_fixed_by_the_first_step_and_can_be_amended_before_close(tmp_path):
+    writer = clipmod.ClipWriter(tmp_path / "c", source={"kind": "test"}, label_source="play")
+    frame = np.zeros(spec.PIXELS_SHAPE, np.uint8)
+    action = np.asarray(spec.NEUTRAL_ACTION)
+    writer.add(frame, action, extras={"actor": np.uint8(clipmod.ACTOR_HUMAN), "t_mono": np.float64(1e5 + 0.5)})
+    with pytest.raises(ValueError, match="label columns"):
+        writer.add(frame, action)  # a step without the column would shift every later value
+    with pytest.raises(ValueError, match="overwrite"):
+        writer.add(frame, action, extras={"flags": 0})
+    writer.add(frame, action, extras={"actor": np.uint8(clipmod.ACTOR_HUMAN), "t_mono": np.float64(1e5 + 0.6)})
+    writer.amend(1, actor=clipmod.ACTOR_HUMAN_IDLE)
+    with pytest.raises(IndexError):
+        writer.amend(2, actor=clipmod.ACTOR_HUMAN_IDLE)
+    writer.close()
+    clip = clipmod.load_clip(tmp_path / "c")
+    np.testing.assert_array_equal(clip.extra("actor"), [clipmod.ACTOR_HUMAN, clipmod.ACTOR_HUMAN_IDLE])
+    assert clip.extra("actor").dtype == np.uint8 and clip.extra("t_mono")[1] == 1e5 + 0.6
+    np.testing.assert_array_equal(clip.usable(), [True, False])

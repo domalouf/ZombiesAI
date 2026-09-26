@@ -124,8 +124,9 @@ uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --m
   loopback slots in as one more class.
 
 **Play deliberately varied games.** Camping, trains, bad positioning, early deaths, running out of ammo. A
-policy cloned from expert-only play has no idea what to do the moment it drifts off-distribution, and there
-is no DAgger loop here to rescue it.
+policy cloned from expert-only play has no idea what to do the moment it drifts off-distribution. The
+DAgger loop that rescues it is the live player: take the controls while it plays and your fix is recorded as
+training data (Route C below).
 
 **On Linux, `--source sim` records NachtSim instead**, with a scripted agent at the controls, writing exactly
 the same format. It is how the recording path stays testable without a Windows box, and how you can have
@@ -156,6 +157,19 @@ The catch, and it is worth being blunt about it: **an IDM trained on NachtSim re
 World at War footage.** The sim's view is untextured flat shading with a made-up font. Route B needs an IDM
 trained on Route A recordings of the real game — half an hour of logged play is a reasonable start, and it
 is spent far better there than on half an hour of demonstrations.
+
+## Route C — correct the policy while it plays
+
+`scripts/play_real.py` records every run to `runs/play/play_NNNN` (label_source `play`), and whenever you
+take the controls back, your input is decoded exactly as a demo's and kept as the label of those steps
+([`linux.md`](./linux.md), "Letting a policy play"). These corrections are HG-DAgger data: the human's action
+in the states the *policy* reaches -- facing a wall, stuck on a barricade -- which no demo covers.
+`labels.npz["actor"]` says who acted at each step (`clips.ACTOR_POLICY`, `ACTOR_HUMAN`, `ACTOR_HUMAN_IDLE`
+for the wait before handing back, `ACTOR_NONE` when nobody could), and `Clip.usable()` on a play run keeps
+only `ACTOR_HUMAN` steps -- so a play run can be passed to training like any demo directory. Their frame
+history is the policy's steps before the takeover, on purpose. The raw input is in `inputs.jsonl` and each
+step's poll instant in `labels.npz["t_mono"]`; `requantize` refuses play runs (their steps are not on
+`t0 + k/15`). Runs recorded before corrections existed are recognised and offer nothing.
 
 ## What comes out
 
@@ -205,6 +219,7 @@ cannot.
 
 ```sh
 uv run python scripts/train_bc.py data/clips/session1 data/demos --out runs/bc1
+uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2        # plus your corrections
 uv run python scripts/eval_bc.py runs/bc1/bc.pt --clips data/demos-heldout --episodes 20
 uv run python scripts/watch.py --checkpoint runs/bc1/bc.pt      # watch it play NachtSim
 ```
@@ -224,6 +239,9 @@ predicts the eight action heads. Details that are decisions rather than defaults
   belongs in the real environment — but in BC it is also the single strongest predictor of the label, and a
   policy that learns to copy its last action scores beautifully per frame and stands still in the game. Turn
   it on with `--prev-actions` and watch the copy rate.
+- **Corrections weigh `--correction-weight` (default 2) times a demo step.** They are few and they are the
+  only labels for the states the policy drifts into; 2 lets them count without a handful of hurried fixes
+  outweighing hours of deliberate play. Play runs nobody took over in are skipped.
 - **Augmentation is random shift ±4 px and brightness jitter, applied identically across a stack. Never
   horizontal flips** — a flip inverts the yaw label and mirrors the HUD, and Nacht is not mirror-symmetric.
 
