@@ -3,12 +3,14 @@
     # First, with no input sent at all: everything runs, the actions are only printed and recorded.
     uv run python scripts/play_real.py runs/bc_real1/bc.pt --dry-run --minutes 1
 
-    # For real (Linux, Hyprland): start from any workspace, then switch to the game.
+    # For real (Linux, Hyprland): start it, go to the game, press F7 when you want the AI to take over.
     uv run python scripts/play_real.py runs/bc_real1/bc.pt --minutes 3
 
-It only ever sends input while the game is the focused window and its picture is live; touching your own
-mouse or keyboard takes the controls back until you have been idle for 1.5 s; F9 stops it. Every run is
-recorded to runs/play/ (frames, HUD crops, the actions chosen) -- watch it back with the same tools as a demo.
+It starts in standby. In the game, F7 hands the AI the controls and F7 again takes them back; F9 quits. A
+chime says which (the fullscreen game hides notifications). It only ever sends input while the game is the
+focused window and its picture is live, and touching your own mouse or keyboard takes the controls back
+until you have been idle for 1.5 s. Every run is recorded to runs/play/ (frames, HUD crops, the actions
+chosen) -- watch it back with the same tools as a demo.
 """
 
 import argparse
@@ -20,7 +22,25 @@ import numpy as np
 
 from zombiesai import spec
 from zombiesai.demos.inputs import DEFAULT_BINDINGS
-from zombiesai.realgame.play import KILL_KEY, PlayConfig
+from zombiesai.realgame.play import KILL_KEY, TOGGLE_KEY, PlayConfig
+
+SOUNDS = Path("/usr/share/sounds/freedesktop/stereo")
+# What the player hears for each state change: they are looking at a fullscreen game, which hides
+# notifications, and the terminal is on another workspace.
+CUES = {"acting": "device-added.oga", "standby": "device-removed.oga", "stopped": "service-logout.oga"}
+PAUSE_CUE = "dialog-warning.oga"  # focus lost, picture frozen, or the human took over
+
+
+def cue(state: str) -> None:
+    sound = SOUNDS / CUES.get(state, PAUSE_CUE)
+    if not sound.exists():
+        return
+    import subprocess
+
+    try:  # never waits: this runs inside the decision loop
+        subprocess.Popen(["paplay", str(sound)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def next_dir(root: Path, prefix: str) -> Path:
@@ -52,26 +72,32 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="run everything but send no input")
     parser.add_argument("--deterministic", action="store_true", help="take each head's most likely action")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--look", choices=("mean", "sample"), default="mean",
+                        help="turn by the smoothed mean look (default) or a fresh sample every tick")
+    parser.add_argument("--look-smoothing", type=float, default=PlayConfig.look_smoothing,
+                        help="0-1: how far each tick moves toward the new look; lower is smoother but laggier")
+    parser.add_argument("--submoves", type=int, default=6,
+                        help="mouse moves per decision; about one per frame at WaW's 85 fps cap")
     parser.add_argument("--kill-key", default=KILL_KEY)
+    parser.add_argument("--toggle-key", default=TOGGLE_KEY)
+    parser.add_argument("--quiet", action="store_true", help="no sound cues")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--out", type=Path, default=Path("runs/play"))
     parser.add_argument("--wait-timeout", type=float, default=300.0)
-    parser.add_argument("--countdown", type=float, default=3.0)
     args = parser.parse_args()
 
     import json
-    import subprocess
+    import time
     from dataclasses import asdict
 
     import torch
 
     from zombiesai.demos.agent import BCAgent
-    from zombiesai.demos.capture import CaptureLost, ScreenCapture
+    from zombiesai.demos.capture import ScreenCapture
     from zombiesai.demos.clips import ClipWriter
     from zombiesai.demos.evdev_input import EvdevInput
     from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
-    from zombiesai.demos.recorder import wait_to_start
-    from zombiesai.demos.x11_capture import WindowGone, WindowNotFound
+    from zombiesai.demos.x11_capture import WindowNotFound
     from zombiesai.realgame.dispatch import ActionDispatcher, DispatchConfig, FakeSink
     from zombiesai.realgame.play import HumanWatch, HyprlandFocus, play
 
@@ -81,43 +107,24 @@ def main() -> None:
     agent = BCAgent(args.checkpoint, deterministic=args.deterministic, device=device,
                     temperature=args.temperature)
     bindings = json.loads(args.bindings.read_text()) if args.bindings.exists() else dict(DEFAULT_BINDINGS)
-    dispatch_config = DispatchConfig(counts_per_degree=args.counts_per_degree, bindings=bindings)
-    config = PlayConfig(max_seconds=args.minutes * 60, kill_key=args.kill_key.lower())
+    dispatch_config = DispatchConfig(counts_per_degree=args.counts_per_degree, bindings=bindings,
+                                     submoves=args.submoves)
+    config = PlayConfig(max_seconds=args.minutes * 60, kill_key=args.kill_key.lower(),
+                        toggle_key=args.toggle_key.lower(), look=args.look, look_smoothing=args.look_smoothing)
     focus = HyprlandFocus()
     human = HumanWatch(EvdevInput(), config)  # excludes our own virtual device by name
 
-    def open_capture():
-        return ScreenCapture(window=args.window, hud_regions=HUD_REGIONS, hud_scale=HUD_SCALE)
-
-    capture = None
-
-    def ready() -> bool:
-        nonlocal capture
-        if capture is None:
-            try:
-                capture = open_capture()
-            except WindowNotFound:
-                return False
-        try:
-            return capture.is_capturable() and focus.is_focused()
-        except (WindowGone, CaptureLost):
-            capture.close()
-            capture = None
-            return False
-
     print(f"policy {args.checkpoint} on {device}; {'DRY RUN: no input will be sent' if args.dry_run else 'LIVE'}")
-    print(f"{args.kill_key.upper()} stops it; touching your mouse or keyboard takes over until you're idle")
-    def notify(message: str) -> None:
-        try:  # the player is looking at the game by now, not at this terminal
-            subprocess.Popen(["notify-send", "--app-name", "ZombiesAI", "--expire-time",
-                              str(int(args.countdown * 1000)), "play_real", message.replace("recording", "AI playing")],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except OSError:
-            pass
-
-    if not wait_to_start(ready, timeout=args.wait_timeout, countdown=args.countdown, discard=human.source.drain,
-                         notify=notify):
-        raise SystemExit("gave up waiting for the game window to be on screen and focused")
+    print("waiting for the game window...", flush=True)
+    deadline = time.monotonic() + args.wait_timeout
+    while True:
+        try:
+            capture = ScreenCapture(window=args.window, hud_regions=HUD_REGIONS, hud_scale=HUD_SCALE)
+            break
+        except WindowNotFound:
+            if time.monotonic() > deadline:
+                raise SystemExit(f"no window titled {args.window!r} after {args.wait_timeout:.0f}s")
+            time.sleep(1.0)
 
     if args.dry_run:
         sink = FakeSink()
@@ -146,8 +153,10 @@ def main() -> None:
 
     for sig in stops:
         signal.signal(sig, stop_cleanly)
+    human.source.drain()  # keys pressed while the model loaded are not commands
     try:
-        summary = play(capture, agent, dispatcher, focus=focus, human=human, config=config, writer=writer)
+        summary = play(capture, agent, dispatcher, focus=focus, human=human, config=config, writer=writer,
+                       on_state=None if args.quiet else cue)
     finally:
         dispatcher.close()  # releases everything again and destroys the virtual device
         capture.close()
@@ -156,8 +165,11 @@ def main() -> None:
     from zombiesai.demos.clips import load_clip
 
     clip = load_clip(out)
+    if not clip.n_steps:
+        print(f"never handed the controls ({args.toggle_key.upper()}), so nothing was played or written")
+        return
     acted = clip.usable()
-    print(f"wrote {out}: {summary['steps']} steps ({summary['seconds'] / 60:.1f} min), played {summary['acted']}, "
+    print(f"wrote {out}: played {summary['played_seconds']:.0f}s ({summary['acted']} steps), "
           f"paused unfocused {summary['unfocused']} / frozen {summary['frozen']} / you {summary['human']}, "
           f"overruns {summary['overruns']}")
     print(f"  what it did: {describe_actions(clip.actions[acted])}")

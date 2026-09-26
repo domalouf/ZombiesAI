@@ -95,12 +95,15 @@ class UinputDevice:
             self._create(settle_s)
 
     def _create(self, settle_s: float) -> None:
+        # These three take the bit *by value* (ioctl(fd, UI_SET_EVBIT, EV_KEY) in C). Python's ioctl passes an
+        # int argument as the value but a bytes argument as a pointer to a copy, which the kernel reads as a
+        # huge bit number and refuses with EINVAL -- so ints here, never struct.pack.
         for kind in (EV_KEY, EV_REL):
-            fcntl.ioctl(self.fd, UI_SET_EVBIT, struct.pack("=i", kind))
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, kind)
         for code in self.codes:
-            fcntl.ioctl(self.fd, UI_SET_KEYBIT, struct.pack("=i", code))
+            fcntl.ioctl(self.fd, UI_SET_KEYBIT, code)
         for axis in (REL_X, REL_Y):
-            fcntl.ioctl(self.fd, UI_SET_RELBIT, struct.pack("=i", axis))
+            fcntl.ioctl(self.fd, UI_SET_RELBIT, axis)
         os.write(self.fd, _USER_DEV.pack(self.name.encode()[:79], BUS_USB, 0x1209, 0x0001, 1, 0, *([0] * 256)))
         fcntl.ioctl(self.fd, UI_DEV_CREATE)
         self.created = True

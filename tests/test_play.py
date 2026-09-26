@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from zombiesai import spec
 from zombiesai.demos.clips import FLAG_BAD_STEP, FLAG_CLIP_START, ClipWriter, load_clip
@@ -56,11 +57,17 @@ class Focus:
         return self.tick not in self.unfocused
 
 
-class Hands:
-    """The human's real devices: events to hand back at given ticks."""
+TOGGLE = {"t": 0, "type": "key", "code": "f7", "down": True}
 
-    def __init__(self, at=None):
-        self.at, self.tick = at or {}, 0
+
+class Hands:
+    """The human's real devices: events to hand back at given ticks. By default the human presses the toggle
+    key on the first tick, handing the policy the controls; `start=False` leaves it in standby."""
+
+    def __init__(self, at=None, start=True):
+        self.at, self.tick = dict(at or {}), 0
+        if start:
+            self.at[1] = [TOGGLE] + self.at.get(1, [])
 
     def drain(self, start, end):
         self.tick += 1
@@ -77,7 +84,7 @@ class TimedDispatcher(ActionDispatcher):
         self.pump(deadline)
 
 
-def run(tmp_path=None, *, seconds=1.0, screen=None, focus=None, hands=None):
+def run(tmp_path=None, *, seconds=1.0, screen=None, focus=None, hands=None, states=None):
     clock = Clock()
     dispatcher = TimedDispatcher(clock)
     agent = Agent()
@@ -86,7 +93,7 @@ def run(tmp_path=None, *, seconds=1.0, screen=None, focus=None, hands=None):
     said = []
     summary = play(
         screen or Screen(), agent, dispatcher, focus=focus or Focus(), human=HumanWatch(hands or Hands(), config),
-        config=config, writer=writer, clock=clock, say=said.append,
+        config=config, writer=writer, clock=clock, say=said.append, on_state=states.append if states is not None else None,
     )
     return summary, dispatcher, agent, said
 
@@ -113,7 +120,7 @@ def test_everything_is_released_on_the_way_out():
 
 def test_losing_focus_lets_go_at_once_and_sends_nothing_until_it_is_back():
     summary, dispatcher, agent, said = run(seconds=1.0, focus=Focus(unfocused={5, 6, 7}))
-    assert summary["unfocused"] == 3 and agent.calls == 12
+    assert summary["unfocused"] == 3 and agent.calls == 15  # the limit is on time played
     assert agent.resets == 1  # a stale frame stack is not carried across the gap
     # Between the release at tick 5 and the re-press at tick 8, nothing at all was sent.
     t5, t8 = 4 * DT, 7 * DT
@@ -126,7 +133,7 @@ def test_losing_focus_lets_go_at_once_and_sends_nothing_until_it_is_back():
 
 def test_a_frozen_picture_pauses_the_policy():
     summary, _, agent, said = run(seconds=1.0, screen=Screen(stale={3, 4}))
-    assert summary["frozen"] == 2 and agent.calls == 13
+    assert summary["frozen"] == 2 and agent.calls == 15
     assert any("frozen" in line for line in said)
 
 
@@ -142,7 +149,7 @@ def test_touching_the_controls_hands_them_to_the_human_until_they_let_go():
     summary, _, agent, said = run(seconds=3.0, hands=Hands(grab))
     idle_ticks = math.ceil(PlayConfig().human_idle_s / DT)  # the partial tick is the human's too
     assert summary["human"] == idle_ticks
-    assert agent.calls == 45 - idle_ticks
+    assert agent.calls == 45
     assert any("you have the controls" in line for line in said)
 
 
@@ -155,9 +162,105 @@ def test_a_hand_resting_on_the_mouse_is_not_a_takeover():
 def test_every_tick_is_recorded_and_the_ones_not_played_are_flagged(tmp_path):
     summary, _, _, _ = run(tmp_path, seconds=1.0, focus=Focus(unfocused={5, 6}))
     clip = load_clip(tmp_path / "run")
-    assert clip.n_steps == 15 and clip.label_source == "agent"
+    assert clip.n_steps == 17 and clip.label_source == "agent"
     bad = (clip.flags & FLAG_BAD_STEP) != 0
     np.testing.assert_array_equal(np.flatnonzero(bad), [4, 5])
     assert clip.flags[6] & FLAG_CLIP_START  # the policy's first step back has no usable history
     np.testing.assert_array_equal(clip.actions[0], FORWARD_AND_FIRE)
     assert clip.manifest["summary"]["unfocused"] == 2
+
+
+def test_it_does_nothing_at_all_until_handed_the_controls(tmp_path):
+    """Standby: no frames grabbed, no input sent, nothing written -- until the toggle key."""
+    quit_later = {20: [{"t": 0, "type": "key", "code": "f9", "down": True}]}
+    screen = Screen()
+    summary, dispatcher, agent, said = run(tmp_path, screen=screen, hands=Hands(quit_later, start=False))
+    assert agent.calls == 0 and screen.k == 0 and dispatcher.sink.events == []
+    assert load_clip(tmp_path / "run").n_steps == 0
+    assert "F7" in said[0] and summary["ended"].startswith("kill key")
+
+
+def test_the_toggle_key_puts_it_back_in_standby_and_lets_go(tmp_path):
+    back_off = {6: [TOGGLE], 30: [{"t": 0, "type": "key", "code": "f9", "down": True}]}
+    states = []
+    summary, dispatcher, agent, _ = run(tmp_path, seconds=10.0, hands=Hands(back_off), states=states)
+    assert agent.calls == 5 and summary["toggles"] == 2
+    assert held_after(dispatcher.sink) == set()
+    assert states == ["acting", "standby", "stopped"]
+    assert load_clip(tmp_path / "run").n_steps == 5  # standby is not written
+
+
+def test_the_toggle_key_itself_is_not_the_human_taking_over():
+    summary, _, _, _ = run(seconds=1.0)
+    assert summary["human"] == 0
+
+
+class JitteryAgent(Agent):
+    """A policy whose mean look swings every tick -- 0, +6, -2 degrees -- the way sampled bins did live."""
+
+    def __init__(self, looks):
+        super().__init__()
+        self.looks, self.last_look = list(looks), (0.0, 0.0)
+
+    def act(self, obs):
+        self.last_look = (self.looks[self.calls % len(self.looks)], 0.0)
+        return super().act(obs)
+
+
+def turn_per_tick(sink):
+    """Mouse counts sent in each decision window."""
+    per = {}
+    for e in sink.events:
+        if e["type"] == "mouse":
+            per[round(e["t"] / DT)] = per.get(round(e["t"] / DT), 0) + e["dx"]
+    return np.array([per.get(k, 0) for k in range(max(per) + 1)]) if per else np.zeros(1)
+
+
+def play_with(agent, **config):
+    clock = Clock()
+    dispatcher = TimedDispatcher(clock)
+    play(Screen(), agent, dispatcher, focus=Focus(), human=HumanWatch(Hands(), PlayConfig(max_seconds=2.0)),
+         config=PlayConfig(max_seconds=2.0, **config), clock=clock, say=lambda _: None)
+    return dispatcher
+
+
+def test_the_smoothed_look_turns_far_less_jerkily_than_the_policy_swings():
+    swings = [0.0, 6.0, -2.0, 6.0, 0.0, 2.0]
+    smooth = turn_per_tick(play_with(JitteryAgent(swings)).sink)
+    raw = turn_per_tick(play_with(JitteryAgent(swings), look_smoothing=1.0).sink)
+    assert np.abs(np.diff(smooth)).mean() < 0.4 * np.abs(np.diff(raw)).mean()
+    # ...while still turning the way the policy means to on average (+2 degrees a tick, 9.09 counts each).
+    assert np.mean(smooth[5:]) == pytest.approx(2.0 * 9.09, rel=0.2)
+
+
+def test_a_steady_look_is_reached_within_a_few_ticks():
+    sent = turn_per_tick(play_with(JitteryAgent([6.0])).sink)
+    assert sent[1] < sent[4] and sent[8] == pytest.approx(6.0 * 9.09, rel=0.05)
+
+
+def test_the_look_is_sent_as_a_continuous_turn_not_a_bin():
+    sent = turn_per_tick(play_with(JitteryAgent([3.3])).sink)
+    assert sent[-1] == pytest.approx(3.3 * 9.09, abs=2)  # 3.3 degrees is between bins, and still sent as asked
+
+
+def test_the_recording_labels_the_turn_that_was_sent(tmp_path):
+    clock = Clock()
+    writer = ClipWriter(tmp_path / "run", source={"kind": "test"}, label_source="agent")
+    play(Screen(), JitteryAgent([6.0]), TimedDispatcher(clock), focus=Focus(),
+         human=HumanWatch(Hands(), PlayConfig()), config=PlayConfig(max_seconds=1.0), writer=writer,
+         clock=clock, say=lambda _: None)
+    clip = load_clip(tmp_path / "run")
+    yaw = np.asarray(clip.labels["yaw_deg"])
+    assert yaw[0] == pytest.approx(0.35 * 6.0) and yaw[-1] == pytest.approx(6.0, rel=0.02)
+    assert spec.YAW_BINS_DEG[clip.actions[-1][spec.YAW]] == 6.0
+
+
+def test_a_pause_does_not_carry_a_turn_across_it():
+    agent = JitteryAgent([6.0])
+    focus = Focus(unfocused=set(range(10, 13)))
+    clock = Clock()
+    dispatcher = TimedDispatcher(clock)
+    play(Screen(), agent, dispatcher, focus=focus, human=HumanWatch(Hands(), PlayConfig()),
+         config=PlayConfig(max_seconds=2.0), clock=clock, say=lambda _: None)
+    sent = turn_per_tick(dispatcher.sink)
+    assert sent[12] < sent[9]  # it eases back in after the gap instead of resuming at full speed

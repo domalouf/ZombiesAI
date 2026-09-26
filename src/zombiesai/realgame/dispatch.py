@@ -84,7 +84,11 @@ class ActionDispatcher:
         self._pending: list[tuple[float, int, int]] = []  # (due, dx, dy)
         self._residue = 0.0 + 0.0j  # sub-count rounding carried between ticks, x in real, y in imag
 
-    def apply(self, action, now: float | None = None, dt: float = 1.0 / spec.DECISION_HZ) -> None:
+    def apply(
+        self, action, now: float | None = None, dt: float = 1.0 / spec.DECISION_HZ, look_deg=None
+    ) -> None:
+        """Move the held state to `action`. `look_deg=(yaw, pitch)`, when given, replaces the action's look
+        bins with a continuous turn in degrees -- the smoothed, probability-weighted look a live policy sends."""
         values = spec.action_tuple(action)
         now = self.clock() if now is None else now
         wanted = self._wanted(values)
@@ -102,7 +106,7 @@ class ActionDispatcher:
             self._send_key(button, True, now)
             self._tap_until[button] = now + self.config.tap_hold_s
 
-        self._schedule_move(values, now, dt)
+        self._schedule_move(values, now, dt, look_deg)
         self.pump(now)
 
     def _wanted(self, values: tuple[int, ...]) -> set[str]:
@@ -122,8 +126,11 @@ class ActionDispatcher:
                 wanted.add(control)
         return wanted
 
-    def _schedule_move(self, values: tuple[int, ...], now: float, dt: float) -> None:
-        degrees = complex(spec.YAW_BINS_DEG[values[spec.YAW]], -spec.PITCH_BINS_DEG[values[spec.PITCH]])
+    def _schedule_move(self, values: tuple[int, ...], now: float, dt: float, look_deg=None) -> None:
+        yaw, pitch = look_deg if look_deg is not None else (
+            spec.YAW_BINS_DEG[values[spec.YAW]], spec.PITCH_BINS_DEG[values[spec.PITCH]]
+        )
+        degrees = complex(yaw, -pitch)
         # Screen-down is positive dy on a mouse, and positive pitch looks up, so the sign flips here -- the
         # one place in the codebase it does, matching the same flip in the recorder's quantizer.
         target = degrees * self.config.counts_per_degree + self._residue

@@ -305,9 +305,12 @@ def load_clip(path: str | Path, *, require_labels: bool = False) -> Clip:
             f"{path} holds {manifest.get('frame_contract')} frames, this code wants {frame_contract()}"
         )
     size = (path / "frames.u8").stat().st_size
-    frames = np.memmap(
-        path / "frames.u8", dtype=np.uint8, mode="r", shape=(size // _FRAME_BYTES, *spec.PIXELS_SHAPE)
-    )
+    if size < _FRAME_BYTES:  # an empty clip (stopped before its first step) cannot be memory-mapped
+        frames = np.zeros((0, *spec.PIXELS_SHAPE), dtype=np.uint8)
+    else:
+        frames = np.memmap(
+            path / "frames.u8", dtype=np.uint8, mode="r", shape=(size // _FRAME_BYTES, *spec.PIXELS_SHAPE)
+        )
     labels = None
     if (path / "labels.npz").exists():
         spec.require_spec_version(manifest["spec_version"], f"{path} labels")

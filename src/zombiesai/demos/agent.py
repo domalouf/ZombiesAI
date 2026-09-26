@@ -38,6 +38,10 @@ class BCAgent:
         self.step = int(self.meta.get("epoch", 0))
         self._frames: deque[np.ndarray] = deque(maxlen=self.config.frame_stack)
         self._history = [spec.NEUTRAL_ACTION] * spec.PREV_ACTION_HISTORY
+        # The probability-weighted mean turn, in degrees, from the last act(). Sampling a look bin afresh every
+        # 67 ms jumps between 0, +6 and -2 degrees even when the policy is sure of a gentle turn; the mean
+        # moves as smoothly as the policy's beliefs do, and is not limited to the nine bins.
+        self.last_look: tuple[float, float] = (0.0, 0.0)
 
     def reset(self) -> None:
         self._frames.clear()
@@ -61,10 +65,12 @@ class BCAgent:
             encoded = spec.encode_prev_actions(self._history)[None]
             vector = torch.from_numpy(encoded).to(self.device)
         logits, _, _ = self.net(pixels, vector)
-        if self.deterministic:
-            action = FactoredCategorical(logits, spec.ACTION_NVEC).mode()[0]
-        else:
-            action = FactoredCategorical(logits / self.temperature, spec.ACTION_NVEC).sample()[0]
+        dist = FactoredCategorical(logits / (1.0 if self.deterministic else self.temperature), spec.ACTION_NVEC)
+        action = dist.mode()[0] if self.deterministic else dist.sample()[0]
+        self.last_look = tuple(
+            float((dist.log_probs[0, head, : len(bins)].exp().cpu().numpy() * np.asarray(bins)).sum())
+            for head, bins in ((spec.YAW, spec.YAW_BINS_DEG), (spec.PITCH, spec.PITCH_BINS_DEG))
+        )
         action = action.cpu().numpy().astype(np.int64)
         self._history = [tuple(int(v) for v in action)] + self._history[:-1]
         return action

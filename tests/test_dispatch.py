@@ -172,3 +172,20 @@ def test_an_unbound_control_fails_loudly_rather_than_silently_doing_nothing():
     dispatch = ActionDispatcher(sink, config, clock=Clock())
     with pytest.raises(KeyError):
         dispatch.apply(spec.make_action(fire=1), now=0.0, dt=DT)
+
+
+def test_the_virtual_device_sets_its_capability_bits_by_value(monkeypatch):
+    """UI_SET_*BIT take the bit as the ioctl's value. Handing Python's ioctl bytes passes a pointer instead,
+    which the kernel refuses with EINVAL -- the first live run died on exactly that."""
+    import fcntl
+    import os
+
+    from zombiesai.realgame import uinput
+
+    calls = []
+    monkeypatch.setattr(fcntl, "ioctl", lambda fd, request, arg=0: calls.append((request, arg)))
+    monkeypatch.setattr(os, "write", lambda fd, data: len(data))
+    monkeypatch.setattr(uinput.time, "sleep", lambda s: None)
+    uinput.UinputDevice(["w", "mouse1"], fd=99, create=True)
+    bits = [(r, a) for r, a in calls if r in (uinput.UI_SET_EVBIT, uinput.UI_SET_KEYBIT, uinput.UI_SET_RELBIT)]
+    assert bits and all(isinstance(a, int) for _, a in bits)
