@@ -3,6 +3,9 @@
     # Windows, with the game running in borderless windowed:
     uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20
 
+    # Linux, also keeping the game's audio (the whole default output -- other desktop sounds too):
+    uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 --audio
+
     # Anywhere, to generate labelled clips for the inverse dynamics model without touching the game:
     uv run python scripts/record_demo.py --source sim --episodes 20 --agent scripted
 
@@ -71,6 +74,12 @@ def main() -> None:
     parser.add_argument("--monitor", type=int, default=1)
     parser.add_argument("--no-hud", action="store_true",
                         help="don't save full-resolution HUD crops (they cost ~2.6 GB per 20 minutes at 1440p)")
+    parser.add_argument("--audio", action="store_true",
+                        help="Linux: also record the default output's monitor (never a microphone), aligned to "
+                             "the frames; raw 11.5 MB/min while recording, lossless FLAC after a clean stop")
+    parser.add_argument("--audio-device", help="a specific sink monitor to record, e.g. <sink name>.monitor "
+                                               "(pactl list short sources); default: the default sink's")
+    parser.add_argument("--audio-raw", action="store_true", help="keep audio as raw PCM, skip FLAC compression")
     parser.add_argument("--notes", default="", help="what you were trying to do -- camping, training, dying early")
     # Sim source only.
     parser.add_argument("--episodes", type=int, default=1, help="how many sim games to record")
@@ -117,6 +126,19 @@ def main() -> None:
             if not inputs.monotonic:
                 print("warning: this kernel would not switch the devices to CLOCK_MONOTONIC; timestamps are")
                 print("         converted from wall clock, so a clock step mid-recording would shift labels.")
+        audio = None
+        if args.audio:
+            if not sys.platform.startswith("linux"):
+                # WASAPI loopback would slot in as another stream behind AudioRecorder; see demos/audio.py.
+                raise SystemExit("--audio is Linux-only for now (PipeWire/PulseAudio monitor via parec)")
+            from zombiesai.demos.audio import AudioRecorder, PulseMonitorStream
+
+            stream = PulseMonitorStream(args.audio_device)
+            if stream.device is None:
+                stream.device = stream.default_monitor()
+            stream.command()  # refuses anything that is not a .monitor before a second is recorded
+            audio = AudioRecorder(stream, compress=not args.audio_raw)
+            print(f"recording audio from {stream.device} (everything that plays through it, not only the game)")
         out = next_dir(args.out, "demo")
         print(f"recording to {out} -- play; ctrl-c to stop early")
         config = RecorderConfig(
@@ -124,13 +146,17 @@ def main() -> None:
             input=input_config, notes=args.notes,
         )
         try:
-            path = record(capture, inputs, out, config)
+            path = record(capture, inputs, out, config, audio=audio)
         except KeyboardInterrupt:
             raise SystemExit("\nstopped") from None
         print(f"wrote {path}")
         clip = load_clip(path)
         for name in clip.hud_regions:
             print(f"  HUD crops {name}: {clip.hud(name).shape[1:]} per step")
+        if audio is not None:
+            from zombiesai.demos.audio import describe_audio
+
+            print(f"  {describe_audio(path)}")
         check(path)
         return
 

@@ -13,6 +13,10 @@ labels are worth -- instead of being forced into fields an episode needs and a v
       labels.npz   actions (T, 8) uint8 + per-step confidence and raw pre-quantization yaw/pitch degrees
       hud_<name>.u8  optional (T, h, w, 3) uint8 full-resolution HUD crops, one file per region, same step
                      index as frames.u8; shapes and boxes in clip.json["hud"] (see demos/hud_crops.py)
+      audio.s16 | audio.flac  optional game audio, s16le 48 kHz stereo; raw while recording, FLAC after a
+                     clean stop (see demos/audio.py)
+      audio_index.bin  (sample_end, t_mono) per captured chunk: maps samples onto the recorder's clock;
+                     rate, device and latency in clip.json["audio"]
 
 Frames and labels are versioned separately on purpose: a spec change that touches the HUD layout must not
 invalidate a weekend of ingested video, but one that moves the yaw bins must invalidate its labels.
@@ -20,7 +24,7 @@ invalidate a weekend of ingested video, but one that moves the yaw bins must inv
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +69,11 @@ class ClipWriter:
             "created_unix": time.time(),
             "status": "open",
         }
+        self._write_manifest()
+
+    def annotate(self, key: str, value) -> None:
+        """Set a top-level manifest entry now, not at close, so it survives a crash (audio uses this)."""
+        self._manifest[key] = value
         self._write_manifest()
 
     def _write_manifest(self) -> None:
@@ -164,6 +173,7 @@ class Clip:
     manifest: dict
     frames: np.ndarray  # memmapped (T, 72, 128, 3)
     labels: dict[str, np.ndarray] | None
+    _audio: object = field(default=None, repr=False, compare=False)
 
     @property
     def n_steps(self) -> int:
@@ -212,6 +222,34 @@ class Clip:
         crops = np.memmap(self.path / f"hud_{name}.u8", dtype=np.uint8, mode="r")
         per = int(np.prod(shape))
         return crops[: (len(crops) // per) * per].reshape(-1, *shape)[: self.n_steps]
+
+    def audio(self):
+        """The clip's game audio as a `demos.audio.ClipAudio`, or None if it was recorded without any."""
+        if self._audio is None and self.manifest.get("audio"):
+            from zombiesai.demos.audio import load_audio
+
+            self._audio = load_audio(self.path, self.manifest["audio"]) or False
+        return self._audio or None
+
+    def step_time(self, k) -> np.ndarray:
+        """Monotonic time at which step k's frame was grabbed: `t0 + k / decision_hz`, the recorder's deadline."""
+        t0 = self.manifest.get("summary", {}).get("t0_mono")
+        if t0 is None:  # a recording that never closed still wrote t0 beside its audio
+            t0 = (self.manifest.get("audio") or {}).get("t0_mono")
+        if t0 is None:
+            raise ValueError(f"{self.path} has no t0_mono, so its steps have no times")
+        hz = self.manifest.get("config", {}).get("decision_hz", spec.DECISION_HZ)
+        return t0 + np.asarray(k) / hz
+
+    def audio_for_step(self, k: int, window_s: float = 0.2) -> np.ndarray | None:
+        """The `window_s` of audio that had played by the time step k's frame was grabbed, (n, channels) int16.
+
+        Causal on purpose: it ends at the frame, so it is what the player had heard when they chose step k's
+        action -- the same information a policy consuming the reserved `audio` key would get. The default
+        200 ms is the plan's log-mel window. Silence where nothing was captured; None without audio.
+        """
+        audio = self.audio()
+        return None if audio is None else audio.window(float(self.step_time(k)), window_s)
 
     def usable(self, min_confidence: float = 0.0) -> np.ndarray:
         """Boolean mask of steps fit to train on: not flagged bad, and confidently enough labelled."""
