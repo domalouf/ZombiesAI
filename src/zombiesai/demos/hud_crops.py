@@ -23,7 +23,8 @@ lines, whichever is up.
 
 Crops are area-downsampled by `HUD_SCALE`. At 0.5 a 2560x1440 capture keeps digits about 12 px tall -- ample
 for template matching against a fixed bitmap font -- for 410 KB a decision, ~7.4 GB per 20 minutes (the prompt
-and power-up boxes are 266 KB of it), instead of four times that.
+and power-up boxes are 266 KB of it), instead of four times that. That is while recording: once the session
+ends they are packed as verified video, ~20x smaller (demos/hud_video.py).
 """
 
 import numpy as np

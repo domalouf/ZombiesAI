@@ -13,6 +13,8 @@ labels are worth -- instead of being forced into fields an episode needs and a v
       labels.npz   actions (T, 8) uint8 + per-step confidence and raw pre-quantization yaw/pitch degrees
       hud_<name>.u8  optional (T, h, w, 3) uint8 full-resolution HUD crops, one file per region, same step
                      index as frames.u8; shapes and boxes in clip.json["hud"] (see demos/hud_crops.py)
+      hud_<name>/    the same crops once packed as verified video chunks after the session, replacing the
+                     .u8 (see demos/hud_video.py); clip.json["hud"]["video"] says which regions are
       audio.s16 | audio.flac  optional game audio, s16le 48 kHz stereo; raw while recording, FLAC after a
                      clean stop (see demos/audio.py)
       audio_index.bin  (sample_end, t_mono) per captured chunk: maps samples onto the recorder's clock;
@@ -222,11 +224,18 @@ class Clip:
     def hud_regions(self) -> list[str]:
         return sorted(self.manifest.get("hud", {}).get("shapes", {}))
 
-    def hud(self, name: str) -> np.ndarray | None:
-        """Full-resolution HUD crops for one region, (T, h, w, 3) memmapped; None if this clip has none."""
+    def hud(self, name: str):
+        """Full-resolution HUD crops for one region, (T, h, w, 3): memmapped raw crops, or a `HudVideo` that
+        indexes the same way once the clip has been packed. None if this clip has none."""
         shape = self.manifest.get("hud", {}).get("shapes", {}).get(name)
         if shape is None:
             return None
+        packed = self.manifest["hud"].get("video", {}).get(name)
+        if packed is not None:
+            from zombiesai.demos.hud_video import HudVideo
+
+            return HudVideo(self.path / packed["dir"], shape, min(packed["n_steps"], self.n_steps),
+                            packed["chunk_steps"])
         crops = np.memmap(self.path / f"hud_{name}.u8", dtype=np.uint8, mode="r")
         per = int(np.prod(shape))
         return crops[: (len(crops) // per) * per].reshape(-1, *shape)[: self.n_steps]
@@ -320,9 +329,13 @@ def load_clip(path: str | Path, *, require_labels: bool = False) -> Clip:
             frames, labels = frames[:n], {k: v[:n] for k, v in labels.items()}
     elif require_labels:
         raise FileNotFoundError(f"{path} has no labels.npz; label it with the IDM or record it with input logging")
+    packed = manifest.get("hud", {}).get("video", {})
     for name, shape in manifest.get("hud", {}).get("shapes", {}).items():
         # A crash between the frame write and a HUD write leaves that region one step short.
-        n = (path / f"hud_{name}.u8").stat().st_size // int(np.prod(shape))
+        if name in packed:
+            n = packed[name]["n_steps"]
+        else:
+            n = (path / f"hud_{name}.u8").stat().st_size // int(np.prod(shape))
         if n < len(frames):
             frames = frames[:n]
             labels = None if labels is None else {k: v[:n] for k, v in labels.items()}

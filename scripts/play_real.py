@@ -172,6 +172,13 @@ def main() -> None:
           f"paused unfocused {summary['unfocused']} / frozen {summary['frozen']} / you {summary['human']}, "
           f"overruns {summary['overruns']}")
     print(f"  what it did: {describe_actions(clip.actions[acted])}")
+    if clip.hud_regions:
+        from zombiesai.demos.hud_video import PackError, pack_hud
+
+        try:  # the raw crops are ~6 MB a second of play; as verified video, ~17x less
+            pack_hud(out, say=lambda message: print(f"  {message}"))
+        except (PackError, KeyboardInterrupt) as e:
+            print(f"  HUD crops left raw ({e or 'stopped'}); pack them later with scripts/pack_hud.py {out}")
 
 
 if __name__ == "__main__":

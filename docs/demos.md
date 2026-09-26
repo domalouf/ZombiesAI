@@ -168,6 +168,7 @@ data/clips/<name>/
   labels.npz   actions (T, 8), per-step confidence, raw pre-quantization yaw/pitch degrees
   inputs.jsonl raw input log (Route A only)
   hud_<name>.u8  full-resolution HUD crops, (T, h, w, 3), same step index as frames.u8 (Route A only)
+  hud_<name>/  the same crops as verified H.264 chunks, replacing the .u8 once the session has ended
   audio.flac   game audio, 48 kHz stereo (audio.s16 raw if not compressed), with --audio (Route A only)
   audio_index.bin  per-chunk (sample, monotonic time) map that aligns it to the steps
 ```
@@ -181,7 +182,17 @@ put below it ("Double Points: 23", "Insta-Kill: 7"). They are cut from the same 
 area-downsampled by half -- digits stay about 12 px tall at 1440p -- and cost ~7.4 GB per 20 minutes. That
 is what lets M4's parser put points, ammo, round, what is on offer and which power-ups are running on a
 recording after the fact. Recordings made before the prompt and power-up boxes existed have only the two
-corners. `--no-hud` turns them off. The boxes are screen fractions placed on a 16:9 capture; another
+corners.
+
+That size is only while recording. When the session ends, `record_demo.py` (and `play_real.py`) pack each
+region as H.264 video (`demos/hud_video.py`): yuv444p so red keeps full colour resolution, CRF 12, in
+30-second chunks. Every chunk is decoded back and compared with the raw crops, and the raw file is deleted
+only when all of them are within a mean error of 3 and a 99th-percentile error of 16 levels in 255 -- they
+measure about 1.3 and 6, which is invisible, digits included. About 20x smaller: ~0.4 GB a session instead
+of ~7.4. `clip.hud(name)` then returns a `HudVideo` that indexes like the raw array and decodes on demand.
+Packing takes about half a minute and never runs during the recording; Ctrl-C leaves the raw crops, and
+`scripts/pack_hud.py data/demos` packs anything left raw, including recordings from before this existed.
+`--keep-raw-hud` skips it. `--no-hud` turns them off. The boxes are screen fractions placed on a 16:9 capture; another
 aspect ratio needs new ones.
 
 Frames and labels are versioned separately on purpose. A spec change that touches the HUD layout must not

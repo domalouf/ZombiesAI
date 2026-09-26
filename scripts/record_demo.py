@@ -34,6 +34,16 @@ from zombiesai.demos.inputs import DEFAULT_BINDINGS, MARK_KEY, InputConfig
 from zombiesai.demos.recorder import RecorderConfig, quality_report, record, wait_to_start
 
 
+def pack(path: Path) -> None:
+    """Swap the raw HUD crops for verified video, after the session so it never costs the recording a step."""
+    from zombiesai.demos.hud_video import PackError, pack_hud
+
+    try:
+        pack_hud(path, say=lambda message: print(f"  {message}"))
+    except (PackError, KeyboardInterrupt) as e:
+        print(f"  HUD crops left raw ({e or 'stopped'}); pack them later with scripts/pack_hud.py {path}")
+
+
 def check(path: Path) -> None:
     """Say immediately whether the recording is worth keeping, while the game is still open."""
     report = quality_report(load_clip(path))
@@ -161,7 +171,9 @@ def main() -> None:
                         help="Linux: the game window to capture, by title or 0x id (it runs under XWayland)")
     parser.add_argument("--monitor", type=int, default=1)
     parser.add_argument("--no-hud", action="store_true",
-                        help="don't save full-resolution HUD crops (they cost ~7.4 GB per 20 minutes at 1440p)")
+                        help="don't save full-resolution HUD crops (~7.4 GB per 20 minutes at 1440p while recording, ~0.4 GB once packed as video)")
+    parser.add_argument("--keep-raw-hud", action="store_true",
+                        help="don't pack the HUD crops as video when the session ends (~17x smaller, verified)")
     parser.add_argument("--mark-key", default=MARK_KEY,
                         help="key that toggles 'not playing' (menus, pause, loading, game over); 'none' disables")
     parser.add_argument("--game-config", type=Path,
@@ -344,6 +356,8 @@ def main() -> None:
 
             print(f"  {describe_audio(path)}")
         check(path)
+        if clip.hud_regions and not args.keep_raw_hud:
+            pack(path)
         return
 
     from zombiesai.demos.capture import SimSource
