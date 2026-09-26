@@ -401,3 +401,18 @@ def test_a_recording_that_never_closed_is_requantized_against_its_own_start(tmp_
     (clip.path / "clip.json").write_text(json.dumps(manifest))
     requantize(clip.path, CONFIG)
     np.testing.assert_array_equal(load_clip(clip.path).actions, before)
+
+
+def test_every_toggle_of_the_mark_key_is_announced_to_the_player(tmp_path):
+    announced = []
+    clip, _ = recorded(tmp_path)
+    dt = 1.0 / spec.DECISION_HZ
+    events = [
+        {"t": t * dt, "type": "key", "code": "f8", "down": down}
+        for t, down in ((2.3, True), (2.4, False), (5.3, True), (5.4, False))
+    ]
+    record(
+        ClipPlayback(clip.path), ReplayInput(events, origin=0.0), tmp_path / "announced",
+        RecorderConfig(max_steps=8, realtime=False, input=CONFIG), progress_every=0, on_mark=announced.append,
+    )
+    assert announced == [False, True]

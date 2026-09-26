@@ -24,6 +24,14 @@ class CaptureLost(RuntimeError):
     wait for. A recorder should stop cleanly on this rather than hold a stale frame forever."""
 
 
+# Consecutive identical policy frames after which the picture counts as frozen. On this desktop a window on a
+# hidden Hyprland workspace can still be grabbed -- XWayland keeps handing back its last buffer -- so a failed
+# grab is not the only sign the game is out of sight. A live WaW scene never area-averages to the same 128x72
+# twice (fog, lighting, the viewmodel's idle sway; the capture spike saw zero unchanged frames in 150), and a
+# hidden window repeats exactly. Three reads is 200 ms: long enough that a coincidence is not an outage.
+FROZEN_READS = 3
+
+
 class ScreenCapture:
     """Desktop capture behind one `grab()`: X11/XWayland on Linux, DXGI Desktop Duplication on Windows.
 
@@ -49,6 +57,8 @@ class ScreenCapture:
         # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
         self.hud_regions, self.hud_scale = hud_regions, hud_scale
         self.last_hud: dict[str, np.ndarray] | None = None
+        self._frozen = 0  # consecutive reads whose policy frame repeated the one before
+        self._probe: np.ndarray | None = None  # is_capturable's previous sample, to tell live from frozen
         # Whether the frame `read()` last returned is a repeat of an earlier one because the window could not
         # be grabbed, and why. A repeat is not what the player saw, so a recorder must not train on it.
         self.last_stale = False
@@ -117,9 +127,21 @@ class ScreenCapture:
         return self._last
 
     def is_capturable(self) -> bool:
-        """Whether a grab would succeed now. Only X11 can say no: its window can be on another workspace,
-        whereas the other backends grab a monitor that is always there."""
-        return self._grabber.is_capturable() if self.backend == "x11" else True
+        """Whether a grab would give a live picture now. Only X11 can say no: its window can be on another
+        workspace, whereas the other backends grab a monitor that is always there.
+
+        A grab that succeeds is not enough on its own -- a window on a hidden workspace can still be grabbed,
+        and returns its last frame forever (see FROZEN_READS). So the picture must also have changed since
+        the previous question, which is why the first question after opening always answers no."""
+        if self.backend != "x11":
+            return True
+        if not self._grabber.is_capturable():
+            self._probe = None
+            return False
+        sample = np.ascontiguousarray(self.grab()[::16, ::16])
+        live = self._probe is not None and not np.array_equal(sample, self._probe)
+        self._probe = sample
+        return live
 
     def read(self) -> np.ndarray:
         """The next policy frame -- or, while the window cannot be grabbed, the last good one again, with
@@ -155,7 +177,13 @@ class ScreenCapture:
 
             self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale)
         self._shape = frame.shape
-        self._policy = fr.to_policy_frame(frame, self._box, self.fit)
+        policy = fr.to_policy_frame(frame, self._box, self.fit)
+        self._frozen = self._frozen + 1 if self._policy is not None and np.array_equal(policy, self._policy) else 0
+        self._policy = policy
+        if self._frozen >= FROZEN_READS - 1:
+            return self._stale(
+                f"the picture has not changed for {self._frozen + 1} frames (window on a hidden workspace?)"
+            )
         self.last_stale, self.stale_reason = False, None
         return self._policy
 

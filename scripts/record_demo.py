@@ -106,6 +106,33 @@ def notify(message: str, seconds: float = 3.0) -> None:
         pass
 
 
+def notify_now(message: str, seconds: float = 3.0) -> None:
+    """`notify` without waiting for it, for use inside the recording loop: a notifier that takes a second to
+    answer must cost nothing but the notification, never a decision."""
+    if shutil.which("notify-send") is None:
+        return
+    try:
+        subprocess.Popen(
+            ["notify-send", "--app-name", "ZombiesAI", "--expire-time", str(int(seconds * 1000)),
+             "record_demo", message],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except OSError:
+        pass
+
+
+def announce_mark(mark_key: str):
+    """What the player sees when they tap the mark key: a missed second tap would silently mark the rest of
+    the session as menus (it did, in the first real test), so each toggle says which state it left them in."""
+    key = mark_key.upper()
+
+    def on_mark(playing: bool) -> None:
+        notify_now("Recording play" if playing else f"NOT PLAYING -- press {key} when you're back in the game",
+                   seconds=2.0 if playing else 6.0)
+
+    return on_mark
+
+
 def next_dir(root: Path, prefix: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     existing = [p.name for p in root.glob(f"{prefix}_*")]
@@ -178,7 +205,7 @@ def main() -> None:
             d = game_settings["dvars"]
             age_h = game_settings["config_age_s"] / 3600
             print(f"game settings: sensitivity {d.get('sensitivity')}, m_yaw {d.get('m_yaw')}, "
-                  f"{d.get('r_mode')}, fov {d.get('cg_fov', '?')} (config.cfg written {age_h:.1f} h ago; "
+                  f"{d.get('r_mode')}, fov {d.get('cg_fov', 'default')} (config.cfg written {age_h:.1f} h ago; "
                   "the game only saves it on exit)")
         for warning in settings_warnings(game_settings, args.counts_per_degree):
             print(f"warning: {warning}")
@@ -290,6 +317,7 @@ def main() -> None:
             path = record(
                 capture, inputs, out, config, audio=audio,
                 annotations={"game_settings": game_settings} if game_settings is not None else None,
+                on_mark=announce_mark(config.input.mark_key) if config.input.mark_key else None,
             )
         except KeyboardInterrupt:
             # record() has already closed the clip; say where it is and check it, as for a full-length session.

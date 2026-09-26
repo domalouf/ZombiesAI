@@ -85,12 +85,15 @@ def record(
     progress_every: int = 150,
     audio=None,
     annotations: dict | None = None,
+    on_mark=None,
 ) -> Path:
     """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished sim).
 
     `audio` is an optional `demos.audio.AudioRecorder`; without it the clip is exactly what it always was.
     `annotations` are extra top-level clip.json entries (the game's settings), written before the first step
-    so a recording that never closes still has them."""
+    so a recording that never closes still has them. `on_mark(playing)` is called when the mark key flips the
+    marking -- the player is looking at the game, not at the terminal line printed here -- and must not block:
+    it runs inside the decision loop."""
     config = config or RecorderConfig()
     dt = config.dt
     writer = ClipWriter(
@@ -175,6 +178,8 @@ def record(
             if marker.playing != playing_before:
                 state = "playing again" if marker.playing else "NOT PLAYING"
                 print(f"  [{k * dt:6.0f}s] {state} ({config.input.mark_key} toggles)", flush=True)
+                if on_mark is not None:
+                    on_mark(marker.playing)
             # The first good frame after an outage has only repeats behind it, and the first play step after a
             # not-playing stretch has only menus behind it: either way a frame stack must not reach back past it.
             flags = (

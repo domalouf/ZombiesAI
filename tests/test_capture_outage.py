@@ -273,3 +273,31 @@ def test_re_deriving_the_play_marks_keeps_the_clip_start_an_outage_set():
     assert out[4] & FLAG_CLIP_START and out[0] & FLAG_CLIP_START
     assert not out[8] & FLAG_CLIP_START and not (out & FLAG_NOT_PLAYING).any()
     assert (out[2:4] & FLAG_BAD_STEP).all()
+
+
+def test_a_picture_that_stops_changing_is_stale_even_though_every_grab_succeeds(capture):
+    """A window on a hidden Hyprland workspace can still be grabbed: XWayland hands back its last frame. The
+    first real smoke test recorded 48 s of that as play."""
+    source = capture([0, 1, 2, 2, 2, 2, 3, 4])
+    stale = []
+    for _ in range(8):
+        source.read()
+        stale.append(source.last_stale)
+    # The third identical frame in a row is where it becomes an outage; a fresh picture ends it at once.
+    assert stale == [False, False, False, False, True, True, False, False]
+    assert "not changed" in source.stale_reason if source.last_stale else True
+
+
+def test_a_frozen_picture_is_flagged_bad_in_the_recording(capture, tmp_path):
+    clip = run(capture([0, 1, 2, 3] + [4] * 10 + [5, 6, 7]), tmp_path)
+    bad = (clip.flags & FLAG_BAD_STEP) != 0
+    assert bad[6:13].all() and not bad[:5].any() and not bad[-2:].any()
+    assert clip.manifest["summary"]["capture_outages"] == 1
+
+
+def test_waiting_for_the_window_needs_a_picture_that_is_moving(capture, monkeypatch):
+    source = capture([0, 0, 0, 1, 2])
+    monkeypatch.setattr(ScriptedGrabber, "is_capturable", lambda self: True, raising=False)
+    answers = [source.is_capturable() for _ in range(5)]
+    # First look has nothing to compare with; then frozen, frozen, and live once it starts changing.
+    assert answers == [False, False, False, True, True]

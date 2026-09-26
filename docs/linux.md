@@ -75,9 +75,17 @@ acceleration. The agent and the human have to live in the same units.
 
 Run World at War through Proton. Solo Nazi Zombies is the good case; multiplayer is not what this needs.
 
-- **Borderless windowed**, and keep the window fully on screen and unobscured. X11 does not promise the
-  contents of a window that is partly off the display, and a partly off-screen window fails capture with
+- **In-game fullscreen at the monitor's resolution** (`r_fullscreen 1`, `r_mode` = the native size, 16:9).
+  Not windowed: in a window Wine does not hold the pointer, and on Hyprland the view jumped on every mouse
+  click -- with nothing of ours running, so it was the game, not the recorder. Proton's fullscreen is still an
+  XWayland window, so capture finds and grabs it exactly as before. (The plan's advice to avoid exclusive
+  fullscreen is about DXGI Desktop Duplication on Windows.) Keep it wholly on screen: X11 does not promise
+  the contents of a window that is partly off the display, and a partly off-screen window fails with
   `BadMatch`.
+- **A window on a hidden workspace can still be grabbed** -- XWayland hands back its last frame -- so the
+  recorder treats a picture that stops changing as out of sight (`capture.FROZEN_READS`): `--wait` holds off
+  until the picture moves, and frozen steps are flagged like any outage. WaW's pause menu freezes the picture
+  too, so pauses mark themselves even when F8 is forgotten.
 - Check the game really is an XWayland client and find its window:
 
   ```sh
