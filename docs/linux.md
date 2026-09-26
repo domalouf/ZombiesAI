@@ -131,6 +131,26 @@ the agent makes depends on them.
 and stable. Set the sim's `latency_steps` to what it reports and confirm PPO still learns to aim there
 before spending a weekend on the real game.
 
+## Letting a policy play
+
+`scripts/play_real.py` runs a trained policy against the game: capture, the model (about 0.4 ms a decision on
+the GPU), and the virtual device, fifteen times a second (`realgame/play.py`).
+
+```sh
+uv run python scripts/play_real.py runs/bc_real1/bc.pt --dry-run --minutes 1   # everything but the input
+uv run python scripts/play_real.py runs/bc_real1/bc.pt --minutes 3
+```
+
+Most of it is about when *not* to send input, because input goes to whatever window has focus:
+
+- only while the game is the focused window, asked of Hyprland over its IPC socket every tick;
+- only while the picture is live -- a frozen or lost frame (pause menu, hidden workspace) pauses it;
+- touching your own mouse or keyboard hands the controls back until you have been idle for 1.5 s;
+- **F9 stops it**, and every exit path releases every key.
+
+Each run is recorded to `runs/play/` like a demo (`label_source="agent"`), with the steps it did not play
+flagged bad. Spike S1 -- does the engine see the virtual device at all -- is the first live run's real test.
+
 ## What runs where
 
 | Piece | Linux | Windows |
