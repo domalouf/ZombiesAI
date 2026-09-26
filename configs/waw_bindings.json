@@ -1,0 +1,15 @@
+{
+  "w": "forward",
+  "s": "back",
+  "a": "left",
+  "d": "right",
+  "shift": "sprint",
+  "mouse1": "fire",
+  "mouse2": "ads",
+  "f": "use",
+  "r": "reload",
+  "v": "melee",
+  "g": "grenade",
+  "mouse3": "grenade",
+  "1": "swap"
+}
