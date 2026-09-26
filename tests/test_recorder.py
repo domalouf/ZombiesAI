@@ -7,7 +7,7 @@ from zombiesai.agents.scripted import ScriptedAgent
 from zombiesai.demos.capture import ClipPlayback, ReplayInput, SimSource
 from zombiesai.demos.clips import FLAG_BAD_STEP, load_clip
 from zombiesai.demos.inputs import InputConfig, read_log, synthesize
-from zombiesai.demos.recorder import RecorderConfig, quality_report, record, requantize
+from zombiesai.demos.recorder import RecorderConfig, quality_report, record, requantize, wait_to_start
 from zombiesai.sim.nacht_sim import NachtSim, SimConfig
 
 CONFIG = InputConfig(counts_per_degree=10.0)
@@ -121,3 +121,115 @@ def test_the_quality_check_catches_labels_that_belong_to_another_recording(tmp_p
     clip.labels["yaw_deg"] = rng.permutation(clip.labels["yaw_deg"])
     scrambled = quality_report(clip)["yaw_flow"]["correlation"]
     assert not (scrambled > 0.5)  # NaN or low: either way it does not pass for aligned
+
+
+class FakeClock:
+    """Time that passes only when the code under test sleeps, so the wait loop is tested without waiting."""
+
+    def __init__(self):
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def __call__(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def probe_after(polls: int, then=None):
+    """A game window that becomes capturable on the `polls`-th question -- and, if `then` is given, whose
+    answers after that come from `then` instead of a steady yes."""
+    answers = iter([False] * polls + list(then or []))
+    return lambda: next(answers, True)
+
+
+def waited(probe, **kwargs):
+    clock, said, notes, discards = FakeClock(), [], [], []
+    kwargs = {"timeout": 60.0, "countdown": 3.0, "poll": 0.5, **kwargs}
+    ready = wait_to_start(
+        probe, discard=lambda: discards.append(clock.now), say=said.append, notify=notes.append,
+        clock=clock, sleep=clock.sleep, **kwargs,
+    )
+    return ready, clock, said, notes, discards
+
+
+def test_recording_waits_for_the_game_window_and_then_counts_down():
+    ready, clock, said, notes, _ = waited(probe_after(4))
+    assert ready
+    assert any("waiting for the game window" in line for line in said)
+    assert [line.strip() for line in said if line.strip()[0].isdigit()] == ["3...\a", "2...\a", "1...\a"]
+    assert notes == ["recording in 3s"]
+    assert clock.now == 4 * 0.5 + 3.0  # four polls of waiting, then the countdown, and not a moment more
+
+
+def test_a_window_already_on_screen_goes_straight_to_the_countdown():
+    ready, clock, said, _, _ = waited(lambda: True, countdown=2.0)
+    assert ready and clock.now == 2.0
+    assert not any("waiting" in line for line in said)
+
+
+def test_waiting_gives_up_after_the_timeout():
+    ready, clock, said, notes, _ = waited(lambda: False, timeout=10.0)
+    assert not ready
+    assert 10.0 <= clock.now <= 10.5
+    assert notes == [], "nothing should announce a recording that is not going to happen"
+
+
+def test_a_window_that_leaves_during_the_countdown_sends_it_back_to_waiting():
+    # Capturable at the first question, gone when the countdown ends, back two polls later.
+    ready, clock, said, notes, _ = waited(probe_after(0, then=[True, False, False, False]))
+    assert ready
+    assert any("left the screen" in line for line in said)
+    assert notes == ["recording in 3s", "recording in 3s"]
+
+
+def test_a_zero_countdown_starts_the_moment_the_window_appears():
+    ready, clock, said, notes, _ = waited(probe_after(2), countdown=0.0)
+    assert ready and clock.now == 2 * 0.5 and notes == []
+
+
+def test_the_input_backlog_is_discarded_right_up_to_the_start():
+    ready, clock, _, _, discards = waited(probe_after(3))
+    assert ready and discards and discards[-1] == clock.now
+
+
+class BackloggedInput:
+    """Like EvdevInput: `drain()` returns everything since the last call, whatever window it is asked for."""
+
+    def __init__(self, events):
+        self.events = list(events)
+
+    def drain(self, start: float = 0.0, end: float = 0.0) -> list[dict]:
+        out, self.events = self.events, []
+        return out
+
+    def close(self) -> None:
+        pass
+
+
+class BlankScreen:
+    def read(self):
+        return np.zeros(spec.PIXELS_SHAPE, dtype=np.uint8)
+
+    def close(self) -> None:
+        pass
+
+
+def first_yaw(tmp_path, name, *, discard: bool) -> float:
+    # A minute of reaching for the mouse and alt-tabbing, stamped long before the recording starts.
+    backlog = [{"t": -60.0 + i * 0.01, "type": "mouse", "dx": 40, "dy": 0} for i in range(500)]
+    inputs = BackloggedInput(backlog)
+    if discard:
+        assert wait_to_start(lambda: True, timeout=1.0, countdown=0.0, discard=inputs.drain, say=lambda _: None)
+    config = RecorderConfig(max_steps=2, realtime=False, input=CONFIG)
+    path = record(BlankScreen(), inputs, tmp_path / name, config, progress_every=0)
+    return float(load_clip(path).labels["yaw_deg"][0])
+
+
+def test_input_from_before_the_recording_does_not_become_the_first_label(tmp_path):
+    """InputFolder clamps early events into the first decision, so without the discard the whole wait
+    arrives as one impossible flick -- which is what this checks the discard prevents."""
+    assert abs(first_yaw(tmp_path, "backlogged", discard=False)) > 100
+    assert first_yaw(tmp_path, "discarded", discard=True) == 0.0

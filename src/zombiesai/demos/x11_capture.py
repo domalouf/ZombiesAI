@@ -25,10 +25,16 @@ ZPIXMAP = 2
 ALL_PLANES = 0xFFFFFFFF
 IPC_CREAT, IPC_RMID = 0o1000, 0
 ANY_PROPERTY_TYPE = 0
+IS_VIEWABLE = 2  # XWindowAttributes.map_state: mapped, and every ancestor mapped too
 
 
 class X11Error(RuntimeError):
     pass
+
+
+class WindowNotFound(X11Error):
+    """No window matches the title (yet). Separate from X11Error because it is the one failure worth waiting
+    out: the game may simply not be running, or not be mapped, when the recorder starts."""
 
 
 class XErrorEvent(ctypes.Structure):
@@ -146,6 +152,10 @@ class _Xlib:
             [void, ulong, ctypes.POINTER(ulong), ctypes.POINTER(ulong), ctypes.POINTER(ctypes.POINTER(ulong)),
              ctypes.POINTER(uint)],
         )
+        self.translate_coordinates = _bind(
+            x11, "XTranslateCoordinates", cint,
+            [void, ulong, ulong, cint, cint, ctypes.POINTER(cint), ctypes.POINTER(cint), ctypes.POINTER(ulong)],
+        )
         self.fetch_name = _bind(x11, "XFetchName", cint, [void, ulong, ctypes.POINTER(char_p)])
         self.intern_atom = _bind(x11, "XInternAtom", ulong, [void, char_p, cint])
         self.get_property = _bind(
@@ -248,7 +258,7 @@ def list_windows(display: str | None = None, min_size: int = 200) -> list[Window
             attributes = XWindowAttributes()
             if not x.get_attributes(display, window, ctypes.byref(attributes)):
                 continue
-            if attributes.map_state != 2 or attributes.width < min_size or attributes.height < min_size:
+            if attributes.map_state != IS_VIEWABLE or attributes.width < min_size or attributes.height < min_size:
                 continue  # IsViewable only: unmapped windows have no pixels to read
             found.append(WindowInfo(int(window), _window_title(x, display, window), attributes.width, attributes.height))
         return found
@@ -261,8 +271,19 @@ def find_window(title: str, display: str | None = None) -> WindowInfo:
     matches = [w for w in list_windows(display) if title.lower() in w.title.lower()]
     if not matches:
         titles = sorted({w.title for w in list_windows(display) if w.title})
-        raise X11Error(f"no window matching {title!r}; visible windows: {titles or '(none titled)'}")
+        raise WindowNotFound(f"no window matching {title!r}; visible windows: {titles or '(none titled)'}")
     return max(matches, key=lambda w: w.width * w.height)
+
+
+def region_on_screen(origin: tuple[int, int], region: tuple[int, int, int, int], root: tuple[int, int]) -> bool:
+    """Whether a window-relative `region` of a window whose top-left sits at `origin` (root coordinates) lies
+    wholly inside a root of size `root`.
+
+    Both GetImage requests insist on it: a drawable that is even partly outside its root answers BadMatch,
+    not a clipped image. That is what a compositor parking a window off to the side looks like to us.
+    """
+    left, top = origin[0] + region[0], origin[1] + region[1]
+    return left >= 0 and top >= 0 and left + region[2] <= root[0] and top + region[3] <= root[1]
 
 
 def _display_name(display: str | None) -> bytes | None:
@@ -291,7 +312,8 @@ class X11Grabber:
         self.screen = x.default_screen(self.display)
         if isinstance(window, str):
             window = find_window(window, display).id
-        self.window = int(window) if window is not None else int(x.root_window(self.display, self.screen))
+        self.root = int(x.root_window(self.display, self.screen))
+        self.window = int(window) if window is not None else self.root
 
         clear_errors()
         attributes = XWindowAttributes()
@@ -351,6 +373,39 @@ class X11Grabber:
             image.contents.data = None
         destroy = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(XImage))(image.contents.f.destroy_image)
         destroy(image)
+
+    def is_capturable(self) -> bool:
+        """Whether `grab()` would succeed right now, asked of X rather than of whichever compositor is on top.
+
+        A window the player cannot see -- on another Hyprland workspace, minimized, parked off-screen -- is
+        either not viewable or not wholly inside the root, and GetImage answers both with BadMatch. Those
+        are checked first because they are cheap and say *why*; a trial grab then settles anything they
+        miss, since a failed grab is the ground truth. A window that no longer exists raises instead of
+        answering False: waiting will not bring it back.
+        """
+        x = self.x
+        clear_errors()
+        attributes = XWindowAttributes()
+        ok = x.get_attributes(self.display, self.window, ctypes.byref(attributes))
+        check_errors(x, self.display, f"window 0x{self.window:x}")
+        if not ok:
+            raise X11Error(f"window 0x{self.window:x} no longer exists")
+        if attributes.map_state != IS_VIEWABLE:
+            return False
+        root = XWindowAttributes()
+        x.get_attributes(self.display, self.root, ctypes.byref(root))
+        left, top, child = ctypes.c_int(), ctypes.c_int(), ctypes.c_ulong()
+        x.translate_coordinates(
+            self.display, self.window, self.root, 0, 0, ctypes.byref(left), ctypes.byref(top), ctypes.byref(child)
+        )
+        check_errors(x, self.display, f"locating window 0x{self.window:x}")
+        if not region_on_screen((left.value, top.value), self.region, (root.width, root.height)):
+            return False
+        try:
+            self.grab()
+        except X11Error:
+            return False
+        return True
 
     def grab(self) -> np.ndarray:
         """The region as an (H, W, 3) uint8 RGB array. The returned array owns its memory: the shared buffer

@@ -18,7 +18,8 @@ uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --m
     --notes "camping the help room, deliberately bad positioning after round 8"
 ```
 
-The command is the same on either OS. On Linux the pixels come from the game's XWayland window and the input
+The command is the same on either OS. Add `--wait` to launch it from a terminal elsewhere: it starts once the
+game window can be captured, after a three-second countdown ([`linux.md`](./linux.md) says why). On Linux the pixels come from the game's XWayland window and the input
 log from `/dev/input/event*`, which reports the same device counts Windows Raw Input does. The Linux setup
 those two need -- group membership, a udev rule, and flat pointer acceleration -- is in
 [`linux.md`](./linux.md), along with the spike order and what to check when the engine ignores the virtual

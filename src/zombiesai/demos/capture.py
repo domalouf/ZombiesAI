@@ -105,6 +105,11 @@ class ScreenCapture:
         self._last = np.asarray(shot, dtype=np.uint8)[:, :, 2::-1]  # BGRA -> RGB
         return self._last
 
+    def is_capturable(self) -> bool:
+        """Whether a grab would succeed now. Only X11 can say no: its window can be on another workspace,
+        whereas the other backends grab a monitor that is always there."""
+        return self._grabber.is_capturable() if self.backend == "x11" else True
+
     def read(self) -> np.ndarray:
         frame = self.grab()
         if self._box is None:

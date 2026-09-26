@@ -102,10 +102,17 @@ uv run python scripts/calibrate_mouse.py --window "World at War" --full-turn
 # S2 (capture rate) and S3 (input-to-pixels delay).
 uv run python scripts/spike_capture.py --window "World at War" --latency --video /tmp/agentview.mp4
 
-# Then record yourself playing, with the number S4 gave you.
-uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 \
+# Then record yourself playing, with the number S4 gave you. --wait holds the start until the game is
+# on screen, then counts down 3 s (--countdown), so it can be launched from a terminal on another workspace.
+uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 --wait \
     --notes "varied play: camping, trains, deliberate bad positioning"
 ```
+
+Capture reads the game's X11 window, and X refuses (`BadMatch`) to read one that is on a hidden workspace or
+partly off-screen. Without `--wait` the recorder starts, and fails, the moment you press enter; with it, it
+asks X every half second until the window is readable, and gives up after `--wait-timeout` (300 s). Input
+from the wait and the countdown is thrown away rather than folded into the first decision. `--minutes`
+counts recording only.
 
 `calibrate_mouse.py --full-turn` measures counts per degree twice: once from an assumed field of view, and
 once by turning all the way around until the view returns to where it started, which assumes nothing and

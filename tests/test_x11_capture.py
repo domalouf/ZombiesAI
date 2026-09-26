@@ -143,6 +143,14 @@ def test_screen_capture_picks_x11_and_produces_a_policy_frame(x_display, window,
         capture.close()
 
 
+def test_a_mapped_window_wholly_on_screen_is_capturable(x_display, window):
+    capture = grabber(window, display=x_display)
+    try:
+        assert capture.is_capturable()
+    finally:
+        capture.close()
+
+
 def test_a_missing_window_says_so_instead_of_crashing(x_display):
     from zombiesai.demos.x11_capture import X11Error
 
