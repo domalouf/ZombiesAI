@@ -31,6 +31,13 @@ def check(path: Path) -> None:
         f"  {report['steps']} steps ({report['seconds'] / 60:.1f} min), "
         f"overruns {report['overrun_rate']:.1%}, label confidence {report['mean_confidence']:.2f}"
     )
+    if report["stale_steps"]:  # None on recordings from before capture could survive losing the window
+        print(
+            f"  capture lost for {report['stale_steps']} steps over {report['capture_outages']} outage(s), "
+            f"all flagged bad"
+        )
+    if report["capture_lost"]:
+        print(f"  WARNING the recording stopped early because capture was lost: {report['capture_lost']}")
     print(
         f"  fire {behaviour['fire_duty']:.2f} duty, |yaw| {behaviour['abs_yaw_deg_per_s']:.0f} deg/s, "
         f"reloads {behaviour['reload_per_min']:.1f}/min, clamped looks {report['clamped_looks']:.1%}"

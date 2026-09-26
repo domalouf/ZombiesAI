@@ -9,6 +9,9 @@ The loop is the same discipline the real environment will run under, and for the
 * **Alignment is explicit.** The frame captured at deadline k is paired with the input collected over
   [t_k, t_k+1) -- what the player could see, and what they did about it. Off by one here is the bug that
   looks like "the model is bad at aiming" for a week.
+* **A lost window costs steps, not the session.** While the game window cannot be grabbed the source repeats
+  its last good frame and says so; those steps are flagged `bad_step`, and the recording carries on until the
+  window is back -- or stops cleanly once it has been gone for `max_outage_seconds`.
 
 The raw input log is written alongside the clip, so the labels can be recomputed later under different
 bindings, a different `counts_per_degree`, or different bins, without asking anyone to play again.
@@ -22,8 +25,8 @@ from pathlib import Path
 import numpy as np
 
 from zombiesai import spec
-from zombiesai.demos.capture import sleep_until
-from zombiesai.demos.clips import FLAG_BAD_STEP, ClipWriter, load_clip
+from zombiesai.demos.capture import CaptureLost, sleep_until
+from zombiesai.demos.clips import FLAG_BAD_STEP, FLAG_CLIP_START, ClipWriter, load_clip
 from zombiesai.demos.inputs import (
     InputConfig,
     InputFolder,
@@ -39,6 +42,9 @@ class RecorderConfig:
     max_steps: int = 18_000  # 20 minutes at 15 Hz
     max_seconds: float | None = None
     overrun_factor: float = 1.5  # a decision this much longer than the period is flagged, per the plan
+    # How long the capture may keep repeating a stale frame before the recording gives up. Long enough to
+    # glance at another workspace; short enough that a closed game does not leave the recorder running on.
+    max_outage_seconds: float = 30.0
     # A human plays in real time and the loop must wait for them. A sim source produces its own time, so
     # waiting on the wall clock would only make CI slow.
     realtime: bool = True
@@ -77,12 +83,17 @@ def record(
     )
     log = open(Path(out_dir) / "inputs.jsonl", "a", buffering=1)
     folder = InputFolder(config.input)
-    overruns = 0
+    overruns = stale_steps = outages = outage_run = 0
+    capture_lost: str | None = None
     t0 = time.monotonic()
     try:
         pending = frame_source.read()
-        # A source that cuts full-resolution HUD crops from each grab exposes the latest set as `last_hud`.
+        # A source that cuts full-resolution HUD crops from each grab exposes the latest set as `last_hud`,
+        # and one that can lose its window says whether the frame it returned is a repeat (`last_stale`).
+        # Both describe the frame, so both travel with `pending` to the step that frame is paired with.
         pending_hud = getattr(frame_source, "last_hud", None)
+        pending_stale = bool(getattr(frame_source, "last_stale", False))
+        resumed = False  # the pending frame is the first good one after an outage
         for k in range(1, config.max_steps + 1):
             if config.max_seconds and k * dt > config.max_seconds:
                 break
@@ -95,22 +106,45 @@ def record(
                 frame = frame_source.read()
             except StopIteration:
                 break
+            except CaptureLost as error:
+                capture_lost = str(error)
+                print(f"  capture lost for good at {k * dt:.0f}s, stopping: {error}", flush=True)
+                break
+            stale = bool(getattr(frame_source, "last_stale", False))
+            if stale and not outage_run:
+                outages += 1
+                reason = getattr(frame_source, "stale_reason", None) or "no reason given"
+                print(f"  WARNING capture lost at {k * dt:.0f}s ({reason}); flagging steps bad until it is back",
+                      flush=True)
+            elif outage_run and not stale:
+                print(f"  capture back at {k * dt:.0f}s after {outage_run * dt:.1f}s", flush=True)
             held, presses, counts = folder.feed(events, start, end)
             labels = actions_from(held, presses, counts, config.input)
             late = overshoot > (config.overrun_factor - 1.0) * dt
             overruns += late
+            stale_steps += pending_stale
             writer.add(
                 pending,
                 labels.actions[0],
                 confidence=float(label_confidence(labels, config.input)[0]),
                 yaw_deg=float(labels.yaw_deg[0]),
                 pitch_deg=float(labels.pitch_deg[0]),
-                flags=FLAG_BAD_STEP if late else 0,
+                # The first good frame after an outage has only repeats behind it, so a frame stack must not
+                # reach back past it -- the same situation as the first step of a clip.
+                flags=(FLAG_BAD_STEP if late or pending_stale else 0) | (FLAG_CLIP_START if resumed else 0),
                 hud=pending_hud,
             )
-            pending, pending_hud = frame, getattr(frame_source, "last_hud", None)
+            resumed = outage_run > 0 and not stale
+            outage_run = outage_run + 1 if stale else 0
+            pending, pending_hud, pending_stale = frame, getattr(frame_source, "last_hud", None), stale
             if progress_every and k % progress_every == 0:
-                print(f"  {k} decisions ({k * dt:.0f}s), {overruns} overruns", flush=True)
+                print(f"  {k} decisions ({k * dt:.0f}s), {overruns} overruns, {stale_steps} stale", flush=True)
+            if outage_run and outage_run * dt >= config.max_outage_seconds:
+                reason = getattr(frame_source, "stale_reason", None) or "no reason given"
+                capture_lost = f"no capture for {outage_run * dt:.0f}s: {reason}"
+                print(f"  capture has been lost for {outage_run * dt:.0f}s, stopping the recording ({reason})",
+                      flush=True)
+                break
             if stop is not None and stop():
                 break
     finally:
@@ -123,6 +157,12 @@ def record(
                 "seconds": seconds,
                 "overruns": int(overruns),
                 "overrun_rate": overruns / max(writer.n_steps, 1),
+                # Steps whose frame was a repeat because the window could not be grabbed (all flagged bad),
+                # how many separate outages they came from, and what ended the recording if capture did.
+                "stale_steps": int(stale_steps),
+                "stale_rate": stale_steps / max(writer.n_steps, 1),
+                "capture_outages": int(outages),
+                "capture_lost": capture_lost,
                 # The clock the input log is stamped on, so the labels can be rebuilt against the same
                 # decision boundaries the recorder used rather than guessed ones.
                 "t0_mono": t0,
@@ -186,6 +226,9 @@ def quality_report(clip, sample: int = 400) -> dict:
         "steps": clip.n_steps,
         "seconds": clip.n_steps / spec.DECISION_HZ,
         "overrun_rate": summary.get("overrun_rate"),
+        "stale_steps": summary.get("stale_steps"),
+        "capture_outages": summary.get("capture_outages"),
+        "capture_lost": summary.get("capture_lost"),
         "mean_confidence": float(clip.confidence.mean()),
         "clamped_looks": float((np.abs(clip.labels["yaw_deg"]) > max(spec.YAW_BINS_DEG)).mean()),
         "yaw_flow": flow,
