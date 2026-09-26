@@ -41,7 +41,19 @@ def test_the_prompt_box_covers_the_interaction_line_under_the_crosshair():
     text = np.argwhere(crops["prompt"][..., 0] == 255)
     assert text[:, 0].min() > 5 and text[:, 0].max() < 60  # the whole line, with a margin above and below
     assert text[:, 1].min() > 0 and text[:, 1].max() < 639  # and either side
-    assert crops["points_ammo"].max() == 0 and crops["round"].max() == 0
+    assert crops["points_ammo"].max() == 0 and crops["round"].max() == 0 and crops["powerup"].max() == 0
+
+
+@pytest.mark.parametrize("row", [1109, 1195])  # Double Points at 0.77 of the height, Insta-Kill at 0.83
+def test_the_powerup_box_covers_either_countdown_line(row):
+    frame = np.zeros((1440, 2560, 3), np.uint8)
+    frame[row - 15 : row + 15, 947:1434] = 255  # "Double Points: 23", about 0.37-0.56 of the width
+    crops = crop_regions(frame, scale=0.5)
+    assert crops["powerup"].shape == (108, 435, 3)
+    text = np.argwhere(crops["powerup"][..., 0] == 255)
+    assert text[:, 0].min() > 5 and text[:, 0].max() < 102
+    assert text[:, 1].min() > 5 and text[:, 1].max() < 429
+    assert crops["prompt"].max() == 0
 
 
 def _hud(value: int) -> dict[str, np.ndarray]:

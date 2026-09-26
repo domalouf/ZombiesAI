@@ -173,13 +173,15 @@ data/clips/<name>/
 ```
 
 The policy's 128×72 frame turns the points and ammo counters into a smear, so screen recordings also keep
-three HUD boxes at full resolution (`demos/hud_crops.py`): `points_ammo` in the bottom right (points
-and their "+N" popups, weapon, grenades, magazine and reserve ammo), `round` in the bottom left, and `prompt`,
+four HUD boxes at full resolution (`demos/hud_crops.py`): `points_ammo` in the bottom right (points
+and their "+N" popups, weapon, grenades, magazine and reserve ammo), `round` in the bottom left, `prompt`,
 the interaction line under the crosshair ("Press & hold F to buy ... [Cost: 1200]") -- at 128×72 the policy
-sees that a prompt is up but not what it offers or costs. They are cut from the same grab as each frame,
-area-downsampled by half -- digits stay about 12 px tall at 1440p -- and cost ~4.8 GB per 20 minutes. That
-is what lets M4's parser put points, ammo, round and what is on offer on a recording after the fact.
-Recordings made before the prompt box existed have only the two corners. `--no-hud` turns them off. The boxes are screen fractions placed on a 16:9 capture; another
+sees that a prompt is up but not what it offers or costs -- and `powerup`, the countdowns timed power-ups
+put below it ("Double Points: 23", "Insta-Kill: 7"). They are cut from the same grab as each frame,
+area-downsampled by half -- digits stay about 12 px tall at 1440p -- and cost ~7.4 GB per 20 minutes. That
+is what lets M4's parser put points, ammo, round, what is on offer and which power-ups are running on a
+recording after the fact. Recordings made before the prompt and power-up boxes existed have only the two
+corners. `--no-hud` turns them off. The boxes are screen fractions placed on a 16:9 capture; another
 aspect ratio needs new ones.
 
 Frames and labels are versioned separately on purpose. A spec change that touches the HUD layout must not

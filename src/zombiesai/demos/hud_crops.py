@@ -16,9 +16,14 @@ pixel tall, so the policy can tell a prompt is up but not what it offers or what
 from the recordings' own frames at every press of F -- the line sits at 0.64-0.67 of the height and the long
 buy prompts span 0.31-0.65 of the width -- with a margin, since 128x72 only pins it to within 20 px.
 
+The fourth is the countdown a timed power-up puts below that ("Double Points: 23", "Insta-Kill: 7"): whether
+one is running and for how long, which should change how the agent plays. The recordings show Double Points
+at 0.77 of the height and Insta-Kill at 0.83, each about 0.37-0.56 of the width, so one box covers both
+lines, whichever is up.
+
 Crops are area-downsampled by `HUD_SCALE`. At 0.5 a 2560x1440 capture keeps digits about 12 px tall -- ample
-for template matching against a fixed bitmap font -- for 269 KB a decision, ~4.8 GB per 20 minutes (the prompt
-is 125 KB of it), instead of four times that.
+for template matching against a fixed bitmap font -- for 410 KB a decision, ~7.4 GB per 20 minutes (the prompt
+and power-up boxes are 266 KB of it), instead of four times that.
 """
 
 import numpy as np
@@ -33,6 +38,8 @@ HUD_REGIONS: dict[str, tuple[float, float, float, float]] = {
     "round": (0.0, 0.8056, 0.125, 0.1944),
     # the interaction prompt under the crosshair: what F would buy, open or rebuild here, and its cost
     "prompt": (0.25, 0.61, 0.5, 0.09),
+    # the timed power-ups' countdowns below it: Double Points, Insta-Kill, and the seconds they have left
+    "powerup": (0.31, 0.73, 0.34, 0.15),
 }
 HUD_SCALE = 0.5
 

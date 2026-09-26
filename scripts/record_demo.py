@@ -161,7 +161,7 @@ def main() -> None:
                         help="Linux: the game window to capture, by title or 0x id (it runs under XWayland)")
     parser.add_argument("--monitor", type=int, default=1)
     parser.add_argument("--no-hud", action="store_true",
-                        help="don't save full-resolution HUD crops (they cost ~4.8 GB per 20 minutes at 1440p)")
+                        help="don't save full-resolution HUD crops (they cost ~7.4 GB per 20 minutes at 1440p)")
     parser.add_argument("--mark-key", default=MARK_KEY,
                         help="key that toggles 'not playing' (menus, pause, loading, game over); 'none' disables")
     parser.add_argument("--game-config", type=Path,
