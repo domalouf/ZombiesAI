@@ -21,6 +21,25 @@ uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --m
 scripts/record_waw.sh 20 "camping the help room, deliberately bad positioning after round 8"
 ```
 
+### What to play: one strategy, many situations
+
+Behavioural cloning learns the *average* of what you did in moments that look alike. If you sometimes go
+left around a corner and sometimes right, it learns to hover in between -- the indecisive, twitchy turning
+the first policies showed. So:
+
+- **Keep one core strategy across sessions.** The same route between rooms, the same spot to camp or loop
+  to train zombies, the same rules for when to open the help room and when to hit the box. Write it in
+  `--notes` so the sessions that share it can be picked out later. A second strategy is fine once the first
+  has hours behind it; mixed in early, it halves the data for both.
+- **Vary the situations, not the plan.** Early and late rounds, whatever the box hands you, low ammo,
+  getting cornered, a zombie behind you. Rare actions -- reloading, rebuilding, buying, the box, knifing,
+  grenades -- should happen as often as they naturally do in good play; the policy cannot learn a button it
+  saw twice.
+- **Play at your normal level and recover from your mistakes.** A recovery is exactly the data the policy
+  lacks when it gets itself into trouble. Don't play badly on purpose, and mark menus, pauses and the
+  game-over screen with F8.
+- **Quantity still matters most.** Twenty-minute sessions; the plan asks for 2-4 hours before BC is judged.
+
 Every recording also carries the game's own settings -- sensitivity, `m_yaw`, resolution, key bindings --
 read from WaW's `config.cfg` (`demos/game_settings.py`), and the recorder warns before you play when they
 disagree with `--counts-per-degree`, or when mouse smoothing or toggle-ADS would spoil the labels. The game
