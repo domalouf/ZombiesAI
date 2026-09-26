@@ -10,9 +10,15 @@ generous margins: the "+10" popups float up and left of the points, and the roun
 single tally mark into wide numerals by the later rounds. WaW anchors its HUD to the screen corners and
 scales it with height, so the fractions hold at any 16:9 resolution; another aspect ratio needs new boxes.
 
+The third box is not in a corner: it is the interaction prompt under the crosshair ("Press & hold F to buy
+... [Cost: 1200]", "... to rebuild barrier", the box and the doors). At 128x72 that line is a grey smear one
+pixel tall, so the policy can tell a prompt is up but not what it offers or what it costs. It was placed
+from the recordings' own frames at every press of F -- the line sits at 0.64-0.67 of the height and the long
+buy prompts span 0.31-0.65 of the width -- with a margin, since 128x72 only pins it to within 20 px.
+
 Crops are area-downsampled by `HUD_SCALE`. At 0.5 a 2560x1440 capture keeps digits about 12 px tall -- ample
-for template matching against a fixed bitmap font -- for 144 KB a decision, ~2.6 GB per 20 minutes, instead
-of four times that.
+for template matching against a fixed bitmap font -- for 269 KB a decision, ~4.8 GB per 20 minutes (the prompt
+is 125 KB of it), instead of four times that.
 """
 
 import numpy as np
@@ -25,6 +31,8 @@ HUD_REGIONS: dict[str, tuple[float, float, float, float]] = {
     "points_ammo": (0.8516, 0.8125, 0.1484, 0.1875),
     # the round counter: red tally marks early, numerals later
     "round": (0.0, 0.8056, 0.125, 0.1944),
+    # the interaction prompt under the crosshair: what F would buy, open or rebuild here, and its cost
+    "prompt": (0.25, 0.61, 0.5, 0.09),
 }
 HUD_SCALE = 0.5
 

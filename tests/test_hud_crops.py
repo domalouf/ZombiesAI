@@ -28,6 +28,20 @@ def test_crops_come_from_the_right_corner_at_the_right_scale():
     assert crops["points_ammo"].shape == crop_shape(1440, 2560, HUD_REGIONS["points_ammo"], 0.5) == (135, 190, 3)
     assert crops["points_ammo"][..., 0].max() == 255
     assert crops["round"].max() == 0  # nothing in the other corner
+    assert crops["prompt"].max() == 0
+
+
+def test_the_prompt_box_covers_the_interaction_line_under_the_crosshair():
+    # Where the recordings put "Press & hold F to buy ...": rows 46-47 of 72, the long prompts at columns 40-83
+    # of 128 -- as a white line on a 1440p frame.
+    frame = np.zeros((1440, 2560, 3), np.uint8)
+    frame[920:960, 800:1660] = 255
+    crops = crop_regions(frame, scale=0.5)
+    assert crops["prompt"].shape == (65, 640, 3)
+    text = np.argwhere(crops["prompt"][..., 0] == 255)
+    assert text[:, 0].min() > 5 and text[:, 0].max() < 60  # the whole line, with a margin above and below
+    assert text[:, 1].min() > 0 and text[:, 1].max() < 639  # and either side
+    assert crops["points_ammo"].max() == 0 and crops["round"].max() == 0
 
 
 def _hud(value: int) -> dict[str, np.ndarray]:
