@@ -253,10 +253,10 @@ def play(
                 fresh = True
             if motor is not None:
                 # Label what the motor actually sent during this tick, not what was asked of it.
-                counts = motor.sent_counts - sent_before
+                emitted = motor.sent_counts - sent_before
                 sent_before = motor.sent_counts.copy()
                 if reason is None and look is not None:
-                    look = (float(counts[0]) / motor.cpd, float(counts[1]) / motor.cpd)
+                    look = (float(emitted[0]) / motor.cpd, float(emitted[1]) / motor.cpd)
                     action = nearest_bins(action, look)
             if writer is not None and getattr(capture, "has_frame", True):
                 sent = look if reason is None and look is not None else (0.0, 0.0)

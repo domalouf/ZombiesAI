@@ -294,3 +294,23 @@ def test_a_game_window_that_dies_under_the_player_is_a_pause_not_a_crash(tmp_pat
     assert summary["frozen"] == 1 and agent.calls == 15
     clip = load_clip(tmp_path / "run")
     assert clip.n_steps == 15  # the placeholder step before any real frame is not written
+
+
+def test_the_loop_runs_with_the_mouse_motor_as_the_live_script_uses_it(tmp_path):
+    """Every other test here drives looks as per-tick sub-moves; the live script uses the motor thread, and the
+    first run with it died on a name the motor code shadowed. So: the real motor, a pause, and a recording."""
+    import time
+
+    clock = Clock()
+    dispatcher = ActionDispatcher(FakeSink(), DispatchConfig(counts_per_degree=9.09), motor=True)
+    dispatcher.pump_until = lambda deadline, poll_s=0.002: (setattr(clock, "now", deadline), time.sleep(0.004))
+    writer = ClipWriter(tmp_path / "run", source={"kind": "test"}, label_source="agent")
+    try:
+        summary = play(Screen(), JitteryAgent([6.0]), dispatcher, focus=Focus(unfocused={4, 5}),
+                       human=HumanWatch(Hands(), PlayConfig()), config=PlayConfig(max_seconds=1.0),
+                       writer=writer, clock=clock, say=lambda _: None)
+    finally:
+        dispatcher.close()
+    assert summary["acted"] == 15 and summary["unfocused"] == 2
+    clip = load_clip(tmp_path / "run")
+    assert clip.n_steps == 17 and np.isfinite(clip.labels["yaw_deg"]).all()
