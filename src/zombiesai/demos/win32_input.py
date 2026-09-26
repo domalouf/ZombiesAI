@@ -40,6 +40,14 @@ MOUSE_BUTTONS = {
     0x0100: ("mouse5", True),
     0x0200: ("mouse5", False),
 }
+RI_MOUSE_WHEEL, RI_MOUSE_HWHEEL = 0x0400, 0x0800  # usButtonData then carries a signed delta
+WHEEL_DELTA = 120  # one detent; positive is away from the player (up) or to the right
+WHEEL_NAMES = {
+    (RI_MOUSE_WHEEL, 1): "wheelup",
+    (RI_MOUSE_WHEEL, -1): "wheeldown",
+    (RI_MOUSE_HWHEEL, 1): "wheelright",
+    (RI_MOUSE_HWHEEL, -1): "wheelleft",
+}
 # Only the keys a Nacht player uses; anything else is logged by its virtual-key number so a rebind can be
 # recovered later rather than silently dropped.
 VK_NAMES = {
@@ -71,7 +79,7 @@ def decode_raw_input(buffer: bytes, t: float) -> list[dict]:
     body = buffer[_HEADER.size :]
     events: list[dict] = []
     if kind == RIM_TYPEMOUSE and len(body) >= _MOUSE.size:
-        flags, button_flags, _data, _raw, dx, dy, _extra = _MOUSE.unpack_from(body, 0)
+        flags, button_flags, data, _raw, dx, dy, _extra = _MOUSE.unpack_from(body, 0)
         if dx or dy:
             # usFlags bit 0 set means the device reports absolute coordinates (a tablet or an RDP session).
             # Those are not counts and must not be treated as a turn.
@@ -79,6 +87,19 @@ def decode_raw_input(buffer: bytes, t: float) -> list[dict]:
         for bit, (code, down) in MOUSE_BUTTONS.items():
             if button_flags & bit:
                 events.append({"t": t, "type": "button", "code": code, "down": down})
+        # The wheel, as the same press/release pairs the Linux decoder emits: one per whole detent. A
+        # free-spinning or high-resolution wheel can report fractions of WHEEL_DELTA per packet; those are
+        # dropped rather than accumulated here (this function is stateless). Ordinary notched wheels send
+        # exactly 120, which is what a WaW player scrolling to swap weapons produces -- worth revisiting on
+        # the real machine only if a hi-res mouse turns up swaps the log misses.
+        for bit in (RI_MOUSE_WHEEL, RI_MOUSE_HWHEEL):
+            if button_flags & bit:
+                delta = data - 0x10000 if data & 0x8000 else data  # usButtonData is a USHORT holding a SHORT
+                notches = abs(delta) // WHEEL_DELTA
+                name = WHEEL_NAMES[bit, 1 if delta > 0 else -1]
+                for _ in range(notches):
+                    events.append({"t": t, "type": "button", "code": name, "down": True})
+                    events.append({"t": t, "type": "button", "code": name, "down": False})
     elif kind == RIM_TYPEKEYBOARD and len(body) >= _KEYBOARD.size:
         _make, flags, _reserved, vkey, _message, _extra = _KEYBOARD.unpack_from(body, 0)
         if vkey != 0xFF:  # 0xFF is the "fake key" half of a pause/print-screen sequence

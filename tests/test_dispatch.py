@@ -154,10 +154,13 @@ def test_the_kernel_encoding_round_trips_through_the_decoder(tmp_path):
     assert sum(e["dx"] for e in events if e["type"] == "mouse") == 60
 
 
-def test_every_default_binding_has_a_kernel_code():
-    from zombiesai.demos.inputs import DEFAULT_BINDINGS
+def test_every_code_the_dispatcher_emits_has_a_kernel_code():
+    """The wheel bindings are read off a human's mouse but never sent: the inverse map picks the key."""
+    from zombiesai.demos.inputs import DEFAULT_BINDINGS, WHEEL_CODES, inverse_bindings
 
-    for code in DEFAULT_BINDINGS:
+    emitted = set(inverse_bindings(DEFAULT_BINDINGS).values())
+    assert not emitted & set(WHEEL_CODES)
+    for code in emitted:
         assert code_for(code) > 0
     with pytest.raises(KeyError):
         code_for("no-such-key")

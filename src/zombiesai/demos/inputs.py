@@ -15,6 +15,11 @@ The log itself is newline-delimited JSON on one monotonic clock, shared with wha
     {"t": 1234.6, "type": "button", "code": "mouse1", "down": true}
     {"t": 1234.7, "type": "mouse",  "dx": 42, "dy": -3}
     {"t": 1240.0, "type": "marker", "name": "round_start"}
+
+The mouse wheel is logged as the pseudo-buttons `wheelup`/`wheeldown` (and `wheelleft`/`wheelright`), one
+press and release at the same instant per notch. That keeps it inside the existing schema: a wheel notch
+bound to "swap" is then counted by the fold exactly like a tap of the key bound to it, with no new event
+type for every reader of the log to learn.
 """
 
 import json
@@ -44,9 +49,20 @@ DEFAULT_BINDINGS = {
     "mouse3": "melee",
     "g": "grenade",
     "q": "swap",
+    # The stock config also cycles weapons on the wheel (MWHEELDOWN weapnext, MWHEELUP weapprev). Nacht
+    # gives you two guns, so either direction is simply "swap". Left out, every scrolled swap in a demo
+    # would go unlabelled and the policy would learn that the weapon changes by itself.
+    "wheeldown": "swap",
+    "wheelup": "swap",
 }
+# Codes the recorder logs but nothing can send: the virtual device has no wheel, and the action space has
+# one "swap" whichever way you scroll. See inverse_bindings.
+WHEEL_CODES = ("wheelup", "wheeldown", "wheelleft", "wheelright")
 # One button head, several buttons possible in one 67 ms window. Buying beats everything (it is rare, and
 # mislabelling it teaches the policy that the prompt means nothing); a swap loses to every other press.
+# Presses of one control collapse the same way: three wheel notches inside a window are one "swap" label,
+# because the head can say that a swap happened but not how many. At 15 Hz that only bites on a fast
+# scroll, and with two weapons an even number of swaps is a no-op the label cannot tell apart from one.
 BUTTON_PRIORITY = ("use", "grenade", "reload", "melee", "swap")
 HOLD_FRACTION = 0.5  # a control counts as held for a decision if it was down for at least half of it
 YAW_LIMIT_DEG = max(spec.YAW_BINS_DEG)
@@ -86,15 +102,27 @@ class Labels:
 
 
 def inverse_bindings(bindings: dict[str, str]) -> dict[str, str]:
-    """control -> the code that drives it, first binding wins.
+    """control -> the code that drives it: first key or mouse button wins, a wheel direction only if the
+    control has nothing else bound.
 
     The map is written code-first because that is how a log reads, but everything that *emits* input -- the
     synthetic log in `synthesize`, the agent's dispatcher in `realgame/dispatch.py` -- needs it the other way
-    round. Deriving it here keeps one source of truth for which key means "reload"."""
+    round. Deriving it here keeps one source of truth for which key means "reload".
+
+    Several codes can drive one control ("q", "wheeldown" and "wheelup" are all "swap"), so the choice has
+    to be deterministic and emittable: the virtual device has no wheel, so a wheel code is used only as a
+    last resort, and then the dispatcher fails loudly on it rather than sending nothing."""
     out: dict[str, str] = {}
+    for code, control in bindings.items():
+        if code not in WHEEL_CODES:
+            out.setdefault(control, code)
     for code, control in bindings.items():
         out.setdefault(control, code)
     return out
+
+
+def _event_kind(code: str) -> str:
+    return "button" if code.startswith("mouse") or code in WHEEL_CODES else "key"
 
 
 def read_log(path: str | Path) -> list[dict]:
@@ -148,10 +176,16 @@ class InputFolder:
             if kind not in ("key", "button"):
                 continue
             t = min(max(float(event["t"]), start), end)
-            control = self.config.bindings.get(str(event["code"]).lower())
+            code = str(event["code"]).lower()
+            control = self.config.bindings.get(code)
             if control is None:
                 continue
             i = CONTROL_INDEX[control]
+            if code in WHEEL_CODES:
+                # A notch has no duration: count its press and leave the held state alone, so scrolling
+                # while "q" is down cannot release the swap that "q" is holding (or vice versa).
+                presses[i] += bool(event["down"])
+                continue
             if event["down"]:
                 if self._down[i] is None:
                     self._down[i] = t
@@ -235,7 +269,7 @@ def synthesize(action, start: float, dt: float, config: InputConfig | None = Non
         # Released just inside the window rather than exactly on its edge: a release landing on a deadline
         # is ambiguous about which decision it belongs to, and a synthetic log should not lean on that.
         code = inverse[control]
-        kind = "button" if code.startswith("mouse") else "key"
+        kind = _event_kind(code)
         events.append({"t": start, "type": kind, "code": code, "down": True})
         events.append({"t": start + 0.98 * dt, "type": kind, "code": code, "down": False})
 
@@ -253,7 +287,7 @@ def synthesize(action, start: float, dt: float, config: InputConfig | None = Non
     button = spec.BUTTONS[values[spec.BUTTON]]
     if button != "none":
         code = inverse[button]
-        kind = "button" if code.startswith("mouse") else "key"
+        kind = _event_kind(code)
         events.append({"t": mid, "type": kind, "code": code, "down": True})
         events.append({"t": mid + dt / 8, "type": kind, "code": code, "down": False})
     dx = round(spec.YAW_BINS_DEG[values[spec.YAW]] * config.counts_per_degree)
