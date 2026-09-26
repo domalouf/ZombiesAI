@@ -85,21 +85,18 @@ def main() -> None:
     parser.add_argument("--quiet", action="store_true", help="no sound cues")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--out", type=Path, default=Path("runs/play"))
-    parser.add_argument("--wait-timeout", type=float, default=300.0)
     args = parser.parse_args()
 
     import json
-    import time
     from dataclasses import asdict
 
     import torch
 
     from zombiesai.demos.agent import BCAgent
-    from zombiesai.demos.capture import ScreenCapture
+    from zombiesai.demos.capture import FollowWindow, ScreenCapture
     from zombiesai.demos.clips import ClipWriter
     from zombiesai.demos.evdev_input import EvdevInput
     from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
-    from zombiesai.demos.x11_capture import WindowNotFound
     from zombiesai.realgame.dispatch import ActionDispatcher, DispatchConfig, FakeSink
     from zombiesai.realgame.play import HumanWatch, HyprlandFocus, play
 
@@ -116,16 +113,9 @@ def main() -> None:
     human = HumanWatch(EvdevInput(), config)  # excludes our own virtual device by name
 
     print(f"policy {args.checkpoint} on {device}; {'DRY RUN: no input will be sent' if args.dry_run else 'LIVE'}")
-    print("waiting for the game window...", flush=True)
-    deadline = time.monotonic() + args.wait_timeout
-    while True:
-        try:
-            capture = ScreenCapture(window=args.window, hud_regions=HUD_REGIONS, hud_scale=HUD_SCALE)
-            break
-        except WindowNotFound:
-            if time.monotonic() > deadline:
-                raise SystemExit(f"no window titled {args.window!r} after {args.wait_timeout:.0f}s")
-            time.sleep(1.0)
+    # Follows the window by title: WaW's intro window dies and the real one replaces it, and a player that held
+    # the first one crashed the moment it was handed the controls.
+    capture = FollowWindow(lambda: ScreenCapture(window=args.window, hud_regions=HUD_REGIONS, hud_scale=HUD_SCALE))
 
     if args.dry_run:
         sink = FakeSink()

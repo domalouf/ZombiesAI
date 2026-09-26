@@ -258,10 +258,17 @@ def play(
                 if reason is None and look is not None:
                     look = (float(counts[0]) / motor.cpd, float(counts[1]) / motor.cpd)
                     action = nearest_bins(action, look)
-            if writer is not None:
+            if writer is not None and getattr(capture, "has_frame", True):
                 sent = look if reason is None and look is not None else (0.0, 0.0)
-                writer.add(frame, action, flags=flags, hud=getattr(capture, "last_hud", None),
-                           yaw_deg=sent[0], pitch_deg=sent[1])
+                try:
+                    writer.add(frame, action, flags=flags, hud=getattr(capture, "last_hud", None),
+                               yaw_deg=sent[0], pitch_deg=sent[1])
+                except ValueError as error:
+                    # The game came back at another resolution, so its HUD crops no longer fit this clip.
+                    # Losing the rest of the recording is better than losing the controls mid-game.
+                    say(f"  recording stopped ({error}); still playing")
+                    writer.close(summary={**counts, "ended": "recording stopped: HUD shape changed"})
+                    writer = None
             if clock() > deadline + (config.overrun_factor - 1.0) * dt:
                 counts["overruns"] += 1
             if counts["acted"] * dt >= config.max_seconds:

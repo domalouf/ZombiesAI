@@ -264,3 +264,33 @@ def test_a_pause_does_not_carry_a_turn_across_it():
          config=PlayConfig(max_seconds=2.0), clock=clock, say=lambda _: None)
     sent = turn_per_tick(dispatcher.sink)
     assert sent[12] < sent[9]  # it eases back in after the gap instead of resuming at full speed
+
+
+def test_a_game_window_that_dies_under_the_player_is_a_pause_not_a_crash(tmp_path):
+    """Handed the controls while holding WaW's intro window, the first live player crashed on its first read."""
+    from zombiesai.demos.capture import CaptureLost, FollowWindow
+
+    class Window:
+        def __init__(self, lives):
+            self.lives, self.last_stale, self.stale_reason = lives, False, None
+            self.last_hud = {"points_ammo": np.zeros((2, 2, 3), np.uint8)}
+
+        def read(self):
+            if self.lives <= 0:
+                raise CaptureLost("window 0x220010e no longer exists")
+            self.lives -= 1
+            return np.full(spec.PIXELS_SHAPE, self.lives % 256, np.uint8)
+
+        def close(self):
+            pass
+
+    windows = iter([Window(0), Window(1000)])  # the intro window is already dead; the real one is fine
+    capture = FollowWindow(lambda: next(windows), reopen_every_s=0.0)
+    clock = Clock()
+    writer = ClipWriter(tmp_path / "run", source={"kind": "test"}, label_source="agent")
+    agent = Agent()
+    summary = play(capture, agent, TimedDispatcher(clock), focus=Focus(), human=HumanWatch(Hands(), PlayConfig()),
+                   config=PlayConfig(max_seconds=1.0), writer=writer, clock=clock, say=lambda _: None)
+    assert summary["frozen"] == 1 and agent.calls == 15
+    clip = load_clip(tmp_path / "run")
+    assert clip.n_steps == 15  # the placeholder step before any real frame is not written

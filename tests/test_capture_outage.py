@@ -301,3 +301,54 @@ def test_waiting_for_the_window_needs_a_picture_that_is_moving(capture, monkeypa
     answers = [source.is_capturable() for _ in range(5)]
     # First look has nothing to compare with; then frozen, frozen, and live once it starts changing.
     assert answers == [False, False, False, True, True]
+
+
+class FakeCapture:
+    """A capture on one window: `lives` good reads, then its window is gone."""
+
+    def __init__(self, value, lives):
+        self.value, self.lives, self.closed = value, lives, False
+        self.last_hud, self.last_stale, self.stale_reason = {"points_ammo": np.zeros((2, 2, 3), np.uint8)}, False, None
+
+    def read(self):
+        if self.lives <= 0:
+            raise CaptureLost("window 0x22000fa no longer exists")
+        self.lives -= 1
+        return np.full(spec.PIXELS_SHAPE, self.value, np.uint8)
+
+    def close(self):
+        self.closed = True
+
+
+def follow(windows):
+    """A FollowWindow whose opener hands out the given windows in turn (None: no window found yet)."""
+    from zombiesai.demos.capture import FollowWindow
+    from zombiesai.demos.x11_capture import WindowNotFound
+
+    windows = iter(windows)
+
+    def opener():
+        window = next(windows, None)
+        if window is None:
+            raise WindowNotFound("no window matching 'Call of Duty'")
+        return window
+
+    return FollowWindow(opener, reopen_every_s=0.0)
+
+
+def test_the_capture_follows_the_game_from_its_intro_window_to_the_real_one():
+    """The live player crashed here: the intro window died the moment F7 handed it the controls."""
+    intro, game = FakeCapture(10, lives=2), FakeCapture(20, lives=5)
+    source = follow([intro, game])
+    seen = [(int(source.read()[0, 0, 0]), source.last_stale) for _ in range(5)]
+    assert seen == [(10, False), (10, False), (10, True), (20, False), (20, False)]
+    assert intro.closed
+
+
+def test_before_any_window_exists_it_is_stale_and_has_nothing_to_write():
+    source = follow([None, None, FakeCapture(7, lives=3)])
+    source.read()
+    assert source.last_stale and not source.has_frame
+    source.read()
+    source.read()
+    assert not source.last_stale and source.has_frame and source.last_hud is not None

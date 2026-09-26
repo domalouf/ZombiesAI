@@ -219,6 +219,78 @@ class ScreenCapture:
             self._sct.close()
 
 
+class FollowWindow:
+    """A screen capture that follows the game's window by title instead of holding one window id.
+
+    WaW under Proton opens a window for its intro, destroys it and opens the real one, and a restart or a
+    video mode change does the same mid-session. A capture opened on the first window then fails for good
+    (a live player crashed on exactly that, the moment it was handed the controls). This one closes the dead
+    capture, looks the title up again on the next read, and in between answers with its last good frame
+    marked stale -- which a recorder flags bad and a player treats as a pause.
+
+    `has_frame` stays False until a real frame has been captured, so a caller writing a clip can skip the
+    placeholder steps before there is anything (or any HUD crop shape) to write.
+    """
+
+    def __init__(self, open_capture, *, reopen_every_s: float = 0.5, clock=time.monotonic):
+        self._open, self._capture = open_capture, None
+        self.reopen_every_s, self.clock = reopen_every_s, clock
+        self._next_try = 0.0
+        self._policy = np.zeros(spec_pixels_shape(), dtype=np.uint8)
+        self.last_hud = None
+        self.last_stale, self.stale_reason = True, "no game window yet"
+        self.has_frame = False
+
+    def _lost(self, reason: str) -> np.ndarray:
+        self.last_stale, self.stale_reason = True, reason
+        return self._policy
+
+    def read(self) -> np.ndarray:
+        from zombiesai.demos.x11_capture import WindowNotFound, X11Error
+
+        if self._capture is None:
+            now = self.clock()
+            if now < self._next_try:
+                return self._lost(self.stale_reason or "looking for the game window")
+            self._next_try = now + self.reopen_every_s
+            try:
+                self._capture = self._open()
+            except WindowNotFound:
+                return self._lost("no game window")
+        try:
+            frame = self._capture.read()
+        except (CaptureLost, X11Error) as error:
+            # The window this capture held is gone (or cannot be read at all): drop it and find the title again.
+            self.close()
+            return self._lost(f"the game window went away ({error}); looking for it again")
+        self._policy = frame
+        self.last_hud = self._capture.last_hud
+        self.last_stale = bool(getattr(self._capture, "last_stale", False))
+        self.stale_reason = getattr(self._capture, "stale_reason", None)
+        self.has_frame = self.has_frame or not self.last_stale
+        return frame
+
+    def is_capturable(self) -> bool:
+        return self._capture is not None and self._capture.is_capturable()
+
+    def describe(self) -> dict:
+        return {"kind": "follow-window", **(self._capture.describe() if self._capture is not None else {})}
+
+    def close(self) -> None:
+        if self._capture is not None:
+            try:
+                self._capture.close()
+            except Exception:
+                pass
+            self._capture = None
+
+
+def spec_pixels_shape() -> tuple[int, ...]:
+    from zombiesai import spec
+
+    return tuple(spec.PIXELS_SHAPE)
+
+
 class ClipPlayback:
     """Replays a recorded clip as if it were a live capture -- the plan's FakeCapture, for CI."""
 
