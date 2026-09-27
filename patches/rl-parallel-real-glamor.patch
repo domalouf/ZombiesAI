@@ -1,0 +1,119 @@
+diff -ru a/docs/rl.md b/docs/rl.md
+--- a/docs/rl.md	2026-09-27 10:30:10.550938663 -0600
++++ b/docs/rl.md	2026-09-27 10:30:38.931087119 -0600
+@@ -21,7 +21,7 @@
+ 
+ | | how | module |
+ |---|---|---|
+-| a display | a rootful Xwayland in `-shm` mode, `:60`, `:61`, ..., inside a headless Weston of exactly the game's size (or, without weston, on a hidden Hyprland special workspace) | `realgame/instances.py` |
++| a display | a rootful Xwayland with glamor, `:60`, `:61`, ..., inside a headless Weston (GL renderer) of exactly the game's size (or, without weston, in `-shm` mode on a hidden Hyprland special workspace) | `realgame/instances.py` |
+ | a game | Plutonium's T4 client in LAN mode (`umu-run plutonium-bootstrapper-win32.exe t4sp <game dir> -lan`), with a private copy of the Steam prefix and of Plutonium, settings as `+set` arguments | `realgame/instances.py` |
+ | no network | a network namespace with loopback only: the game cannot reach anything outside the machine | `realgame/instances.py` |
+ | input | XTEST into that X server only -- the same key names and counts as the uinput device | `realgame/xtest.py` |
+@@ -52,9 +52,14 @@
+ - **Steam's `CoDWaW.exe` cannot start outside the Steam client**: it is wrapped in SteamStub DRM and stops at
+   "Application load error P:0000065432". Plutonium starts the same game files through its own executable,
+   and in `-lan` mode never logs in, contacts its servers or runs its anti-cheat.
+-- **Xwayland's default GPU path crashed** (abort in `xwl_glamor_gbm_dispose_syncpts`, NVIDIA explicit sync)
+-  as soon as the game started, and drew ~2 fps while hidden. In `-shm` mode the game still renders on the
+-  GPU and hands frames over in shared memory: vkgears ~270 fps hidden, grabs ~30 ms at 1440p.
++- **Xwayland's default GPU path crashed under Hyprland** (abort in `xwl_glamor_gbm_dispose_syncpts`, NVIDIA
++  explicit sync) as soon as the game started, and drew ~2 fps while hidden, so the Hyprland host uses `-shm`.
++- **But `-shm` costs the game most of its frames, and tears every capture.** Without DRI3, NVIDIA's Vulkan
++  reads each frame back and sends it as PutImage: a 1440p frame arrives as four 4 MB strips over ~65 ms, so
++  the game ran at ~11 fps on ~1.2 cores, and a grab between strips got two frames in four bands. Under a
++  headless Weston with the GL renderer, glamor works (DRI3 through linux-dmabuf; no crash) and a frame is one
++  GPU copy: 60 fps, whole frames, the game ~0.6 of a core, a 1440p grab 1.4 ms. It needs `-noreset`: a reset
++  (last X client gone) re-creates Xwayland's window, which crashes Weston 15.0.1's kiosk shell.
+ - **Hyprland's special workspace does not survive the monitor sleeping.** When the last physical monitor
+   disconnects, Hyprland folds special workspaces into normal ones and tiles the windows -- and a rootful
+   Xwayland resizes its root, and the game, to the tile (941x1030 here). A headless Weston per instance, sized
+diff -ru a/src/zombiesai/realgame/instances.py b/src/zombiesai/realgame/instances.py
+--- a/src/zombiesai/realgame/instances.py	2026-09-27 10:29:39.412381896 -0600
++++ b/src/zombiesai/realgame/instances.py	2026-09-27 10:30:38.902876165 -0600
+@@ -5,11 +5,11 @@
+ desktop session is the unit and multiplying sessions needs a GPU per seat. On Linux the unit is the *X server*,
+ and X servers are cheap. So each instance here gets:
+ 
+-* **A rootful Xwayland** (`:60`, `:61`, ...) -- a complete X server of its own (in `-shm` mode: the game renders
+-  on the GPU, frames are handed over in shared memory), sized to the game's resolution, hosted by a headless
+-  Weston of exactly that size (`host="weston"`), which nothing on the desktop can resize or hide. Without
+-  weston it opens on a hidden Hyprland special workspace instead -- fine until the monitor sleeps (see
+-  `_start_under_hyprland`). MIT-SHM capture reads every frame.
++* **A rootful Xwayland** (`:60`, `:61`, ...) -- a complete X server of its own, sized to the game's resolution,
++  hosted by a headless Weston of exactly that size (`host="weston"`), which nothing on the desktop can resize or
++  hide. Under Weston it runs glamor, so the game's frames arrive as GPU buffers, whole, at 60 fps (see
++  XWAYLAND_FLAGS). Without weston it opens on a hidden Hyprland special workspace instead, in `-shm` mode --
++  fine until the monitor sleeps (see `_start_under_hyprland`). MIT-SHM capture reads every frame.
+ * **Its own game process**, launched with `umu-run` into a private copy of the Steam prefix (Wine keeps its
+   named objects, and so any single-instance guard, per prefix). The client is Plutonium's T4 in LAN mode by
+   default (`client="plutonium"`): Steam's `CoDWaW.exe` is wrapped in SteamStub DRM and, started outside the
+@@ -341,22 +341,35 @@
+                              ["togglespecialworkspace", SPECIAL_WORKSPACE], run=run)
+ 
+ 
+-# `-shm`: frames reach the X server as shared-memory copies, not GPU buffers. The game still renders on the GPU,
+-# but Xwayland's own GPU path (glamor with explicit sync) aborts in xwl_glamor_gbm_dispose_syncpts on this
+-# NVIDIA machine as soon as WaW starts -- and, hidden, only draws ~2 fps besides. Measured: vkgears in a hidden
+-# `-shm` server runs at ~270 fps on the RTX 5070.
+-XWAYLAND_FLAGS = "-shm"
++# How the game's frames reach the X server decides what the game and every capture of it cost.
++#
++# Under a headless Weston: glamor. Weston's GL renderer offers linux-dmabuf, so Xwayland has DRI3 and a frame is
++# one GPU copy into the root. Measured 2026-09-27 at 1440p in Nacht: 60 fps delivered, each frame one whole
++# damage rectangle; the game ~0.6 of a core, Xwayland + Weston ~4%; a full XShmGetImage 1.4 ms.
++# `-shm` instead has no DRI3, so NVIDIA's Vulkan reads every frame back and sends it as PutImage requests: a
++# 1440p frame is four 4 MB requests (409 rows each) arriving over ~65 ms. That caps the game at ~11 fps at
++# ~1.2 cores (it waits on its own presents) and Xwayland at ~15%, and a grab on a clock lands mid-frame: most
++# captured frames are torn into four bands of two different frames.
++#
++# Under Hyprland: `-shm`, because there Xwayland's glamor path (with Hyprland's explicit sync) aborts in
++# xwl_glamor_gbm_dispose_syncpts as soon as WaW starts, and hidden only draws ~2 fps besides.
++#
++# `-noreset` on both: without it Xwayland resets when its last X client disconnects (a launcher's short probe
++# connection does, before the game connects) and re-creates its window. Weston 15.0.1's kiosk shell answers a
++# re-created window with a use-after-free (kiosk_shell_output_set_active_surface_tree) and segfaults.
++XWAYLAND_FLAGS = {"weston": "-glamor gl -noreset", "hyprland": "-shm -noreset"}
+ 
+ 
+-def xwayland_command(spec: InstanceSpec) -> str:
+-    return f"Xwayland {spec.display} -geometry {spec.width}x{spec.height} {XWAYLAND_FLAGS}"
++def xwayland_command(spec: InstanceSpec, host: str = "weston") -> str:
++    return f"Xwayland {spec.display} -geometry {spec.width}x{spec.height} {XWAYLAND_FLAGS[host]}"
+ 
+ 
+ def weston_command(spec: InstanceSpec) -> list[str]:
+     """A headless compositor exactly the game's size. The kiosk shell makes the rootful Xwayland fullscreen,
+     i.e. exactly the output, so the X root -- which follows its Wayland window's size -- is the game's size and
+-    nothing can change it. Pixman is enough: the compositor never shows anything, the game renders on the GPU."""
+-    return ["weston", "--backend=headless", "--renderer=pixman", "--shell=kiosk", f"--width={spec.width}",
++    nothing can change it. The GL renderer, although nothing is ever shown: it is what offers linux-dmabuf, and
++    so DRI3 to Xwayland (XWAYLAND_FLAGS). Needs gl-renderer.so in the weston wrapper's WESTON_MODULE_MAP."""
++    return ["weston", "--backend=headless", "--renderer=gl", "--shell=kiosk", f"--width={spec.width}",
+             f"--height={spec.height}", f"--socket={spec.wayland_socket}", "--idle-time=0"]
+ 
+ 
+@@ -389,8 +402,8 @@
+     if spec.socket.exists():
+         raise RuntimeError(f"{spec.socket} exists but no Xwayland {spec.display} is running; another X server "
+                            f"owns display {spec.display} -- pick another --display-base")
+-    command = xwayland_command(spec)
+     host = config.resolved_host()
++    command = xwayland_command(spec, host)
+     if host == "weston":
+         _start_under_weston(spec, command, timeout_s=timeout_s, say=say)
+     else:
+diff -ru a/tests/test_instances.py b/tests/test_instances.py
+--- a/tests/test_instances.py	2026-09-27 10:30:10.546938592 -0600
++++ b/tests/test_instances.py	2026-09-27 10:30:38.903587169 -0600
+@@ -201,7 +201,9 @@
+     command = inst.weston_command(spec)
+     assert "--backend=headless" in command and "--shell=kiosk" in command
+     assert "--width=2560" in command and "--height=1440" in command and f"--socket={spec.wayland_socket}" in command
+-    assert inst.xwayland_command(spec).endswith("-shm")
++    assert "--renderer=gl" in command  # linux-dmabuf, so Xwayland gets DRI3 and glamor
++    assert inst.xwayland_command(spec, "weston").endswith("-glamor gl -noreset")
++    assert inst.xwayland_command(spec, "hyprland").endswith("-shm -noreset")
+     monkeypatch.setattr(inst.shutil, "which", lambda name: None)
+     assert config.resolved_host() == "hyprland"
+     monkeypatch.setattr(inst.shutil, "which", lambda name: "/usr/bin/weston")
