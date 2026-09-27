@@ -18,6 +18,10 @@ its src/ first on PYTHONPATH, printing to runs/<name>.log, in a session of its o
 go. Stopping sends SIGINT to the learner alone -- Ctrl-C's path, which stops the actors through their stop event
 (every key released) and writes the checkpoint; a stop that has not finished in 30 s can be forced.
 
+The machine itself -- CPU, memory, GPU, temperatures, disks, network and the busiest processes, as btop shows
+them -- is sampled every 2 s for as long as the server runs (viz/system.py), so the last half hour is on the page
+the moment it opens.
+
 It listens on 127.0.0.1 only, answers only requests addressed to it by name (no DNS rebinding), and takes
 commands only with an `X-Supervise` header, which no other page can send without a preflight it would refuse.
 """
@@ -42,6 +46,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from zombiesai.viz.dashboard import SERIES_COLORS, build_dashboard, collect_runs, dashboard_html
+from zombiesai.viz.system import SystemSampler
 
 HERE = Path(__file__).parent
 GAME_TITLES = ("Plutonium", "Call of Duty")
@@ -580,8 +585,10 @@ def descendants(pid: int, proc: Path = Path("/proc")) -> list[int]:
 class Supervisor:
     """What the page asks for: runs, trainers, games, and the viewer switch. Monitors run only while it asks."""
 
-    def __init__(self, repo: Path, state_dir: Path, *, idle_s: float = 20.0, stale_after: float = 600.0):
+    def __init__(self, repo: Path, state_dir: Path, *, idle_s: float = 20.0, stale_after: float = 600.0,
+                 system: SystemSampler | None = None):
         self.repo, self.state_dir, self.idle_s, self.stale_after = repo, state_dir, idle_s, stale_after
+        self.system = system
         self.state_dir.mkdir(parents=True, exist_ok=True)
         (self.state_dir / "thumbs-off").unlink(missing_ok=True)
         self.monitors: dict[str, subprocess.Popen] = {}
@@ -765,6 +772,12 @@ class Supervisor:
                            for r in payload["runs"]]
         return payload
 
+    # -- the machine in detail (viz/system.py): what btop shows, with its last half hour
+    def system_payload(self, since: float = 0.0) -> dict:
+        if self.system is None:
+            return {"specs": None, "now": None, "history": [], "history_s": 0}
+        return self.system.payload(since)
+
     # -- games
     def games(self) -> dict:
         self.last_seen = time.monotonic()
@@ -845,7 +858,8 @@ def page(supervisor: Supervisor) -> str:
         supervisor.runs(),
         head='<link rel="icon" href="data:,">\n',
         body_before=(HERE / "supervise_panel.html").read_text(),
-        script_after=(HERE / "supervise_live.html").read_text(),
+        script_after="".join((HERE / f).read_text() for f in
+                             ("supervise_live.html", "system_view.html", "supervise_system.html")),
     )
 
 
@@ -873,10 +887,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._allowed_host():
             return self._send(b"wrong host", "text/plain", HTTPStatus.FORBIDDEN)
-        path = self.path.split("?", 1)[0]
+        path, _, query = self.path.partition("?")
         s = self.supervisor
         if path == "/":
             return self._send(page(s).encode(), "text/html; charset=utf-8")
+        if path == "/api/system":  # ?since=<epoch>: only the history the page does not have yet
+            since = re.fullmatch(r"since=(\d+(?:\.\d+)?)", query)
+            return self._json(s.system_payload(float(since[1]) if since else 0.0))
         if path == "/api/ping":  # how a second launch knows one is already serving (scripts/supervise.py)
             return self._json({"app": "zombiesai-supervise"})
         if path == "/api/runs":
@@ -953,7 +970,8 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(repo: Path, port: int, state_dir: Path, *, idle_s: float = 20.0, ready=None) -> None:
-    supervisor = Supervisor(repo, state_dir, idle_s=idle_s)
+    system = SystemSampler().start()
+    supervisor = Supervisor(repo, state_dir, idle_s=idle_s, system=system)
     handler = type("BoundHandler", (Handler,), {"supervisor": supervisor, "port": port})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     if ready:
@@ -962,6 +980,7 @@ def serve(repo: Path, port: int, state_dir: Path, *, idle_s: float = 20.0, ready
         server.serve_forever()
     finally:
         supervisor.stop_monitors()
+        system.close()
 
 
 def main() -> None:

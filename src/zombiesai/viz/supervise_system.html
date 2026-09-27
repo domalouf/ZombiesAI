@@ -1,0 +1,23 @@
+<script>
+/* The machine in detail, every 2 s, from /api/system on this machine; the tiles above it are /api/machine's. */
+sysview.opts.tiles = false;  // the tiles above are the local page's own (/api/machine)
+async function pollSystem() {
+  let data;
+  try {
+    data = await api(`/api/system?since=${sysview.since}`);
+  } catch (e) { connection(false); return; }
+  if (!data.now) {
+    mount(document.getElementById("system"), [el("p", { class: "empty-note", text: "The machine has not been sampled yet." })]);
+    sysview.built = false;
+    return;
+  }
+  sysview.history.push(...data.history);
+  if (sysview.history.length) sysview.since = sysview.history[sysview.history.length - 1].t;
+  const oldest = data.now.t - data.history_s;
+  while (sysview.history.length && sysview.history[0].t < oldest) sysview.history.shift();
+  if (!sysview.built) buildSystem();
+  renderSystem(data);
+}
+
+every(2000, pollSystem);
+</script>

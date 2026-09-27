@@ -130,11 +130,47 @@
   .preview .command { white-space: pre-wrap; word-break: break-all; }
   .conn { font: 500 12px var(--mono); color: var(--chalk-faint); }
   .conn.lost { color: var(--critical); }
+
+  /* The machine (viz/system.py): btop's panels, in the room's own tokens. */
+  .specs { margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13.5px; color: var(--chalk-dim); }
+  .specs b { color: var(--chalk); font-weight: 700; }
+  .machine-tiles { margin-bottom: 14px; }
+  .machine-tiles .value { display: flex; align-items: baseline; gap: 8px; }
+  .machine-tiles .flag { font: 700 12px var(--mono); }
+  .flag.good { color: var(--good); }
+  .flag.warning { color: var(--warning); }
+  .flag.serious { color: var(--serious); }
+  .flag.critical { color: var(--critical); }
+  .chart .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--chalk-dim); }
+  .chart .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chart .legend i { display: block; width: 12px; height: 3px; border-radius: 2px; }
+  .chart .legend b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .machine-charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; }
+  .machine-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; margin-top: 14px; }
+  .machine-cards .card { display: grid; gap: 8px; align-content: start; }
+  .machine-cards .title { font: 700 15px/1.2 var(--ui); display: flex; gap: 10px; align-items: baseline; }
+  .machine-cards .title .aside { margin-left: auto; font: 500 12px var(--mono); color: var(--chalk-faint); }
+  .meter-row { display: grid; grid-template-columns: minmax(64px, auto) minmax(60px, 1fr) auto; gap: 10px; align-items: center; font-size: 13px; }
+  .meter-row .name { color: var(--chalk-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meter-row .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .meter-row .num small { color: var(--chalk-faint); font-size: 12px; margin-left: 6px; }
+  .meter { height: 8px; background: var(--floor); border-radius: 2px; overflow: hidden; }
+  .meter > i { display: block; height: 100%; border-radius: 0 2px 2px 0; background: var(--fill, #3987e5); }
+  .cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 6px 14px; }
+  .cores .meter-row { grid-template-columns: 22px minmax(30px, 1fr) auto; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; margin: 0; }
+  .kv dt { color: var(--chalk-dim); }
+  .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .machine-procs { margin-top: 14px; }
+  .machine-procs td.cmd { text-align: left; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; color: var(--chalk-dim); font: 500 12px var(--mono); }
+  .machine-procs th.cmd { text-align: left; }
 </style>
 
 <section aria-labelledby="machine-title">
   <h2 id="machine-title">The machine</h2>
+  <p class="specs" id="system-specs"></p>
   <div class="machine" id="machine"></div>
+  <div id="system" style="margin-top: 14px"><p class="empty-note">Reading the machine…</p></div>
 </section>
 
 <section aria-labelledby="games-title">
