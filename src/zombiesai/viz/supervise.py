@@ -367,6 +367,8 @@ class Handler(BaseHTTPRequestHandler):
         s = self.supervisor
         if path == "/":
             return self._send(page(s).encode(), "text/html; charset=utf-8")
+        if path == "/api/ping":  # how a second launch knows one is already serving (scripts/supervise.py)
+            return self._json({"app": "zombiesai-supervise"})
         if path == "/api/runs":
             return self._json(s.runs())
         if path == "/api/live":

@@ -119,5 +119,6 @@ def test_commands_need_the_header_and_the_right_host_and_a_sane_workspace(tmp_pa
         except urllib.error.HTTPError as e:
             assert e.code == 403  # DNS rebinding: a page on another name must not reach this
         assert json.load(urllib.request.urlopen(base + "/api/games"))["viewer"]["workspace"] == "9"
+        assert json.load(urllib.request.urlopen(base + "/api/ping")) == {"app": "zombiesai-supervise"}
     finally:
         server.shutdown()
