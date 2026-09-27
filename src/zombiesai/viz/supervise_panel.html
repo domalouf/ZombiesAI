@@ -60,6 +60,31 @@
     color: var(--chalk-dim);
     white-space: pre;
   }
+  .trainer .top .actions { margin-left: auto; display: flex; gap: 8px; }
+  .chip.danger { border-color: var(--critical); color: var(--chalk); }
+  .chip.danger:hover { background: var(--floor); }
+
+  .launcher { display: grid; gap: 12px; }
+  .launcher .title { font: 700 15px/1.2 var(--ui); }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; }
+  .fields .wide { grid-column: span 2; }
+  @media (max-width: 560px) { .fields .wide { grid-column: auto; } }
+  .field { display: grid; gap: 4px; }
+  .field span { font-size: 12.5px; color: var(--chalk-dim); }
+  .field select, .field input {
+    width: 100%;
+    font: 500 14px/1.2 var(--ui);
+    color: var(--chalk);
+    background: var(--ground);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 7px 9px;
+  }
+  .field input::placeholder { color: var(--chalk-faint); }
+  .launch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+  .launch-row .state { font-size: 13.5px; }
+  .launch-msg { font-size: 13.5px; color: var(--chalk-dim); }
+  .launch-msg.error { color: var(--serious); }
   .conn { font: 500 12px var(--mono); color: var(--chalk-faint); }
   .conn.lost { color: var(--critical); }
 </style>
@@ -73,6 +98,7 @@
 <section aria-labelledby="trainers-title">
   <h2 id="trainers-title">Training now</h2>
   <div class="trainers" id="trainers"></div>
+  <div class="card launcher" id="launcher" style="margin-top: 14px"></div>
 </section>
 
 <h2>Every run</h2>

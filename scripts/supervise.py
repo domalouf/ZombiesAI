@@ -7,8 +7,10 @@ the switch that shows or hides their viewer windows on a Hyprland workspace (viz
 Run it again while it serves and it only opens the page, so one key can do both (a Hyprland binding runs
 ~/.local/bin/zombiesai-dashboard, which runs this).
 
-It only reads: runs/ in the main checkout and every worktree, the trainers' processes and output, and the
-games' X servers. The one thing it changes is the viewer windows, when you press the switch.
+It reads runs/ in the main checkout and every worktree, the trainers' processes and output, and the games' X
+servers. It changes things only when you press a button: the viewer windows; a new run (scripts/train_rl.py in
+the checkout you pick, as a process of its own that outlives the dashboard); and stopping one (SIGINT, as
+Ctrl-C: its actors stop and it writes its checkpoint).
 """
 
 import argparse

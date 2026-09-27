@@ -15,6 +15,18 @@ async function api(path, body) {
   return response.json();
 }
 
+/* A command's answer, refused or not: the server says why in {error}. Only no answer at all is a lost server. */
+async function command(path, body) {
+  try {
+    const response = await fetch(path, { method: "POST", body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json", "X-Supervise": "1" } });
+    return await response.json();
+  } catch (e) {
+    connection(false);
+    return { error: "the dashboard server is not answering" };
+  }
+}
+
 function connection(ok) {
   live.lost = !ok;
   const node = document.getElementById("conn");
@@ -160,12 +172,28 @@ async function pollGames() {
 }
 
 /* -- trainers -------------------------------------------------------------- */
-function trainerCard() {
+function trainerCard(t) {
   const run = el("span", { class: "run" });
   const facts = el("span", { class: "facts" });
   const log = el("pre", { class: "log", tabindex: "0" });
-  const node = el("article", { class: "card trainer" }, [el("div", { class: "top" }, [run, facts]), log]);
-  return { node, run, facts, log };
+  const stop = el("button", { class: "chip", onclick: async () => {
+    const name = t.run || `pid ${t.pid}`;
+    if (!confirm(`Stop ${name}?\n\nLike Ctrl-C: it stops its actors (every key released) and writes its checkpoint.`)) return;
+    stop.disabled = true;
+    const answer = await command("/api/stop", { pid: t.pid });
+    if (answer.error) alert(answer.error);
+    await pollTrainers();
+  } });
+  const force = el("button", { class: "chip danger", hidden: "", onclick: async () => {
+    if (!confirm("Force stop?\n\nIt kills the trainer and its actors now: no checkpoint beyond the last periodic one, " +
+                 "and a key an actor held stays held until the next run.")) return;
+    const answer = await command("/api/stop", { pid: t.pid, force: true });
+    if (answer.error) alert(answer.error);
+    await pollTrainers();
+  } }, [document.createTextNode("Force stop")]);
+  const node = el("article", { class: "card trainer" }, [
+    el("div", { class: "top" }, [run, facts, el("div", { class: "actions" }, [stop, force])]), log]);
+  return { node, run, facts, log, stop, force };
 }
 
 async function pollTrainers() {
@@ -182,7 +210,7 @@ async function pollTrainers() {
   }
   const pids = trainers.map((t) => t.pid).join(",");
   if ([...live.trainers.keys()].join(",") !== pids) {
-    live.trainers = new Map(trainers.map((t) => [t.pid, trainerCard()]));
+    live.trainers = new Map(trainers.map((t) => [t.pid, trainerCard(t)]));
     mount(holder, [...live.trainers.values()].map((c) => c.node));
   }
   for (const t of trainers) {
@@ -192,6 +220,11 @@ async function pollTrainers() {
       document.createTextNode(`pid ${t.pid} · running ${fmtDuration(t.elapsed_s)} · ${t.tree} · `),
       el("code", { text: `${t.script} ${t.args}` }),
     ]);
+    const stopping = t.stopping_s != null;
+    c.stop.disabled = stopping;
+    c.stop.textContent = stopping ? `Stopping… ${fmtDuration(t.stopping_s)}` : "Stop";
+    c.stop.title = stopping ? "Asked to stop: it is releasing its actors and writing its checkpoint" : "Stop gracefully, as Ctrl-C would";
+    c.force.hidden = !t.can_force;
     const atBottom = c.log.scrollTop + c.log.clientHeight >= c.log.scrollHeight - 4;
     const text = t.tail.length ? t.tail.join("\n") : (t.log ? "(nothing printed yet)" : "(its output is not going to a file)");
     if (c.log.textContent !== text) {
@@ -199,6 +232,125 @@ async function pollTrainers() {
       if (atBottom) c.log.scrollTop = c.log.scrollHeight;  // follow the log, unless the reader scrolled up
     }
   }
+}
+
+/* -- starting a run ---------------------------------------------------------
+   Built once; polling only refreshes the choices and the readiness line, never what the reader has typed. */
+const launch = { options: null, built: null, busy: false };
+
+const launchTree = () => launch.options.trees.find((t) => t.label === launch.built.tree.value);
+
+function readiness() {
+  const t = launchTree();
+  const f = launch.built;
+  if (!t) return ["serious", "!!", "No checkout here can start a run.", false];
+  const actors = parseInt(f.actors.value, 10);
+  if (!(actors >= 1 && actors <= 16)) return ["warning", "!", "Between 1 and 16 games.", false];
+  if (!f.name.value.trim()) return ["warning", "!", "The run needs a name.", false];
+  if (/(^|\s)--env[ =]sim(\s|$)/.test(f.extra.value)) return ["good", "OK", "A NachtSim run: no games needed.", true];
+  if (!t.fleet) return ["serious", "!!", `${t.label} has no fleet yet: scripts/instances.py up --n ${actors}`, false];
+  if (t.busy.length) return ["warning", "!", `${t.busy[0]} is already playing this fleet. Stop it first.`, false];
+  if (t.fleet.running < actors) {
+    return ["serious", "!!", `${t.fleet.running} of the fleet's ${t.fleet.n} games are running and this run needs ${actors}: ` +
+      `scripts/instances.py up --n ${Math.max(actors, t.fleet.n)}`, false];
+  }
+  return ["good", "OK", `${t.fleet.running} of ${t.fleet.n} games running. Ready.`, true];
+}
+
+function updateReadiness() {
+  const f = launch.built;
+  const [level, icon, text, ok] = readiness();
+  f.state.className = `state ${level}`;
+  mount(f.state, [el("span", { class: "icon", text: icon }), document.createTextNode(text)]);
+  f.start.disabled = !ok || launch.busy;
+}
+
+function buildLauncher() {
+  const f = {};
+  const field = (label, input, wide) =>
+    el("label", { class: "field" + (wide ? " wide" : "") }, [el("span", { text: label }), input]);
+  f.tree = el("select", { onchange: () => { f.name.dataset.touched = ""; fillLauncher(true); } });
+  f.init = el("select");
+  f.actors = el("input", { type: "number", min: "1", max: "16", oninput: updateReadiness });
+  f.name = el("input", { type: "text", spellcheck: "false", oninput: () => { f.name.dataset.touched = "1"; updateReadiness(); } });
+  f.extra = el("input", { type: "text", spellcheck: "false", placeholder: "e.g. --total-steps 500000 --lr 3e-5",
+                          oninput: updateReadiness });
+  f.state = el("span", { class: "state" });
+  f.start = el("button", { class: "chip primary", onclick: startRun },
+               [el("span", { class: "key" }), document.createTextNode("Start run")]);
+  f.msg = el("div", { class: "launch-msg", role: "status" });
+  f.tail = el("pre", { class: "log", hidden: "" });
+  mount(document.getElementById("launcher"), [
+    el("div", { class: "title", text: "Start a run" }),
+    el("div", { class: "fields" }, [
+      field("Checkout", f.tree), field("Start from", f.init, true), field("Games", f.actors), field("Name", f.name),
+      field("More options (optional)", f.extra, true),
+    ]),
+    el("div", { class: "launch-row" }, [f.start, f.state]),
+    f.msg, f.tail,
+  ]);
+  launch.built = f;
+}
+
+function fillLauncher(treeChanged = false) {
+  const f = launch.built;
+  const o = launch.options;
+  const want = f.tree.value || o.default;
+  if ([...f.tree.options].map((x) => x.value).join() !== o.trees.map((t) => t.label).join()) {
+    mount(f.tree, o.trees.map((t) => el("option", { value: t.label, text: t.label })));
+  }
+  f.tree.value = o.trees.some((t) => t.label === want) ? want : o.default;
+  const t = launchTree();
+  if (t) {
+    const keep = treeChanged ? null : f.init.value;
+    const key = t.checkpoints.map((c) => c.path).join();
+    if (f.init.dataset.key !== key) {
+      mount(f.init, t.checkpoints.map((c) => el("option", { value: c.path,
+        text: `${c.run} · ${c.kind === "RL" ? "RL checkpoint" : "BC policy"} · ${fmtAgo(Date.now() / 1000 - c.updated)}` })));
+      f.init.dataset.key = key;
+    }
+    if (keep && t.checkpoints.some((c) => c.path === keep)) f.init.value = keep;
+    if (!f.actors.value || treeChanged) f.actors.value = String(t.fleet ? t.fleet.n : 4);
+    if (!f.name.dataset.touched) f.name.value = t.next;
+  }
+  updateReadiness();
+}
+
+async function startRun() {
+  const f = launch.built;
+  launch.busy = true;
+  updateReadiness();
+  f.msg.className = "launch-msg";
+  f.msg.textContent = "Starting…";
+  f.tail.hidden = true;
+  const answer = await command("/api/start", { tree: f.tree.value, init: f.init.value, name: f.name.value.trim(),
+    actors: parseInt(f.actors.value, 10), extra: f.extra.value });
+  launch.busy = false;
+  if (answer.ok) {
+    f.msg.textContent = `Started ${answer.run} (pid ${answer.pid}). Its output goes to ${answer.log}.`;
+    f.name.dataset.touched = "";
+  } else {
+    f.msg.className = "launch-msg error";
+    f.msg.textContent = answer.error || "It did not start.";
+    if (answer.tail && answer.tail.length) { f.tail.textContent = answer.tail.join("\n"); f.tail.hidden = false; }
+  }
+  await Promise.all([pollTrainers(), pollLaunch()]);
+}
+
+async function pollLaunch() {
+  let options;
+  try {
+    options = await api("/api/launch");
+  } catch (e) { connection(false); return; }
+  launch.options = options;
+  if (!options.trees.length) {
+    launch.built = null;
+    mount(document.getElementById("launcher"), [el("div", { class: "title", text: "Start a run" }),
+      el("p", { class: "empty-note", text: "No checkout has scripts/train_rl.py and a checkpoint to start from." })]);
+    return;
+  }
+  if (!launch.built) buildLauncher();
+  fillLauncher();
 }
 
 /* -- runs ------------------------------------------------------------------ */
@@ -233,5 +385,6 @@ const every = (ms, fn) => {
 };
 every(2000, pollGames);
 every(5000, pollTrainers);
+every(5000, pollLaunch);
 every(20000, pollRuns);
 </script>

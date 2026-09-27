@@ -1,5 +1,6 @@
 """The Training Room, live, on localhost: every run's curves, what the running trainers are printing, and the game
-instances -- with the switch for their viewer windows (realgame/viewer.py).
+instances -- with the switch for their viewer windows (realgame/viewer.py), and buttons to start a run and to
+stop one gracefully.
 
     uv run python scripts/supervise.py            # http://127.0.0.1:8765
 
@@ -12,6 +13,11 @@ keeps a small thumbnail of the latest whole frame. They start with the first loo
 `idle_s` after the last, so a closed dashboard costs nothing. A monitor is a process of its own because Xlib
 ends whatever process loses its X server, and an instance going down must not take the dashboard with it.
 
+A run is started as the fleet's runs have been (`start_run`): scripts/train_rl.py in the chosen checkout, with
+its src/ first on PYTHONPATH, printing to runs/<name>.log, in a session of its own so the dashboard can come and
+go. Stopping sends SIGINT to the learner alone -- Ctrl-C's path, which stops the actors through their stop event
+(every key released) and writes the checkpoint; a stop that has not finished in 30 s can be forced.
+
 It listens on 127.0.0.1 only, answers only requests addressed to it by name (no DNS rebinding), and takes
 commands only with an `X-Supervise` header, which no other page can send without a preflight it would refuse.
 """
@@ -20,6 +26,8 @@ import argparse
 import json
 import os
 import re
+import shlex
+import signal
 import struct
 import subprocess
 import sys
@@ -41,16 +49,16 @@ _XWAYLAND = re.compile(r"^(\d+) Xwayland (:\d+)\b(.*)$")
 # ------------------------------------------------------------------------------------------------ runs
 
 
+def trees(repo: Path, *, run=subprocess.run) -> list[tuple[str, Path]]:
+    """(label, path) for the main checkout ("main") and every worktree (its directory's name)."""
+    result = run(["git", "-C", str(repo), "worktree", "list", "--porcelain"], capture_output=True, text=True)
+    paths = [Path(line[len("worktree "):]) for line in result.stdout.splitlines() if line.startswith("worktree ")]
+    return [("main" if i == 0 else path.name, path) for i, path in enumerate(paths or [repo])]
+
+
 def run_roots(repo: Path, *, run=subprocess.run) -> list[tuple[str, Path]]:
     """(label, runs dir) for the main checkout and every worktree that has a runs/ directory."""
-    result = run(["git", "-C", str(repo), "worktree", "list", "--porcelain"], capture_output=True, text=True)
-    trees = [Path(line[len("worktree "):]) for line in result.stdout.splitlines() if line.startswith("worktree ")]
-    trees = trees or [repo]
-    roots = []
-    for i, tree in enumerate(trees):
-        if (tree / "runs").is_dir():
-            roots.append(("main" if i == 0 else tree.name, tree / "runs"))
-    return roots
+    return [(label, tree / "runs") for label, tree in trees(repo, run=run) if (tree / "runs").is_dir()]
 
 
 def build_payload(roots: list[tuple[str, Path]], *, stale_after: float = 600.0, now: float | None = None) -> dict:
@@ -120,11 +128,14 @@ def live_trainers(run_paths: dict[str, str], proc: Path = Path("/proc")) -> list
             run_dir = str((cwd / argv[argv.index("--out") + 1]).resolve())
         log = Path(out) if out.startswith("/") and Path(out).is_file() else None
         started = _proc_start_epoch(int(entry.name))
+        env_flag = argv[argv.index("--env") + 1] if "--env" in argv[:-1] else None
         found.append({
             "pid": int(entry.name),
             "script": Path(script).name,
             "args": " ".join(argv[argv.index(script) + 1:]),
             "tree": cwd.name,
+            "cwd": str(cwd),
+            "sim": env_flag == "sim",  # a sim run plays no game, so it does not hold the fleet
             "run": run_paths.get(run_dir) if run_dir else None,
             "elapsed_s": None if started is None else round(time.time() - started, 1),
             "log": str(log) if log else None,
@@ -226,6 +237,135 @@ def monitor(display: str, out_dir: Path, *, thumb_every_s: float = 2.0) -> None:
             next_status = now + 1.0
 
 
+# ------------------------------------------------------------------------------------------------ starting runs
+
+TRAINER = Path("scripts") / "train_rl.py"
+RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
+FORCE_AFTER_S = 30.0  # a graceful stop gets this long before the page offers to force one
+
+
+def python_for(tree: Path, main: Path) -> Path:
+    """The interpreter a run in `tree` uses: the tree's own .venv, else the main checkout's. Either way the tree's
+    src/ goes first on PYTHONPATH (see start_run), which is how the fleet's runs have been started: a worktree
+    without a venv of its own borrows main's packages, not main's code."""
+    for base in (tree, main):
+        if (base / ".venv" / "bin" / "python").exists():
+            return base / ".venv" / "bin" / "python"
+    return Path(sys.executable)
+
+
+def checkpoints(tree: Path) -> list[dict]:
+    """What a run can start from: RL checkpoints (to continue) and BC policies (to fine-tune), newest first."""
+    found = []
+    for filename, kind in (("checkpoint.pt", "RL"), ("bc.pt", "BC")):
+        for f in (tree / "runs").glob(f"*/{filename}"):
+            found.append({"path": str(f.relative_to(tree)), "run": f.parent.name, "kind": kind,
+                          "updated": f.stat().st_mtime})
+    return sorted(found, key=lambda c: c["updated"], reverse=True)
+
+
+def next_run_name(tree: Path) -> str:
+    numbers = [int(m[1]) for d in (tree / "runs").glob("rl*") if (m := re.fullmatch(r"rl(\d+)", d.name))]
+    return f"rl{max(numbers, default=0) + 1}"
+
+
+def fleet_of(tree: Path, *, screens=None) -> dict | None:
+    """The tree's fleet (runs/instances/fleet.json) and how many of its games are up right now."""
+    try:
+        fleet = json.loads((tree / "runs" / "instances" / "fleet.json").read_text())
+    except (OSError, ValueError):
+        return None
+    if screens is None:
+        from zombiesai.realgame.viewer import running_screens
+
+        screens = running_screens()
+    base, n = int(fleet.get("display_base", 60)), int(fleet.get("n", 0))
+    return {"n": n, "display_base": base, "running": sum(1 for s in screens if base <= s.number < base + n)}
+
+
+def launch_options(repo: Path, trainers: list[dict]) -> dict:
+    options = []
+    for label, tree in trees(repo):
+        if not (tree / TRAINER).exists() or not checkpoints(tree):  # nothing to start from: not a place to run
+            continue
+        busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
+        options.append({"label": label, "checkpoints": checkpoints(tree)[:40], "next": next_run_name(tree),
+                        "fleet": fleet_of(tree), "busy": busy})
+    newest = max(options, key=lambda o: o["checkpoints"][0]["updated"] if o["checkpoints"] else 0, default=None)
+    return {"trees": options, "default": newest["label"] if newest else None}
+
+
+def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, extra: str,
+              trainers: list[dict]) -> dict:
+    """Start `scripts/train_rl.py` in a tree, as a session of its own (the dashboard can stop and start again
+    without taking the run with it), writing runs/<name>/ and printing to runs/<name>.log. Refuses what would
+    fail or collide: a fleet with too few games up, a fleet another trainer is already playing, a name in use."""
+    tree = dict(trees(repo)).get(tree_label)
+    if tree is None or not (tree / TRAINER).exists():
+        return {"error": f"no {TRAINER} in {tree_label!r}"}
+    if not RUN_NAME.fullmatch(name):
+        return {"error": "a run name is letters, digits, '-', '_' and '.', starting with a letter or digit"}
+    if (tree / "runs" / name).exists():
+        return {"error": f"runs/{name} already exists in {tree_label}"}
+    if init not in {c["path"] for c in checkpoints(tree)}:
+        return {"error": f"{init} is not a checkpoint in {tree_label}/runs"}
+    if not 1 <= actors <= 16:
+        return {"error": "between 1 and 16 games"}
+    try:
+        extra_args = shlex.split(extra)
+    except ValueError as error:
+        return {"error": f"more options: {error}"}
+    if any(a in ("--out", "--actors") or a.startswith(("--out=", "--actors=")) for a in extra_args):
+        return {"error": "set the name and the number of games in their own fields"}
+    sim = "--env" in extra_args[:-1] and extra_args[extra_args.index("--env") + 1] == "sim"
+    if not sim:
+        fleet = fleet_of(tree)
+        if fleet is None:
+            return {"error": f"{tree_label} has no fleet (runs/instances/fleet.json): scripts/instances.py up"}
+        if fleet["running"] < actors:
+            return {"error": f"{fleet['running']} of the fleet's games are running and the run needs {actors}: "
+                             f"start them with scripts/instances.py up --n {max(actors, fleet['n'])}"}
+        busy = [t for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
+        if busy:
+            return {"error": f"{busy[0]['run'] or 'a run'} (pid {busy[0]['pid']}) is already playing this fleet"}
+
+    python = python_for(tree, dict(trees(repo))["main"])
+    argv = [str(python), "-u", str(TRAINER), init, "--actors", str(actors), "--out", f"runs/{name}", *extra_args]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tree / "src"), env.get("PYTHONPATH")]))
+    log = tree / "runs" / f"{name}.log"
+    with open(log, "ab") as out:
+        out.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} started from the dashboard: "
+                  f"{shlex.join(argv[1:])}\n".encode())
+        out.flush()
+        proc = subprocess.Popen(argv, cwd=tree, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    deadline = time.monotonic() + 3.0  # an argument it rejects, a missing fleet: those fail in the first seconds
+    while time.monotonic() < deadline and proc.poll() is None:
+        time.sleep(0.1)
+    if proc.poll() is not None:
+        return {"error": f"it exited straight away (code {proc.returncode})", "tail": _tail(log, 12), "proc": proc}
+    return {"ok": True, "pid": proc.pid, "run": name, "log": str(log), "proc": proc}
+
+
+def descendants(pid: int, proc: Path = Path("/proc")) -> list[int]:
+    """Every process below `pid`: a trainer's actors, and theirs."""
+    children: dict[int, list[int]] = {}
+    for entry in proc.iterdir():
+        if entry.name.isdigit():
+            try:
+                ppid = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry.name))
+    found, stack = [], [pid]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            found.append(child)
+            stack.append(child)
+    return found
+
+
 class Supervisor:
     """What the page asks for: runs, trainers, games, and the viewer switch. Monitors run only while it asks."""
 
@@ -238,6 +378,8 @@ class Supervisor:
         self.last_seen = 0.0
         self._lock = threading.Lock()
         self._payload, self._payload_at = None, 0.0
+        self.stopping: dict[int, float] = {}  # trainer pid -> when a graceful stop was asked for
+        self.started: list[subprocess.Popen] = []  # runs started here, reaped when they end
         threading.Thread(target=self._janitor, daemon=True).start()
 
     # -- runs
@@ -249,7 +391,46 @@ class Supervisor:
             return self._payload
 
     def live(self) -> dict:
-        return {"trainers": live_trainers(self.payload()["run_paths"])}
+        trainers = live_trainers(self.payload()["run_paths"])
+        alive = {t["pid"] for t in trainers}
+        self.stopping = {pid: at for pid, at in self.stopping.items() if pid in alive}
+        for t in trainers:
+            at = self.stopping.get(t["pid"])
+            t["stopping_s"] = None if at is None else round(time.time() - at, 1)
+            t["can_force"] = at is not None and time.time() - at >= FORCE_AFTER_S
+        return {"trainers": trainers}
+
+    # -- starting and stopping runs
+    def launch(self) -> dict:
+        self._payload = None  # a run that just ended or started changes the names and checkpoints
+        return launch_options(self.repo, self.live()["trainers"])
+
+    def start(self, tree: str, init: str, actors: int, name: str, extra: str) -> dict:
+        result = start_run(self.repo, tree, init, actors, name, extra, self.live()["trainers"])
+        if "proc" in result:
+            self.started.append(result.pop("proc"))
+        self._payload = None
+        return result
+
+    def stop(self, pid: int, force: bool = False) -> dict:
+        """Ask a trainer to stop as Ctrl-C would -- SIGINT to the learner alone, which stops its actors (every key
+        released) and writes its checkpoint. `force`, once that has had FORCE_AFTER_S, kills it and everything
+        below it: no checkpoint beyond the last periodic one."""
+        trainer = next((t for t in self.live()["trainers"] if t["pid"] == pid), None)
+        if trainer is None:
+            return {"error": f"no trainer with pid {pid}"}
+        if not force:
+            os.kill(pid, signal.SIGINT)
+            self.stopping.setdefault(pid, time.time())
+            return {"ok": True}
+        if not trainer["can_force"]:
+            return {"error": f"ask it to stop first; forcing is offered {FORCE_AFTER_S:.0f} s after"}
+        for victim in [*descendants(pid), pid]:
+            try:
+                os.kill(victim, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        return {"ok": True}
 
     def runs(self) -> dict:
         """The payload, with "running" meaning a trainer process is writing the run right now -- not only that
@@ -303,6 +484,7 @@ class Supervisor:
             time.sleep(5.0)
             if self.monitors and time.monotonic() - self.last_seen > self.idle_s:
                 self.stop_monitors()
+            self.started = [p for p in self.started if p.poll() is None]  # reap runs that ended
 
     def set_thumbs(self, on: bool) -> None:
         flag = self.state_dir / "thumbs-off"
@@ -375,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(s.live())
         if path == "/api/games":
             return self._json(s.games())
+        if path == "/api/launch":
+            return self._json(s.launch())
         if m := re.fullmatch(r"/thumb/(\d+)\.png", path):
             try:
                 return self._send((s.state_dir / f"{m[1]}.png").read_bytes(), "image/png")
@@ -402,6 +586,21 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/thumbs":
             s.set_thumbs(bool(body.get("on", True)))
             return self._json({"ok": True})
+        if self.path == "/api/start":
+            try:
+                actors = int(body.get("actors", 0))
+            except (TypeError, ValueError):
+                return self._json({"error": "games must be a number"}, HTTPStatus.BAD_REQUEST)
+            result = s.start(str(body.get("tree", "")), str(body.get("init", "")), actors,
+                             str(body.get("name", "")).strip(), str(body.get("extra", "")))
+            return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
+        if self.path == "/api/stop":
+            try:
+                pid = int(body.get("pid"))
+            except (TypeError, ValueError):
+                return self._json({"error": "pid must be a number"}, HTTPStatus.BAD_REQUEST)
+            result = s.stop(pid, force=bool(body.get("force")))
+            return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
