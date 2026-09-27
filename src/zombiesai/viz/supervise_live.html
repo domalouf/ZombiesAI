@@ -171,6 +171,136 @@ async function pollGames() {
   renderGames();
 }
 
+/* -- the machine --------------------------------------------------------------
+   One tile per reading, built once. A reading past its limit (per this PC's parts: viz/supervise.LIMITS) marks
+   its tile with an icon and a word, never colour alone. */
+const deg = (v) => v == null ? "--" : `${Math.round(v)} °C`;
+const pct = (v) => v == null ? "--" : `${Math.round(v)}%`;
+const TEMP_WORDS = { warning: "warm", serious: "hot", critical: "too hot" };
+const LOAD_WORDS = { warning: "high", serious: "very high", critical: "full" };
+const MACHINE_TILES = [
+  ["cpu_temp", "CPU temperature", (m) => deg(m.now.cpu_temp),
+   (m) => `die ${deg(m.cpu_die)} · peak ${deg(m.peak.cpu_temp)} · built to run up to 95 °C`, TEMP_WORDS],
+  ["cpu_busy", "CPU busy", (m) => pct(m.now.cpu_busy), (m) => `of ${m.threads} threads · peak ${pct(m.peak.cpu_busy)}`, LOAD_WORDS],
+  ["gpu_temp", "GPU temperature", (m) => deg(m.now.gpu_temp),
+   (m) => `fan ${pct(m.gpu && m.gpu.fan)} · peak ${deg(m.peak.gpu_temp)}`, TEMP_WORDS],
+  ["gpu_busy", "GPU busy", (m) => pct(m.now.gpu_busy),
+   (m) => m.gpu ? `${Math.round(m.gpu.power)} of ${Math.round(m.gpu.power_limit)} W · peak ${pct(m.peak.gpu_busy)}` : "no NVIDIA GPU", null],
+  ["vram", "Video memory", (m) => m.gpu ? `${(m.gpu.vram_used / 1024).toFixed(1)} GB` : "--",
+   (m) => m.gpu ? `of ${(m.gpu.vram_total / 1024).toFixed(1)} GB · peak ${pct(m.peak.vram)}` : "", LOAD_WORDS],
+  ["ram", "Memory", (m) => `${m.ram.used.toFixed(1)} GB`,
+   (m) => `of ${m.ram.total.toFixed(0)} GB · the RAM itself ${deg(m.now.ram_temp)}`, LOAD_WORDS],
+  ["ssd_temp", "SSD temperature", (m) => deg(m.now.ssd_temp), (m) => `peak ${deg(m.peak.ssd_temp)}`, TEMP_WORDS],
+];
+const machineTiles = new Map();
+
+function renderMachine(m) {
+  const holder = document.getElementById("machine");
+  if (!machineTiles.size) {
+    for (const [key, label] of MACHINE_TILES) {
+      const t = { value: el("span", { class: "value" }), sub: el("span", { class: "sub" }), state: el("span", { class: "state" }) };
+      t.node = el("div", { class: "mtile" }, [el("span", { class: "label", text: label }), t.value, t.sub, t.state]);
+      machineTiles.set(key, t);
+    }
+    mount(holder, [...machineTiles.values()].map((t) => t.node));
+  }
+  for (const [key, , value, sub, words] of MACHINE_TILES) {
+    const t = machineTiles.get(key);
+    t.value.textContent = value(m);
+    t.sub.textContent = sub(m);
+    let lvl = m.levels[key] || "good";
+    let word = words && lvl !== "good" ? words[lvl] : "";
+    if (key === "gpu_busy" && m.gpu && m.gpu.throttling) { lvl = "warning"; word = "slowing itself down"; }
+    t.node.className = "mtile" + (lvl !== "good" && lvl !== "info" ? ` ${lvl}` : "");
+    t.state.className = `state ${lvl}`;
+    mount(t.state, word ? [el("span", { class: "icon", text: STATUS_ICON[lvl] }), document.createTextNode(word)] : []);
+  }
+}
+
+async function pollMachine() {
+  try {
+    renderMachine(await api("/api/machine"));
+  } catch (e) { connection(false); }
+}
+
+/* -- the fleet: start and stop the games ------------------------------------ */
+const fleetBars = new Map();
+
+function fleetBar(f) {
+  const b = {};
+  b.count = el("span", { class: "count" });
+  b.op = el("span", { class: "op" });
+  b.stop = el("button", { class: "chip", onclick: async () => {
+    const running = b.last.running;
+    if (!confirm(`Stop all ${running} games of ${f.label}?\n\nIt runs scripts/instances.py down: the games, their X ` +
+                 "servers and their sound sinks. Start them again here, or with scripts/instances.py up.")) return;
+    const answer = await command("/api/fleet", { fleet: f.label, action: "down" });
+    if (answer.error) alert(answer.error);
+    await pollFleet();
+  } }, [document.createTextNode("Stop games")]);
+  b.n = el("input", { type: "number", min: "1", max: "16", value: String(f.n), "aria-label": "How many games",
+                      oninput: () => { b.n.dataset.touched = "1"; updateFleetBar(f.label); } });
+  b.start = el("button", { class: "chip primary", onclick: async () => {
+    const answer = await command("/api/fleet", { fleet: f.label, action: "up", n: parseInt(b.n.value, 10) });
+    if (answer.error) alert(answer.error);
+    await pollFleet();
+  } }, [el("span", { class: "key" }), document.createTextNode("Start games")]);
+  b.note = el("span", { class: "state" });
+  b.node = el("div", { class: "fleet-bar" }, [
+    el("span", { class: "caption", text: `Fleet · ${f.label}` }), b.count, b.stop,
+    el("span", { class: "caption", text: "games:" }), b.n, b.start, b.note, b.op,
+  ]);
+  return b;
+}
+
+function updateFleetBar(label) {
+  const b = fleetBars.get(label);
+  const f = b.last;
+  const n = parseInt(b.n.value, 10);
+  const working = f.op && f.op.running;
+  b.count.textContent = `${f.running} of ${f.n} games up`;
+  b.stop.disabled = working || f.running === 0 || f.busy.length > 0;
+  b.stop.title = f.busy.length ? `${f.busy[0]} is playing these games: stop it first` : "Stop every game of this fleet";
+  b.start.disabled = working || !(n >= 1 && n <= 16) || n <= f.running;
+  b.start.lastChild.textContent = f.running > 0 && n > f.running ? `Start ${n - f.running} more` : "Start games";
+  b.start.title = n <= f.running ? `${f.running} are already up` : `Bring the fleet up to ${n} games`;
+  const over = n > fleetRecommended;
+  b.note.className = "state warning";
+  mount(b.note, over ? [el("span", { class: "icon", text: "!" }),
+    document.createTextNode(`past ${fleetRecommended}, agents started missing their deadlines on this PC`)] : []);
+  if (f.op) {
+    const last = (f.op.tail || []).filter((l) => l.trim()).slice(-1)[0] || "";
+    const doing = f.op.action === "up" ? "Starting games" : "Stopping games";
+    b.op.textContent = f.op.running ? `${doing}… ${fmtDuration(f.op.since_s)} · ${last}`
+      : f.op.code === 0 ? (f.op.action === "up" ? "Games started." : "Games stopped.")
+      : `${doing} failed (code ${f.op.code}): ${last}`;
+  } else {
+    b.op.textContent = "";
+  }
+}
+
+let fleetRecommended = 6;
+async function pollFleet() {
+  let data;
+  try {
+    data = await api("/api/fleet");
+  } catch (e) { connection(false); return; }
+  fleetRecommended = data.recommended;
+  const holder = document.getElementById("fleet-bars");
+  const labels = data.fleets.map((f) => f.label).join();
+  if ([...fleetBars.keys()].join() !== labels) {
+    fleetBars.clear();
+    for (const f of data.fleets) fleetBars.set(f.label, fleetBar(f));
+    mount(holder, [...fleetBars.values()].map((b) => b.node));
+  }
+  for (const f of data.fleets) {
+    const b = fleetBars.get(f.label);
+    b.last = f;
+    if (!b.n.dataset.touched) b.n.value = String(f.n);
+    updateFleetBar(f.label);
+  }
+}
+
 /* -- trainers -------------------------------------------------------------- */
 function trainerCard(t) {
   const run = el("span", { class: "run" });
@@ -618,6 +748,8 @@ const every = (ms, fn) => {
   });
 };
 every(2000, pollGames);
+every(3000, pollMachine);
+every(3000, pollFleet);
 every(5000, pollTrainers);
 every(5000, pollLaunch);
 every(20000, pollRuns);

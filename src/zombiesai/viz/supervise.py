@@ -239,6 +239,79 @@ def monitor(display: str, out_dir: Path, *, thumb_every_s: float = 2.0) -> None:
             next_status = now + 1.0
 
 
+# ------------------------------------------------------------------------------------------------ the machine
+
+# When a reading earns a mark, per the hardware in this PC. A Ryzen 7000 is built to run up to 95 C under load
+# (Tctl), so warm is normal there; an RTX 5070 starts to slow itself near 90 C. Busy CPU: the benchmark of
+# 2026-09-27 had agents starting to miss their 15 Hz deadlines past ~85% of all threads (8 games).
+LIMITS = {  # warning, serious, critical
+    "cpu_temp": (85, 90, 95), "gpu_temp": (80, 85, 90), "ssd_temp": (70, 75, 80), "ram_temp": (70, 80, 85),
+    "cpu_busy": (85, 95, 101), "vram": (85, 92, 97), "ram": (85, 92, 97),
+}
+RECOMMENDED_GAMES = 6  # the most this PC ran with every agent keeping time (benchmark, 2026-09-27)
+
+
+def level(key: str, value) -> str:
+    if value is None:
+        return "info"
+    warning, serious, critical = LIMITS[key]
+    return "critical" if value >= critical else "serious" if value >= serious else "warning" if value >= warning else "good"
+
+
+def hwmon_temps(root: Path = Path("/sys/class/hwmon")) -> dict:
+    """The temperatures worth a tile: the CPU's Tctl and die (k10temp), the SSD (nvme), the RAM (spd5118)."""
+    found = {}
+    for hw in root.iterdir() if root.is_dir() else []:
+        try:
+            name = (hw / "name").read_text().strip()
+        except OSError:
+            continue
+        for sensor in hw.glob("temp*_input"):
+            label_file = sensor.with_name(sensor.name.replace("_input", "_label"))
+            try:
+                label = label_file.read_text().strip() if label_file.exists() else ""
+                celsius = int(sensor.read_text()) / 1000
+            except (OSError, ValueError):
+                continue
+            key = {("k10temp", "Tctl"): "cpu", ("k10temp", "Tccd1"): "cpu_die", ("nvme", "Composite"): "ssd"}.get(
+                (name, label), "ram" if name == "spd5118" else None)
+            if key and key not in found:
+                found[key] = round(celsius, 1)
+    return found
+
+
+def gpu_status(*, run=subprocess.run) -> dict | None:
+    fields = "name,temperature.gpu,utilization.gpu,memory.used,memory.total,power.draw,power.limit,fan.speed," \
+             "clocks_throttle_reasons.hw_slowdown,clocks_throttle_reasons.sw_thermal_slowdown"
+    try:
+        out = run(["nvidia-smi", f"--query-gpu={fields}", "--format=csv,noheader,nounits"], capture_output=True,
+                  text=True, timeout=5).stdout.strip().splitlines()[0]
+    except (OSError, subprocess.TimeoutExpired, IndexError):
+        return None
+    parts = [x.strip() for x in out.split(",")]
+
+    def num(x):
+        try:
+            return float(x)
+        except ValueError:
+            return None
+
+    return {"name": parts[0], "temp": num(parts[1]), "busy": num(parts[2]), "vram_used": num(parts[3]),
+            "vram_total": num(parts[4]), "power": num(parts[5]), "power_limit": num(parts[6]), "fan": num(parts[7]),
+            "throttling": "Active" in parts[8:10]}
+
+
+def _cpu_ticks() -> tuple[int, int]:
+    values = list(map(int, Path("/proc/stat").read_text().splitlines()[0].split()[1:]))
+    return sum(values), values[3] + values[4]
+
+
+def ram_status() -> dict:
+    info = {line.split(":")[0]: int(line.split()[1]) for line in Path("/proc/meminfo").read_text().splitlines()}
+    total, available = info["MemTotal"] / 1048576, info["MemAvailable"] / 1048576
+    return {"used": round(total - available, 1), "total": round(total, 1)}
+
+
 # ------------------------------------------------------------------------------------------------ starting runs
 
 TRAINER = Path("scripts") / "train_rl.py"
@@ -469,6 +542,23 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
             "command": shlex.join(argv[2:])}
 
 
+def fleet_command(repo: Path, tree_label: str, action: str, n: int | None = None) -> subprocess.Popen:
+    """scripts/instances.py `action` in that checkout, started as its runs are (its src/ first on PYTHONPATH), in
+    a session of its own, printing to runs/instances/<action>.log."""
+    tree = dict(trees(repo))[tree_label]
+    argv = [str(python_for(tree, dict(trees(repo))["main"])), "-u", "scripts/instances.py", action]
+    if action == "up" and n:
+        argv += ["--n", str(n)]
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tree / "src"), env.get("PYTHONPATH")]))
+    log = tree / "runs" / "instances" / f"{action}.log"
+    with open(log, "ab") as out:
+        out.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} from the dashboard: {shlex.join(argv[2:])}\n".encode())
+        out.flush()
+        return subprocess.Popen(argv, cwd=tree, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+
 def descendants(pid: int, proc: Path = Path("/proc")) -> list[int]:
     """Every process below `pid`: a trainer's actors, and theirs."""
     children: dict[int, list[int]] = {}
@@ -500,6 +590,9 @@ class Supervisor:
         self._lock = threading.Lock()
         self._payload, self._payload_at = None, 0.0
         self.stopping: dict[int, float] = {}  # trainer pid -> when a graceful stop was asked for
+        self.fleet_ops: dict[str, dict] = {}  # tree label -> the instances.py up/down it is running
+        self._cpu_prev = _cpu_ticks()
+        self._history: list[tuple[float, dict]] = []  # (time, readings) for the last 10 minutes' peaks
         self.started: list[subprocess.Popen] = []  # runs started here, reaped when they end
         # Time limits, on disk so a dashboard that restarts still keeps them: pid -> stop_at, cwd, run, log.
         self.deadlines_path = self.state_dir / "deadlines.json"
@@ -531,6 +624,69 @@ class Supervisor:
             run = runs.get(t["run"]) if t["run"] else None
             t["progress"] = None if run is None else {k: run.get(k) for k in ("progress", "progress_text", "eta_s")}
         return {"trainers": trainers}
+
+    # -- the machine
+    def machine(self) -> dict:
+        """Temperatures and load now, and the peak of each over the last 10 minutes of looking."""
+        total, idle = _cpu_ticks()
+        before_total, before_idle = self._cpu_prev
+        self._cpu_prev = (total, idle)
+        busy = None if total == before_total else round(100 * (1 - (idle - before_idle) / (total - before_total)), 1)
+        temps, gpu, ram = hwmon_temps(), gpu_status(), ram_status()
+        now = {"cpu_temp": temps.get("cpu"), "cpu_busy": busy, "gpu_temp": gpu and gpu["temp"],
+               "gpu_busy": gpu and gpu["busy"], "ssd_temp": temps.get("ssd"), "ram_temp": temps.get("ram"),
+               "vram": gpu and gpu["vram_total"] and round(100 * gpu["vram_used"] / gpu["vram_total"], 1),
+               "ram": round(100 * ram["used"] / ram["total"], 1)}
+        t = time.time()
+        self._history = [(at, r) for at, r in self._history if t - at <= 600] + [(t, now)]
+        peaks = {k: max((r[k] for _, r in self._history if r.get(k) is not None), default=None) for k in now}
+        levels = {k: level(k, v) for k, v in now.items() if k in LIMITS}
+        return {"now": now, "peak": peaks, "levels": levels, "gpu": gpu, "ram": ram,
+                "cpu_die": temps.get("cpu_die"), "threads": os.cpu_count(), "limits": LIMITS}
+
+    # -- the fleet
+    def fleets(self) -> dict:
+        trainers = self.live()["trainers"]
+        out = []
+        for label, tree in trees(self.repo):
+            fleet = fleet_of(tree)
+            if fleet is None:
+                continue
+            op = self.fleet_ops.get(label)
+            if op and op["proc"].poll() is not None:
+                op["ended"] = op.get("ended") or time.time()
+                op["code"] = op["proc"].returncode
+            status = None
+            if op:
+                status = {"action": op["action"], "running": op["proc"].poll() is None, "code": op.get("code"),
+                          "since_s": round(time.time() - op["started"]), "tail": _tail(op["log"], 3)}
+                if not status["running"] and time.time() - op["ended"] > 60:  # an old result stops being news
+                    self.fleet_ops.pop(label, None)
+                    status = None
+            busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
+            out.append({"label": label, **fleet, "busy": busy, "op": status})
+        return {"fleets": out, "recommended": RECOMMENDED_GAMES}
+
+    def fleet_action(self, label: str, action: str, n: int | None = None) -> dict:
+        """Start (`up`, to `n` games) or stop (`down`) a checkout's fleet with its own scripts/instances.py. Refuses to
+        stop games a run is playing -- that would wreck the run -- and to start one operation over another."""
+        fleet = next((f for f in self.fleets()["fleets"] if f["label"] == label), None)
+        if fleet is None:
+            return {"error": f"{label!r} has no fleet"}
+        if action not in ("up", "down"):
+            return {"error": "up or down"}
+        if fleet["op"] and fleet["op"]["running"]:
+            return {"error": f"the fleet is already {'starting' if fleet['op']['action'] == 'up' else 'stopping'}"}
+        if action == "down" and fleet["busy"]:
+            return {"error": f"{fleet['busy'][0]} is playing these games: stop it first"}
+        if action == "up" and not (n and 1 <= n <= 16):
+            return {"error": "between 1 and 16 games"}
+        tree = dict(trees(self.repo))[label]
+        proc = fleet_command(self.repo, label, action, n)
+        self.started.append(proc)
+        self.fleet_ops[label] = {"action": action, "proc": proc, "started": time.time(),
+                                 "log": tree / "runs" / "instances" / f"{action}.log"}
+        return {"ok": True}
 
     # -- starting and stopping runs
     def launch(self) -> dict:
@@ -731,6 +887,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(s.games())
         if path == "/api/launch":
             return self._json(s.launch())
+        if path == "/api/machine":
+            return self._json(s.machine())
+        if path == "/api/fleet":
+            return self._json(s.fleets())
         if m := re.fullmatch(r"/thumb/(\d+)\.png", path):
             try:
                 return self._send((s.state_dir / f"{m[1]}.png").read_bytes(), "image/png")
@@ -774,6 +934,13 @@ class Handler(BaseHTTPRequestHandler):
             result = s.start(str(body.get("tree", "")), str(body.get("init", "")), actors,
                              str(body.get("name", "")).strip(), str(body.get("extra", "")), settings=settings,
                              env=str(body.get("env", "real")), sim_hardness=hardness, stop_after_min=stop_after_min)
+            return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
+        if self.path == "/api/fleet":
+            try:
+                n = None if body.get("n") in (None, "") else int(body["n"])
+            except (TypeError, ValueError):
+                return self._json({"error": "games must be a number"}, HTTPStatus.BAD_REQUEST)
+            result = s.fleet_action(str(body.get("fleet", "")), str(body.get("action", "")), n)
             return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
         if self.path == "/api/stop":
             try:

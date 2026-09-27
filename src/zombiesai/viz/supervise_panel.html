@@ -85,6 +85,24 @@
   .launch-row .state { font-size: 13.5px; }
   .launch-msg { font-size: 13.5px; color: var(--chalk-dim); }
   .launch-msg.error { color: var(--serious); }
+  .machine { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px;
+             background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .mtile { background: var(--panel); padding: 12px 14px; display: grid; gap: 2px; align-content: start; }
+  .mtile .label { font-size: 13px; color: var(--chalk-dim); }
+  .mtile .value { font: 600 26px/1.1 var(--ui); }
+  .mtile .sub { font-size: 12px; color: var(--chalk-faint); }
+  .mtile .state { font-size: 12.5px; margin-top: 2px; }
+  .mtile .state:empty { display: none; }
+  .mtile.warning { box-shadow: inset 0 3px 0 var(--warning); }
+  .mtile.serious { box-shadow: inset 0 3px 0 var(--serious); }
+  .mtile.critical { box-shadow: inset 0 3px 0 var(--critical); }
+  .state.critical .icon { color: var(--critical); }
+  .fleet-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 10px; }
+  .fleet-bar .caption { font-size: 13.5px; color: var(--chalk-dim); }
+  .fleet-bar .count { font: 600 14px var(--ui); }
+  .fleet-bar input { width: 64px; font: 600 13.5px/1 var(--ui); color: var(--chalk); background: var(--panel);
+                     border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px; }
+  .fleet-bar .op { font-size: 13px; color: var(--chalk-dim); }
   .launcher .caption { font-size: 13px; color: var(--chalk-dim); margin-right: 2px; }
   .launcher .subhead { font: 700 12px/1.2 var(--ui); letter-spacing: 0.11em; text-transform: uppercase; color: var(--chalk-dim); margin-top: 4px; }
   .launcher .estimate { margin: 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 100ch; }
@@ -114,8 +132,14 @@
   .conn.lost { color: var(--critical); }
 </style>
 
+<section aria-labelledby="machine-title">
+  <h2 id="machine-title">The machine</h2>
+  <div class="machine" id="machine"></div>
+</section>
+
 <section aria-labelledby="games-title">
   <h2 id="games-title">The games</h2>
+  <div id="fleet-bars"></div>
   <div class="live-bar" id="viewer-bar"></div>
   <div class="games" id="games"></div>
 </section>
