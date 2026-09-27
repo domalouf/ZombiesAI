@@ -38,7 +38,7 @@ from torch import nn
 
 from zombiesai import spec
 from zombiesai.demos import stats
-from zombiesai.demos.clips import DPOINTS_EDGES, Clip
+from zombiesai.demos.clips import DPOINTS_EDGES, Clip, clip_name
 from zombiesai.demos.dataset import ClipDataset, DataConfig, class_weights, split_clips
 from zombiesai.demos.hearing import DEFAULT_CACHE, AudioFeatureConfig, clip_features, feature_config
 from zombiesai.demos.idm import resolve_device
@@ -240,7 +240,9 @@ def train(
     rng = np.random.default_rng(config.seed)
 
     if val_clips is None:
-        train_clips, val_clips = split_clips(labelled, config.val_fraction, config.seed)
+        train_clips, val_clips = split_clips(
+            labelled, config.val_fraction, config.seed, gap=max(config.offsets) + spec.DECISION_HZ
+        )
     else:
         train_clips, val_clips = labelled, [c for c in val_clips if c.labelled]
     data_config = DataConfig(min_confidence=config.min_confidence, correction_weight=config.correction_weight)
@@ -252,6 +254,11 @@ def train(
     val_data = ClipDataset(val_clips, data_config, offsets=config.data_offsets, **hearing)
     if len(train_data) < config.batch_size:
         raise ValueError(f"only {len(train_data)} usable steps; need at least {config.batch_size}")
+    print(
+        f"validating on {len(val_data):,} steps ({len(val_data) / spec.DECISION_HZ / 60:.1f} min) from "
+        f"{len(val_clips)} blocks of {len({c.path for c in val_clips})} recordings",
+        flush=True,
+    )
 
     human = stats.behaviour_stats(train_data.actions())
     weights = None
@@ -271,8 +278,8 @@ def train(
                 "train_steps": len(train_data),
                 "train_corrections": train_data.n_corrections,
                 "val_steps": len(val_data),
-                "train_clips": [str(c.path) for c in train_clips],
-                "val_clips": [str(c.path) for c in val_clips],
+                "train_clips": [clip_name(c) for c in train_clips],
+                "val_clips": [clip_name(c) for c in val_clips],
                 "label_sources": sorted({c.label_source for c in labelled}),
                 "audio_features": asdict(audio_features) if config.use_audio else None,
                 "human_behaviour": human,

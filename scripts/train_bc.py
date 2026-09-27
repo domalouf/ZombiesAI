@@ -38,7 +38,18 @@ def main() -> None:
                         help="steps back of each input frame, e.g. 0 1 2 4 8 16 30 for two seconds of memory "
                              "(overrides --frame-stack)")
     parser.add_argument("--val-clips", nargs="*", type=Path, default=None,
-                        help="validate on exactly these clip roots and train on all the others")
+                        help="validate on exactly these clip roots and train on all the others (default: "
+                             "--val-fraction of every long recording, held out as ~2-minute blocks)")
+    parser.add_argument("--val-fraction", type=float, default=BCConfig.val_fraction,
+                        help="share of each recording held out when --val-clips isn't given")
+    parser.add_argument("--focal-gamma", type=float, default=BCConfig.focal_gamma,
+                        help="focal loss exponent: down-weights steps the policy already gets right (0 is "
+                             "plain cross-entropy)")
+    parser.add_argument("--class-balance", type=float, default=BCConfig.class_balance,
+                        help="effective-number beta for per-class loss weights (0 turns class weighting off)")
+    parser.add_argument("--class-balance-power", type=float, default=BCConfig.class_balance_power,
+                        help="how hard class weighting corrects: 1 is full inverse frequency, 0.5 square "
+                             "root; lower it if the policy reloads and swaps far more than you do")
     parser.add_argument("--hidden", type=int, default=BCConfig.hidden)
     parser.add_argument("--min-confidence", type=float, default=BCConfig.min_confidence,
                         help="skip steps whose label is worth less than this")
@@ -79,7 +90,8 @@ def main() -> None:
         use_prev_actions=args.prev_actions, epochs=args.epochs,
         batch_size=args.batch_size, lr=args.lr, hidden=args.hidden, min_confidence=args.min_confidence,
         correction_weight=args.correction_weight, augment=not args.no_augment, device=args.device, seed=args.seed,
-        use_audio=args.audio,
+        use_audio=args.audio, val_fraction=args.val_fraction, focal_gamma=args.focal_gamma,
+        class_balance=args.class_balance, class_balance_power=args.class_balance_power,
     )
     if args.audio:
         heard = sum(c.audio() is not None for c in clips)

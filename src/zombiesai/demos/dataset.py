@@ -6,8 +6,10 @@ Two rules here are load-bearing rather than stylistic:
   Stacking at write time is 4x the storage for zero information, and an unclamped stack quietly teaches the
   network that the end of one clip causes the start of the next. A FLAG_CLIP_START mid-clip (play resuming
   after a stretch the player marked as a menu) is a boundary too: history clamps there as well.
-* **Held-out data is held out by clip, never by step.** Neighbouring frames of one clip are nearly identical,
-  so a step-level split reports a validation accuracy that is really a memorisation score.
+* **Held-out data is held out in long blocks, never by step.** Neighbouring frames of one clip are nearly
+  identical, so a step-level split reports a validation accuracy that is really a memorisation score. A long
+  recording gives up minutes-long blocks, cut off from training by a gap on each side; a short one goes to
+  one side whole.
 """
 
 from collections.abc import Sequence
@@ -16,10 +18,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from zombiesai import spec
-from zombiesai.demos.clips import Clip, iter_clips
+from zombiesai.demos.clips import Clip, clip_span, iter_clips
 
 # Per-step targets beyond the action, present only when the clip's source could supply them.
 EXTRA_KEYS = {"mc_return": np.float32, "aux_dpoints": np.int64, "aux_damage": np.int64}
+
+# Validation carved out of a long recording: blocks of about two minutes, none shorter than thirty seconds.
+VAL_BLOCK_STEPS = 120 * spec.DECISION_HZ
+MIN_VAL_BLOCK_STEPS = 30 * spec.DECISION_HZ
 
 
 @dataclass(frozen=True)
@@ -224,7 +230,59 @@ def training_clips(roots, min_confidence: float = 0.0) -> tuple[list[Clip], list
     return keep, [c for c in labelled if not c.usable(min_confidence).any()]
 
 
-def split_clips(clips: list[Clip], val_fraction: float = 0.1, seed: int = 0) -> tuple[list[Clip], list[Clip]]:
+def split_clips(
+    clips: list[Clip],
+    val_fraction: float = 0.1,
+    seed: int = 0,
+    *,
+    gap: int = spec.DECISION_HZ,
+    block_steps: int = VAL_BLOCK_STEPS,
+    min_block_steps: int = MIN_VAL_BLOCK_STEPS,
+) -> tuple[list[Clip], list[Clip]]:
+    """Hold out `val_fraction` of every recording long enough to spare it, as evenly spaced blocks of about
+    `block_steps`; the rest of it trains, as spans that stop `gap` steps short of each block on both sides.
+
+    Every session is validated on, so a split can't land on the one short recording, or on the one without
+    audio -- and nothing here depends on `seed`, so two runs over the same clips compare on the same steps.
+    Spans clamp their history at their own start (`clips.clip_span`), so no frame stack reaches across a
+    cut; `gap` keeps training steps off the near-duplicates at a block's edges as well -- pass the history
+    window plus a second. Play runs always train whole: their corrections are too few to spend on scoring.
+
+    When no clip is long enough to carve from, whole clips are held out instead (`split_whole_clips`)."""
+    if val_fraction <= 0:
+        return list(clips), []
+    train, val = [], []
+    for clip in clips:
+        blocks = [] if clip.is_play_run else val_blocks(clip.n_steps, val_fraction, block_steps, min_block_steps)
+        edge = 0
+        for start, stop in blocks:
+            if start - gap > edge:
+                train.append(clip_span(clip, edge, start - gap))
+            val.append(clip_span(clip, start, stop))
+            edge = stop + gap
+        if not blocks:
+            train.append(clip)
+        elif edge < clip.n_steps:
+            train.append(clip_span(clip, edge, clip.n_steps))
+    if val:
+        return train, val
+    return split_whole_clips(clips, val_fraction, seed)
+
+
+def val_blocks(n_steps: int, val_fraction: float, block_steps: int = VAL_BLOCK_STEPS,
+               min_block_steps: int = MIN_VAL_BLOCK_STEPS) -> list[tuple[int, int]]:
+    """[start, stop) of the held-out blocks of an `n_steps` recording: `val_fraction` of it in as many blocks
+    as make each about `block_steps`, centred in equal shares of the recording so they sample its early, middle
+    and late play alike. None when the fraction would come to less than `min_block_steps`."""
+    held = n_steps * val_fraction
+    if held < min_block_steps:
+        return []
+    k = max(1, round(held / block_steps))
+    centres = (np.arange(k) + 0.5) * n_steps / k
+    return [(int(round(c - held / k / 2)), int(round(c + held / k / 2))) for c in centres]
+
+
+def split_whole_clips(clips: list[Clip], val_fraction: float = 0.1, seed: int = 0) -> tuple[list[Clip], list[Clip]]:
     """Split whole clips into train and validation, keeping at least one clip on each side when possible."""
     if len(clips) < 2 or val_fraction <= 0:
         return list(clips), []

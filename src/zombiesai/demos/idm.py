@@ -102,7 +102,9 @@ def train(clips: list[Clip], config: IDMConfig, run_dir: str | Path) -> Path:
     torch.manual_seed(config.seed)
     rng = np.random.default_rng(config.seed)
 
-    train_clips, val_clips = split_clips(labelled, config.val_fraction, config.seed)
+    train_clips, val_clips = split_clips(
+        labelled, config.val_fraction, config.seed, gap=config.before + config.after + spec.DECISION_HZ
+    )
     data_config = DataConfig(min_confidence=config.min_confidence)
     train_data = ClipDataset(train_clips, data_config, before=config.before, after=config.after)
     val_data = ClipDataset(val_clips, data_config, before=config.before, after=config.after)

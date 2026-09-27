@@ -10,6 +10,7 @@ from zombiesai.demos.dataset import (
     class_weights,
     majority_baseline,
     split_clips,
+    val_blocks,
 )
 
 
@@ -89,6 +90,36 @@ def test_validation_is_split_by_clip_not_by_step(tmp_path):
     assert len(train) == 8 and len(val) == 2
     assert not {c.path for c in train} & {c.path for c in val}
     assert split_clips(clips[:1], 0.2)[1] == []
+
+
+def test_long_recordings_give_up_blocks_with_a_gap_either_side(tmp_path):
+    long, short = make_clip(tmp_path, "long", n=250), make_clip(tmp_path, "short", n=40, seed=1)
+    train, val = split_clips([long, short], 0.2, gap=5, block_steps=50, min_block_steps=20)
+    assert [(c.manifest["span"]["start"], c.manifest["span"]["stop"]) for c in val] == [(100, 150)]
+    assert [c.manifest.get("span", {}).get("start") for c in train] == [0, 155, None]  # the short one, whole
+    assert [c.n_steps for c in train] == [95, 95, 40]
+    # Each span is its own history segment: a stack at a training span's first step can't see into the block.
+    assert all(c.segment_start[0] == 0 and c.flags[0] & clipmod.FLAG_CLIP_START for c in val + train[:2])
+    np.testing.assert_array_equal(val[0].frames[0], long.frames[100])
+    assert clipmod.clip_name(val[0]) == f"{long.path}[100:150]"
+
+
+def test_split_does_not_depend_on_the_seed(tmp_path):
+    long = make_clip(tmp_path, "long", n=250)
+    spans = [
+        [clipmod.clip_name(c) for c in side]
+        for seed in (0, 7)
+        for side in split_clips([long], 0.2, seed, gap=5, block_steps=50, min_block_steps=20)
+    ]
+    assert spans[:2] == spans[2:]
+
+
+def test_val_blocks_spread_across_the_recording():
+    assert val_blocks(9000, 0.1) == [(4050, 4950)]  # 60 s of a 10-minute session, from the middle
+    assert val_blocks(1800, 0.1) == []  # 12 s is too little to score on; the session trains whole
+    blocks = val_blocks(18000 * 3, 0.1)
+    assert len(blocks) == 3 and all(stop - start == 1800 for start, stop in blocks)
+    assert blocks[0][0] < 18000 < blocks[1][0] < 36000 < blocks[2][0]
 
 
 def test_class_weights_lift_the_rare_button_classes():

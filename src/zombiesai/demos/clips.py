@@ -358,6 +358,12 @@ def clip_span(clip: Clip, start: int, stop: int) -> Clip:
     return Clip(clip.path, manifest, clip.frames[start:stop], labels, _audio=clip._audio)
 
 
+def clip_name(clip: Clip) -> str:
+    """The clip's path, and for a span the steps of it: `data/demos/demo_0002[8100:9900]`."""
+    span = clip.manifest.get("span")
+    return f"{clip.path}[{span['start']}:{span['stop']}]" if span else str(clip.path)
+
+
 def with_play_marks(flags: np.ndarray, not_playing: np.ndarray) -> np.ndarray:
     """Rewrite a clip's play marking from a (T,) not-playing mask, leaving every other flag alone.
 
