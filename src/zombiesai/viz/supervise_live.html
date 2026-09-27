@@ -1,0 +1,756 @@
+<script>
+/* Live, from scripts/supervise.py on this machine: the games every 2 s, the trainers every 5 s, the curves every
+   20 s (and only when a run changed). Nothing polls while the tab is hidden, so the game monitors -- which run
+   only while someone looks -- stop on their own. */
+const live = { games: null, selected: null, workspace: null, fps: null, busy: false, lost: false, cards: new Map(),
+               barKey: "", trainers: new Map(), runsKey: "" };
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST", body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", "X-Supervise": "1" },  // no other page can send this
+  };
+  const response = await fetch(path, opts);
+  if (!response.ok) throw new Error(`${path}: ${response.status}`);
+  return response.json();
+}
+
+/* A command's answer, refused or not: the server says why in {error}. Only no answer at all is a lost server. */
+async function command(path, body) {
+  try {
+    const response = await fetch(path, { method: "POST", body: JSON.stringify(body),
+      headers: { "Content-Type": "application/json", "X-Supervise": "1" } });
+    return await response.json();
+  } catch (e) {
+    connection(false);
+    return { error: "the dashboard server is not answering" };
+  }
+}
+
+function connection(ok) {
+  live.lost = !ok;
+  const node = document.getElementById("conn");
+  if (node) {
+    node.className = "conn" + (ok ? "" : " lost");
+    node.textContent = ok ? "live" : "server not answering";
+  }
+}
+
+/* -- games ----------------------------------------------------------------- */
+function gameState(s) {
+  if (!s.monitor) return ["info", "-", "checking"];
+  if (!s.game) return ["serious", "!!", "no game window"];
+  if (s.fps == null) return ["info", "-", "measuring"];
+  if (!s.fps) return ["warning", "!", "no frames"];
+  return ["good", "OK", "running"];
+}
+
+const stackText = (s) => s.stack === "gpu" ? "GPU frames (glamor)" : "CPU copy (-shm), ~11 fps at most";
+
+async function showViewers(displays, focus = false) {
+  live.busy = true;
+  renderBar(true);
+  try {
+    await api("/api/viewers", { displays, workspace: live.workspace, fps: live.fps, focus });
+  } catch (e) { connection(false); }
+  live.busy = false;
+  await pollGames();
+}
+
+const anyWatched = () => live.games.screens.some((s) => s.watched);
+
+function renderBar(force = false) {
+  const g = live.games;
+  const open = anyWatched();
+  const key = [open, live.busy, live.workspace, live.fps, g.thumbs, live.lost].join("|");
+  if (key === live.barKey && !force) return;
+  live.barKey = key;
+  const chosen = () => g.screens.filter((s) => live.selected.has(s.number)).map((s) => s.number);
+  const workspace = el("select", { "aria-label": "Workspace for the viewer windows", onchange: (e) => {
+    live.workspace = e.target.value;
+    if (anyWatched()) showViewers(chosen()); else renderBar(true);
+  } }, Array.from({ length: 10 }, (_, i) => {
+    const o = el("option", { value: String(i + 1), text: String(i + 1) });
+    if (String(i + 1) === live.workspace) o.selected = true;
+    return o;
+  }));
+  const fpsChip = (v) => el("button", { class: "chip seg", "aria-pressed": String(live.fps === v), onclick: () => {
+    live.fps = v;
+    if (anyWatched()) showViewers(chosen()); else renderBar(true);
+  } }, [document.createTextNode(`${v} fps`)]);
+  mount(document.getElementById("viewer-bar"), [
+    el("span", { class: "caption", text: "Viewer windows" }),
+    el("button", {
+      class: "chip primary", "aria-pressed": String(open), disabled: live.busy ? "" : null,
+      title: open ? "Close every viewer window" : "Open a viewer for each game marked Watch",
+      onclick: () => showViewers(open ? [] : chosen()),
+    }, [el("span", { class: "key" }), document.createTextNode(live.busy ? "Working..." : open ? "Shown" : "Hidden")]),
+    el("span", { class: "caption", text: "on workspace" }),
+    workspace,
+    fpsChip(15), fpsChip(30), fpsChip(60),
+    el("button", { class: "chip", onclick: () => api("/api/goto", { workspace: live.workspace }).catch(() => connection(false)) },
+      [document.createTextNode(`Go to workspace ${live.workspace}`)]),
+    el("span", { class: "spacer" }),
+    el("button", { class: "chip", "aria-pressed": String(g.thumbs), onclick: async () => {
+      await api("/api/thumbs", { on: !g.thumbs }).catch(() => connection(false));
+      await pollGames();
+    } }, [el("span", { class: "key" }), document.createTextNode("Thumbnails")]),
+    el("span", { id: "conn", class: "conn" + (live.lost ? " lost" : ""), text: live.lost ? "server not answering" : "live" }),
+  ]);
+}
+
+function gameCard(s) {
+  const img = el("img", { class: "thumb", alt: `Latest whole frame on display ${s.display}`, width: 320, height: 180 });
+  const off = el("div", { class: "thumb off", text: "Thumbnails off" });
+  const state = el("span", { class: "state" });
+  const watch = el("button", { class: "chip", title: "Include this game when the viewer windows are shown",
+    onclick: () => {
+      if (live.selected.has(s.number)) live.selected.delete(s.number); else live.selected.add(s.number);
+      const chosen = live.games.screens.filter((x) => live.selected.has(x.number)).map((x) => x.number);
+      if (anyWatched()) showViewers(chosen); else renderGames();
+    } }, [el("span", { class: "key" }), document.createTextNode("Watch")]);
+  const fps = el("span", { class: "value" });
+  const detail = el("div", { class: "detail" });
+  const node = el("article", { class: "card game" }, [
+    img, off,
+    el("div", { class: "game-head" }, [el("span", { class: "name", text: s.display }), state, watch]),
+    el("div", { class: "game-stats" }, [fps, el("span", { class: "label", text: "whole frames a second" }), detail]),
+  ]);
+  return { node, img, off, state, watch, fps, detail, thumbAt: null };
+}
+
+function renderGames() {
+  const g = live.games;
+  renderBar();
+  const grid = document.getElementById("games");
+  if (!g.screens.length) {
+    live.cards.clear();
+    mount(grid, [el("p", { class: "empty-note", text: "No game instance is running (no rootful Xwayland found). " +
+      "Start the fleet with scripts/instances.py up and they appear here." })]);
+    return;
+  }
+  const numbers = g.screens.map((s) => s.number).join(",");
+  if ([...live.cards.keys()].join(",") !== numbers) {
+    live.cards = new Map(g.screens.map((s) => [s.number, gameCard(s)]));
+    mount(grid, [...live.cards.values()].map((c) => c.node));
+  }
+  for (const s of g.screens) {
+    const c = live.cards.get(s.number);
+    const [level, icon, word] = gameState(s);
+    c.state.className = `state ${level}`;
+    mount(c.state, [el("span", { class: "icon", text: icon }), document.createTextNode(word)]);
+    c.watch.setAttribute("aria-pressed", String(live.selected.has(s.number)));
+    c.fps.textContent = s.fps == null ? "--" : fmtValue(s.fps);
+    c.detail.textContent = [`${s.width}×${s.height}`, stackText(s), s.game || "no game window",
+      s.watched ? "in a viewer window" : null].filter(Boolean).join(" · ");
+    c.img.hidden = !g.thumbs;
+    c.off.hidden = g.thumbs;
+    if (g.thumbs && s.thumb_at && s.thumb_at !== c.thumbAt) {
+      c.thumbAt = s.thumb_at;
+      c.img.src = `/thumb/${s.number}.png?t=${s.thumb_at}`;
+    }
+  }
+}
+
+async function pollGames() {
+  try {
+    live.games = await api("/api/games");
+    connection(true);
+  } catch (e) {
+    connection(false);
+    return;
+  }
+  const g = live.games;
+  if (live.workspace === null) { live.workspace = g.viewer.workspace; live.fps = g.viewer.fps; }
+  if (live.selected === null) {
+    const watched = g.screens.filter((s) => s.watched).map((s) => s.number);
+    live.selected = new Set(watched.length ? watched : g.screens.map((s) => s.number));
+  }
+  for (const s of g.screens) if (!live.seen?.has(s.number) && !anyWatched()) live.selected.add(s.number);
+  live.seen = new Set(g.screens.map((s) => s.number));
+  renderGames();
+}
+
+/* -- the machine --------------------------------------------------------------
+   One tile per reading, built once. A reading past its limit (per this PC's parts: viz/supervise.LIMITS) marks
+   its tile with an icon and a word, never colour alone. */
+const deg = (v) => v == null ? "--" : `${Math.round(v)} °C`;
+const pct = (v) => v == null ? "--" : `${Math.round(v)}%`;
+const TEMP_WORDS = { warning: "warm", serious: "hot", critical: "too hot" };
+const LOAD_WORDS = { warning: "high", serious: "very high", critical: "full" };
+const MACHINE_TILES = [
+  ["cpu_temp", "CPU temperature", (m) => deg(m.now.cpu_temp),
+   (m) => `die ${deg(m.cpu_die)} · peak ${deg(m.peak.cpu_temp)} · built to run up to 95 °C`, TEMP_WORDS],
+  ["cpu_busy", "CPU busy", (m) => pct(m.now.cpu_busy), (m) => `of ${m.threads} threads · peak ${pct(m.peak.cpu_busy)}`, LOAD_WORDS],
+  ["gpu_temp", "GPU temperature", (m) => deg(m.now.gpu_temp),
+   (m) => `fan ${pct(m.gpu && m.gpu.fan)} · peak ${deg(m.peak.gpu_temp)}`, TEMP_WORDS],
+  ["gpu_busy", "GPU busy", (m) => pct(m.now.gpu_busy),
+   (m) => m.gpu ? `${Math.round(m.gpu.power)} of ${Math.round(m.gpu.power_limit)} W · peak ${pct(m.peak.gpu_busy)}` : "no NVIDIA GPU", null],
+  ["vram", "Video memory", (m) => m.gpu ? `${(m.gpu.vram_used / 1024).toFixed(1)} GB` : "--",
+   (m) => m.gpu ? `of ${(m.gpu.vram_total / 1024).toFixed(1)} GB · peak ${pct(m.peak.vram)}` : "", LOAD_WORDS],
+  ["ram", "Memory", (m) => `${m.ram.used.toFixed(1)} GB`,
+   (m) => `of ${m.ram.total.toFixed(0)} GB · the RAM itself ${deg(m.now.ram_temp)}`, LOAD_WORDS],
+  ["ssd_temp", "SSD temperature", (m) => deg(m.now.ssd_temp), (m) => `peak ${deg(m.peak.ssd_temp)}`, TEMP_WORDS],
+];
+const machineTiles = new Map();
+
+function renderMachine(m) {
+  const holder = document.getElementById("machine");
+  if (!machineTiles.size) {
+    for (const [key, label] of MACHINE_TILES) {
+      const t = { value: el("span", { class: "value" }), sub: el("span", { class: "sub" }), state: el("span", { class: "state" }) };
+      t.node = el("div", { class: "mtile" }, [el("span", { class: "label", text: label }), t.value, t.sub, t.state]);
+      machineTiles.set(key, t);
+    }
+    mount(holder, [...machineTiles.values()].map((t) => t.node));
+  }
+  for (const [key, , value, sub, words] of MACHINE_TILES) {
+    const t = machineTiles.get(key);
+    t.value.textContent = value(m);
+    t.sub.textContent = sub(m);
+    let lvl = m.levels[key] || "good";
+    let word = words && lvl !== "good" ? words[lvl] : "";
+    if (key === "gpu_busy" && m.gpu && m.gpu.throttling) { lvl = "warning"; word = "slowing itself down"; }
+    t.node.className = "mtile" + (lvl !== "good" && lvl !== "info" ? ` ${lvl}` : "");
+    t.state.className = `state ${lvl}`;
+    mount(t.state, word ? [el("span", { class: "icon", text: STATUS_ICON[lvl] }), document.createTextNode(word)] : []);
+  }
+}
+
+async function pollMachine() {
+  try {
+    renderMachine(await api("/api/machine"));
+  } catch (e) { connection(false); }
+}
+
+/* -- the fleet: start and stop the games ------------------------------------ */
+const fleetBars = new Map();
+
+function fleetBar(f) {
+  const b = {};
+  b.count = el("span", { class: "count" });
+  b.op = el("span", { class: "op" });
+  b.stop = el("button", { class: "chip", onclick: async () => {
+    const running = b.last.running;
+    if (!confirm(`Stop all ${running} games of ${f.label}?\n\nIt runs scripts/instances.py down: the games, their X ` +
+                 "servers and their sound sinks. Start them again here, or with scripts/instances.py up.")) return;
+    const answer = await command("/api/fleet", { fleet: f.label, action: "down" });
+    if (answer.error) alert(answer.error);
+    await pollFleet();
+  } }, [document.createTextNode("Stop games")]);
+  b.n = el("input", { type: "number", min: "1", max: "16", value: String(f.n), "aria-label": "How many games",
+                      oninput: () => { b.n.dataset.touched = "1"; updateFleetBar(f.label); } });
+  b.start = el("button", { class: "chip primary", onclick: async () => {
+    const answer = await command("/api/fleet", { fleet: f.label, action: "up", n: parseInt(b.n.value, 10) });
+    if (answer.error) alert(answer.error);
+    await pollFleet();
+  } }, [el("span", { class: "key" }), document.createTextNode("Start games")]);
+  b.note = el("span", { class: "state" });
+  b.node = el("div", { class: "fleet-bar" }, [
+    el("span", { class: "caption", text: `Fleet · ${f.label}` }), b.count, b.stop,
+    el("span", { class: "caption", text: "games:" }), b.n, b.start, b.note, b.op,
+  ]);
+  return b;
+}
+
+function updateFleetBar(label) {
+  const b = fleetBars.get(label);
+  const f = b.last;
+  const n = parseInt(b.n.value, 10);
+  const working = f.op && f.op.running;
+  b.count.textContent = `${f.running} of ${f.n} games up`;
+  b.stop.disabled = working || f.running === 0 || f.busy.length > 0;
+  b.stop.title = f.busy.length ? `${f.busy[0]} is playing these games: stop it first` : "Stop every game of this fleet";
+  b.start.disabled = working || !(n >= 1 && n <= 16) || n <= f.running;
+  b.start.lastChild.textContent = f.running > 0 && n > f.running ? `Start ${n - f.running} more` : "Start games";
+  b.start.title = n <= f.running ? `${f.running} are already up` : `Bring the fleet up to ${n} games`;
+  const over = n > fleetRecommended;
+  b.note.className = "state warning";
+  mount(b.note, over ? [el("span", { class: "icon", text: "!" }),
+    document.createTextNode(`past ${fleetRecommended}, agents started missing their deadlines on this PC`)] : []);
+  if (f.op) {
+    const last = (f.op.tail || []).filter((l) => l.trim()).slice(-1)[0] || "";
+    const doing = f.op.action === "up" ? "Starting games" : "Stopping games";
+    b.op.textContent = f.op.running ? `${doing}… ${fmtDuration(f.op.since_s)} · ${last}`
+      : f.op.code === 0 ? (f.op.action === "up" ? "Games started." : "Games stopped.")
+      : `${doing} failed (code ${f.op.code}): ${last}`;
+  } else {
+    b.op.textContent = "";
+  }
+}
+
+let fleetRecommended = 6;
+async function pollFleet() {
+  let data;
+  try {
+    data = await api("/api/fleet");
+  } catch (e) { connection(false); return; }
+  fleetRecommended = data.recommended;
+  const holder = document.getElementById("fleet-bars");
+  const labels = data.fleets.map((f) => f.label).join();
+  if ([...fleetBars.keys()].join() !== labels) {
+    fleetBars.clear();
+    for (const f of data.fleets) fleetBars.set(f.label, fleetBar(f));
+    mount(holder, [...fleetBars.values()].map((b) => b.node));
+  }
+  for (const f of data.fleets) {
+    const b = fleetBars.get(f.label);
+    b.last = f;
+    if (!b.n.dataset.touched) b.n.value = String(f.n);
+    updateFleetBar(f.label);
+  }
+}
+
+/* -- trainers -------------------------------------------------------------- */
+function trainerCard(t) {
+  const run = el("span", { class: "run" });
+  const facts = el("span", { class: "facts" });
+  const log = el("pre", { class: "log", tabindex: "0" });
+  const stop = el("button", { class: "chip", onclick: async () => {
+    const name = t.run || `pid ${t.pid}`;
+    if (!confirm(`Stop ${name}?\n\nLike Ctrl-C: it stops its actors (every key released) and writes its checkpoint.`)) return;
+    stop.disabled = true;
+    const answer = await command("/api/stop", { pid: t.pid });
+    if (answer.error) alert(answer.error);
+    await pollTrainers();
+  } });
+  const force = el("button", { class: "chip danger", hidden: "", onclick: async () => {
+    if (!confirm("Force stop?\n\nIt kills the trainer and its actors now: no checkpoint beyond the last periodic one, " +
+                 "and a key an actor held stays held until the next run.")) return;
+    const answer = await command("/api/stop", { pid: t.pid, force: true });
+    if (answer.error) alert(answer.error);
+    await pollTrainers();
+  } }, [document.createTextNode("Force stop")]);
+  const node = el("article", { class: "card trainer" }, [
+    el("div", { class: "top" }, [run, facts, el("div", { class: "actions" }, [stop, force])]), log]);
+  return { node, run, facts, log, stop, force };
+}
+
+async function pollTrainers() {
+  let trainers;
+  try {
+    trainers = (await api("/api/live")).trainers;
+  } catch (e) { connection(false); return; }
+  const holder = document.getElementById("trainers");
+  if (!trainers.length) {
+    live.trainers.clear();
+    mount(holder, [el("p", { class: "empty-note", text: "No trainer is running. A scripts/train_*.py started from " +
+      "any checkout or worktree shows up here with its output." })]);
+    return;
+  }
+  const pids = trainers.map((t) => t.pid).join(",");
+  if ([...live.trainers.keys()].join(",") !== pids) {
+    live.trainers = new Map(trainers.map((t) => [t.pid, trainerCard(t)]));
+    mount(holder, [...live.trainers.values()].map((c) => c.node));
+  }
+  for (const t of trainers) {
+    const c = live.trainers.get(t.pid);
+    c.run.textContent = t.run || "a run not under any runs/ yet";
+    const progress = t.progress && t.progress.progress != null
+      ? `${Math.round(t.progress.progress * 100)}% · ${t.progress.progress_text}` +
+        (t.progress.eta_s ? ` · about ${fmtDuration(t.progress.eta_s)} left` : "") + " · " : "";
+    const limit = t.stop_at ? `stops at ${new Date(t.stop_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ` +
+      `(time limit, in ${fmtDuration(Math.max(0, t.stop_at - Date.now() / 1000))}) · ` : "";
+    mount(c.facts, [
+      document.createTextNode(`${progress}${limit}pid ${t.pid} · running ${fmtDuration(t.elapsed_s)} · ${t.tree} · `),
+      el("code", { text: `${t.script} ${t.args}` }),
+    ]);
+    const stopping = t.stopping_s != null;
+    c.stop.disabled = stopping;
+    c.stop.textContent = stopping ? `Stopping… ${fmtDuration(t.stopping_s)}` : "Stop";
+    c.stop.title = stopping ? "Asked to stop: it is releasing its actors and writing its checkpoint" : "Stop gracefully, as Ctrl-C would";
+    c.force.hidden = !t.can_force;
+    const atBottom = c.log.scrollTop + c.log.clientHeight >= c.log.scrollHeight - 4;
+    const text = t.tail.length ? t.tail.join("\n") : (t.log ? "(nothing printed yet)" : "(its output is not going to a file)");
+    if (c.log.textContent !== text) {
+      c.log.textContent = text;
+      if (atBottom) c.log.scrollTop = c.log.scrollHeight;  // follow the log, unless the reader scrolled up
+    }
+  }
+}
+
+/* -- starting a run ---------------------------------------------------------
+   Built once; polling only refreshes the choices, the estimate and the readiness line, never what the reader
+   has typed. Settings come from the chosen checkout's own RLConfig (label and hint here where the code's own
+   comment says less); they follow the checkpoint a run starts from, except the ones the reader has changed. */
+const SETTING_TEXT = {
+  total_steps: ["Steps", "environment steps to train for, across every game"],
+  segment_steps: ["Segment length", "steps an actor plays before it hands its data over"],
+  batch_steps: ["Steps per update", "data gathered across the games before each learning update"],
+  gamma: ["Discount (gamma)", "how far ahead rewards count"],
+  gae_lambda: ["GAE lambda", "bias against variance in the advantage estimate"],
+  lr: ["Learning rate", "how far each update moves the weights"],
+  update_epochs: ["Epochs per update", "passes over each batch"],
+  minibatch_size: ["Minibatch size", "steps per gradient step"],
+  clip_coef: ["Clip range", "how far one update may change an action's probability"],
+  ent_coef: ["Entropy bonus", "higher keeps the policy exploring"],
+  vf_coef: ["Value loss weight", "the critic's share of the loss"],
+  kl_coef: ["Pull toward the start", "KL penalty keeping it near the policy it started from"],
+  kl_decay: ["Pull decay", "the pull shrinks by this factor every update"],
+  kl_min: ["Least pull", "the pull never decays below this"],
+  target_kl: ["Target KL", "an update stops its epochs early past 1.5x this"],
+  critic_warmup_updates: ["Critic warm-up", "updates that train only the critic before the policy moves"],
+  max_grad_norm: ["Gradient clip", "largest gradient norm an update applies"],
+  max_policy_lag: ["Most policy lag", "updates an actor may fall behind before its data is dropped"],
+  reward_scale: ["Scale rewards", "normalise rewards by their running spread"],
+  device: ["Learner device", "auto, cuda or cpu"],
+  actor_device: ["Actor device", "where each game's policy runs"],
+  seed: ["Seed", "for the sampling and the shuffles"],
+  checkpoint_every: ["Checkpoint every", "updates between checkpoints; a stop always writes one too"],
+  counts_per_degree: ["Mouse counts per degree", "the fleet's calibration (scripts/spike_instances.py)"],
+  bindings: ["Key bindings", "the game's controls, as the actors press them"],
+  record_every: ["Record every", "each actor saves every k-th episode as a clip; 0 never"],
+  hear: ["Hear the game", "a policy trained with audio listens to its own game's sound"],
+  actor_restarts: ["Actor restarts", "per actor, before the run gives up on it"],
+};
+const settingLabel = (s) => (SETTING_TEXT[s.name] || [s.name.replace(/_/g, " ")])[0];
+const settingHint = (s) => s.hint || (SETTING_TEXT[s.name] || [])[1] || "";
+const TIME_LIMITS = [[0, "No time limit"], [15, "15 minutes"], [30, "30 minutes"], [60, "1 hour"], [120, "2 hours"],
+                     [240, "4 hours"], [480, "8 hours"], [720, "12 hours"], [1440, "24 hours"]];
+const STEP_PRESETS = [[100000, "100K"], [500000, "500K"], [1000000, "1M"], [2000000, "2M"], [5000000, "5M"]];
+
+const launch = { options: null, built: null, busy: false };
+const launchTree = () => launch.options.trees.find((t) => t.label === launch.built.tree.value);
+const chosenCheckpoint = () => (launchTree()?.checkpoints || []).find((c) => c.path === launch.built.init.value);
+
+function settingValue(s) {
+  const input = launch.built.inputs.get(s.name);
+  if (!input) return s.default;
+  if (s.kind === "bool") return input.checked;
+  if (s.kind === "int") return input.value.trim() === "" ? NaN : Number(input.value);
+  if (s.kind === "float") return input.value.trim() === "" ? NaN : Number(input.value);
+  return input.value;
+}
+const same = (a, b) => (typeof a === "number" && typeof b === "number") ? Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(b)) : a === b;
+function changedSettings() {
+  const t = launchTree();
+  const out = {};
+  for (const s of t ? t.settings : []) {
+    const v = settingValue(s);
+    if (!same(v, s.default)) out[s.name] = v;
+  }
+  return out;
+}
+/* A float as Python's str() writes it, so the preview reads exactly as the command does: 3e-05, 1.0. */
+function pyFloat(v) {
+  if (v !== 0 && (Math.abs(v) < 1e-4 || Math.abs(v) >= 1e16)) {
+    return v.toExponential().replace(/e([+-])(\d)$/, "e$10$2");
+  }
+  return Number.isInteger(v) ? v.toFixed(1) : String(v);
+}
+const flagOf = (s, v) => s.kind === "bool" ? [v ? s.flag : "--no-" + s.flag.slice(2)]
+                                           : [s.flag, s.kind === "float" ? pyFloat(v) : String(v)];
+
+function commandPreview() {
+  const f = launch.built;
+  const t = launchTree();
+  const parts = ["train_rl.py", f.init.value, "--actors", f.actors.value, "--out", `runs/${f.name.value.trim()}`];
+  if (f.env.value === "sim") parts.push("--env", "sim", "--sim-hardness", f.hardness.value);
+  const changed = changedSettings();
+  for (const s of t ? t.settings : []) if (s.name in changed) parts.push(...flagOf(s, changed[s.name]));
+  if (f.extra.value.trim()) parts.push(f.extra.value.trim());
+  return parts.join(" ");
+}
+
+function estimate() {
+  const f = launch.built;
+  const t = launchTree();
+  const steps = f.steps ? Number(f.steps.value) : NaN;
+  const games = parseInt(f.actors.value, 10);
+  const speed = t && t.speeds[f.env.value];
+  const limitMin = Number(f.limit.value);
+  if (!(steps > 0)) return "";
+  const parts = [];
+  let est = null;
+  if (speed && games > 0) {
+    est = steps / (speed.per_game * games);
+    parts.push(`${fmtCompact(steps)} steps take about ${fmtDuration(est)} at ~${fmtValue(speed.per_game * games)} steps/s ` +
+               `(${speed.run} went ${fmtValue(speed.per_game)} a second per game)`);
+  } else {
+    parts.push(`${fmtCompact(steps)} steps; no earlier ${f.env.value === "sim" ? "NachtSim" : "real-game"} run here to estimate the time from`);
+  }
+  if (limitMin > 0) {
+    const ends = est == null ? limitMin * 60 : Math.min(est, limitMin * 60);
+    const when = new Date(Date.now() + ends * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    parts.push(est != null && est < limitMin * 60 ? `the steps run out before the ${fmtDuration(limitMin * 60)} limit, around ${when}`
+                                                  : `it stops gracefully after ${fmtDuration(limitMin * 60)}, around ${when}`);
+  } else if (est != null) {
+    parts.push(`done around ${new Date(Date.now() + est * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+  }
+  return parts.join("; ") + ".";
+}
+
+function readiness() {
+  const t = launchTree();
+  const f = launch.built;
+  if (!t) return ["serious", "!!", "No checkout here can start a run.", false];
+  const actors = parseInt(f.actors.value, 10);
+  if (!(actors >= 1 && actors <= 16)) return ["warning", "!", "Between 1 and 16 games.", false];
+  if (!f.name.value.trim()) return ["warning", "!", "The run needs a name.", false];
+  for (const s of t.settings) {
+    const v = settingValue(s);
+    if ((s.kind === "int" && !Number.isInteger(v)) || (s.kind === "float" && !Number.isFinite(v)) || (s.kind === "str" && !v)) {
+      return ["warning", "!", `${settingLabel(s)} needs ${s.kind === "int" ? "a whole number" : s.kind === "float" ? "a number" : "a value"}.`, false];
+    }
+  }
+  if (f.env.value === "sim" || /(^|\s)--env[ =]sim(\s|$)/.test(f.extra.value)) return ["good", "OK", "A NachtSim run: no games needed.", true];
+  if (!t.fleet) return ["serious", "!!", `${t.label} has no fleet yet: scripts/instances.py up --n ${actors}`, false];
+  if (t.busy.length) return ["warning", "!", `${t.busy[0]} is already playing this fleet. Stop it first.`, false];
+  if (t.fleet.running < actors) {
+    return ["serious", "!!", `${t.fleet.running} of the fleet's ${t.fleet.n} games are running and this run needs ${actors}: ` +
+      `scripts/instances.py up --n ${Math.max(actors, t.fleet.n)}`, false];
+  }
+  return ["good", "OK", `${t.fleet.running} of ${t.fleet.n} games running. Ready.`, true];
+}
+
+function refreshLauncher() {
+  const f = launch.built;
+  const t = launchTree();
+  const [level, icon, text, ok] = readiness();
+  f.state.className = `state ${level}`;
+  mount(f.state, [el("span", { class: "icon", text: icon }), document.createTextNode(text)]);
+  f.start.disabled = !ok || launch.busy;
+  f.estimate.textContent = estimate();
+  f.hardnessField.hidden = f.env.value !== "sim";
+  for (const b of f.envChips) b.setAttribute("aria-pressed", String(b.dataset.env === f.env.value));
+  for (const b of f.presets) b.setAttribute("aria-pressed", String(Boolean(f.steps) && Number(b.dataset.steps) === Number(f.steps.value)));
+  let changed = 0;
+  for (const s of t ? t.settings : []) {
+    const row = f.rows.get(s.name);
+    if (!row) continue;
+    const differs = !same(settingValue(s), s.default);
+    if (differs && s.name !== "total_steps") changed += 1;
+    row.classList.toggle("changed", differs);
+    row.querySelector(".default").textContent = differs ? `default ${s.kind === "bool" ? (s.default ? "on" : "off") : s.default}` : "";
+  }
+  f.summary.textContent = `More settings${changed ? ` · ${changed} changed from the code's defaults` : ""}`;
+  const cp = chosenCheckpoint();
+  f.fromRun.hidden = !(cp && cp.config);
+  f.fromRun.textContent = cp && cp.config ? `Use ${cp.run}'s settings` : "";
+  f.command.textContent = commandPreview();
+}
+
+function setSetting(s, value) {
+  const input = launch.built.inputs.get(s.name);
+  if (!input) return;
+  if (s.kind === "bool") input.checked = Boolean(value);
+  else input.value = String(value);
+}
+
+/* The settings a checkpoint suggests: its run's config for an RL checkpoint, the code's defaults otherwise. Only
+   settings the reader has not touched follow; `all` resets those too. */
+function applySettings(source, all = false) {
+  const t = launchTree();
+  for (const s of t ? t.settings : []) {
+    const input = launch.built.inputs.get(s.name);
+    if (!input || (input.dataset.touched && !all)) continue;
+    const value = source && s.name in source ? source[s.name] : s.default;
+    setSetting(s, value);
+    if (all) delete input.dataset.touched;
+  }
+  if (source && typeof source.n_actors === "number" && !launch.built.actors.dataset.touched) launch.built.actors.value = String(source.n_actors);
+}
+
+function settingInput(s) {
+  const f = launch.built;
+  const touch = (e) => { e.target.dataset.touched = "1"; refreshLauncher(); };
+  let input;
+  if (s.kind === "bool") input = el("input", { type: "checkbox", onchange: touch });
+  else if (s.kind === "int" || s.kind === "float") input = el("input", { type: "number", step: "any", oninput: touch });
+  else input = el("input", { type: "text", spellcheck: "false", oninput: touch });
+  f.inputs.set(s.name, input);
+  return input;
+}
+
+function settingRow(s) {
+  const input = settingInput(s);
+  const row = el("label", { class: "setting" + (s.kind === "bool" ? " toggle" : "") }, [
+    el("span", { class: "name" }, [document.createTextNode(settingLabel(s)), el("code", { text: s.flag })]),
+    input,
+    el("span", { class: "hint", text: settingHint(s) }),
+    el("span", { class: "default" }),
+  ]);
+  launch.built.rows.set(s.name, row);
+  return row;
+}
+
+function buildSettings() {
+  const f = launch.built;
+  const t = launchTree();
+  f.inputs = new Map();
+  f.rows = new Map();
+  const steps = t && t.settings.find((s) => s.name === "total_steps");
+  if (steps) {
+    f.steps = settingInput(steps);
+    f.rows.set("total_steps", f.stepsRow);
+    f.stepsRow.replaceChildren(el("span", { class: "name" }, [document.createTextNode("Steps"), el("code", { text: steps.flag })]),
+      f.steps, el("span", { class: "default" }));
+  }
+  const group = (key, title) => {
+    const items = (t ? t.settings : []).filter((s) => s.group === key);
+    return items.length ? el("fieldset", { class: "settings-group" }, [el("legend", { text: title }), el("div", { class: "settings-grid" }, items.map(settingRow))]) : null;
+  };
+  mount(f.settingsBody, [
+    group("learning", "Learning"),
+    group("run", "The run"),
+    el("div", { class: "launch-row" }, [
+      el("button", { class: "chip", type: "button", onclick: () => { applySettings(null, true); refreshLauncher(); } },
+        [document.createTextNode("Code defaults")]),
+      f.fromRun,
+    ]),
+  ]);
+  f.settingsKey = t ? t.label + ":" + t.settings.map((s) => s.name).join() : "";
+}
+
+function buildLauncher() {
+  const f = {};
+  launch.built = f;
+  const field = (label, input, cls = "") => el("label", { class: "field " + cls }, [el("span", { text: label }), input]);
+  const refresh = () => refreshLauncher();
+  f.tree = el("select", { onchange: () => { f.name.dataset.touched = ""; fillLauncher(true); } });
+  f.init = el("select", { onchange: () => { applySettings(chosenCheckpoint()?.config); refreshLauncher(); } });
+  f.actors = el("input", { type: "number", min: "1", max: "16", oninput: (e) => { e.target.dataset.touched = "1"; refresh(); } });
+  f.name = el("input", { type: "text", spellcheck: "false", oninput: () => { f.name.dataset.touched = "1"; refresh(); } });
+  f.env = el("input", { type: "hidden", value: "real" });
+  f.envChips = [["real", "Real games"], ["sim", "NachtSim rehearsal"]].map(([env, label]) =>
+    el("button", { class: "chip seg", type: "button", "data-env": env, onclick: () => { f.env.value = env; refresh(); } },
+      [document.createTextNode(label)]));
+  f.hardness = el("input", { type: "number", min: "0", max: "1", step: "0.05", value: "0.5", oninput: refresh });
+  f.hardnessField = field("Sim hardness (0 to 1)", f.hardness);
+  f.limit = el("select", { onchange: refresh }, TIME_LIMITS.map(([m, label]) => el("option", { value: String(m), text: label })));
+  f.stepsRow = el("label", { class: "field" });
+  f.presets = STEP_PRESETS.map(([n, label]) => el("button", { class: "chip seg", type: "button", "data-steps": String(n),
+    onclick: () => { f.steps.value = String(n); f.steps.dataset.touched = "1"; refresh(); } }, [document.createTextNode(label)]));
+  f.estimate = el("p", { class: "estimate" });
+  f.extra = el("input", { type: "text", spellcheck: "false", placeholder: "anything else train_rl.py takes", oninput: refresh });
+  f.summary = el("summary", { text: "More settings" });
+  f.settingsBody = el("div", { class: "settings" });
+  f.fromRun = el("button", { class: "chip", type: "button", onclick: () => { applySettings(chosenCheckpoint()?.config, true); refresh(); } });
+  f.command = el("code", { class: "command" });
+  f.state = el("span", { class: "state" });
+  f.start = el("button", { class: "chip primary", onclick: startRun }, [el("span", { class: "key" }), document.createTextNode("Start run")]);
+  f.msg = el("div", { class: "launch-msg", role: "status" });
+  f.tail = el("pre", { class: "log", hidden: "" });
+  mount(document.getElementById("launcher"), [
+    el("div", { class: "title", text: "Start a run" }),
+    el("div", { class: "fields" }, [
+      field("Checkout", f.tree), field("Start from", f.init, "wide"), field("Name", f.name),
+    ]),
+    el("div", { class: "launch-row" }, [el("span", { class: "caption", text: "Plays" }), ...f.envChips, f.env]),
+    el("div", { class: "fields" }, [field("Games", f.actors), f.hardnessField]),
+    el("div", { class: "subhead", text: "How long it runs" }),
+    el("div", { class: "fields" }, [f.stepsRow, field("Stop after", f.limit)]),
+    el("div", { class: "launch-row" }, [el("span", { class: "caption", text: "Steps" }), ...f.presets]),
+    f.estimate,
+    el("details", { class: "more" }, [f.summary, f.settingsBody]),
+    el("div", { class: "fields" }, [field("Extra command-line options (optional)", f.extra, "wide")]),
+    el("div", { class: "preview" }, [el("span", { class: "caption", text: "Runs" }), f.command]),
+    el("div", { class: "launch-row" }, [f.start, f.state]),
+    f.msg, f.tail,
+  ]);
+}
+
+function fillLauncher(treeChanged = false) {
+  const f = launch.built;
+  const o = launch.options;
+  const want = f.tree.value || o.default;
+  if ([...f.tree.options].map((x) => x.value).join() !== o.trees.map((t) => t.label).join()) {
+    mount(f.tree, o.trees.map((t) => el("option", { value: t.label, text: t.label })));
+  }
+  f.tree.value = o.trees.some((t) => t.label === want) ? want : o.default;
+  const t = launchTree();
+  if (!t) return;
+  const key = t.label + ":" + t.settings.map((s) => s.name).join();
+  const rebuilt = f.settingsKey !== key;
+  if (rebuilt) buildSettings();
+  const keep = treeChanged ? null : f.init.value;
+  const cpKey = t.checkpoints.map((c) => c.path).join();
+  if (f.init.dataset.key !== cpKey) {
+    mount(f.init, t.checkpoints.map((c) => el("option", { value: c.path,
+      text: `${c.run} · ${c.kind === "RL" ? "RL checkpoint" : "BC policy"} · ${fmtAgo(Date.now() / 1000 - c.updated)}` })));
+    f.init.dataset.key = cpKey;
+  }
+  if (keep && t.checkpoints.some((c) => c.path === keep)) f.init.value = keep;
+  if (rebuilt || treeChanged) applySettings(chosenCheckpoint()?.config);
+  if (!f.actors.value || (treeChanged && !f.actors.dataset.touched)) f.actors.value = String(t.fleet ? t.fleet.n : 4);
+  if (!f.name.dataset.touched) f.name.value = t.next;
+  refreshLauncher();
+}
+
+async function startRun() {
+  const f = launch.built;
+  launch.busy = true;
+  refreshLauncher();
+  f.msg.className = "launch-msg";
+  f.msg.textContent = "Starting…";
+  f.tail.hidden = true;
+  const answer = await command("/api/start", {
+    tree: f.tree.value, init: f.init.value, name: f.name.value.trim(), actors: parseInt(f.actors.value, 10),
+    env: f.env.value, sim_hardness: f.env.value === "sim" ? Number(f.hardness.value) : null,
+    settings: changedSettings(), stop_after_min: Number(f.limit.value), extra: f.extra.value });
+  launch.busy = false;
+  if (answer.ok) {
+    const limit = answer.stop_at ? ` It stops itself around ${new Date(answer.stop_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : "";
+    f.msg.textContent = `Started ${answer.run} (pid ${answer.pid}).${limit} Its output goes to ${answer.log}.`;
+    f.name.dataset.touched = "";
+  } else {
+    f.msg.className = "launch-msg error";
+    f.msg.textContent = answer.error || "It did not start.";
+    if (answer.tail && answer.tail.length) { f.tail.textContent = answer.tail.join("\n"); f.tail.hidden = false; }
+  }
+  await Promise.all([pollTrainers(), pollLaunch()]);
+}
+
+async function pollLaunch() {
+  let options;
+  try {
+    options = await api("/api/launch");
+  } catch (e) { connection(false); return; }
+  launch.options = options;
+  if (!options.trees.length) {
+    launch.built = null;
+    mount(document.getElementById("launcher"), [el("div", { class: "title", text: "Start a run" }),
+      el("p", { class: "empty-note", text: "No checkout has scripts/train_rl.py and a checkpoint to start from." })]);
+    return;
+  }
+  if (!launch.built) buildLauncher();
+  fillLauncher();
+}
+
+/* -- runs ------------------------------------------------------------------ */
+async function pollRuns() {
+  let next;
+  try {
+    next = await api("/api/runs");
+  } catch (e) { connection(false); return; }
+  const key = next.runs.map((r) => `${r.name}:${r.updated}:${r.status}:${r.rows}`).join("|");
+  if (key !== live.runsKey) {
+    live.runsKey = key;
+    refreshData(next);  // the page's own renderer; what the reader chose stays chosen
+  }
+}
+
+/* -- clock ----------------------------------------------------------------- */
+document.getElementById("footer").textContent =
+  "Live from scripts/supervise.py on this machine — reads runs/*/metrics.jsonl in every checkout, " +
+  "watches the games' X servers read-only, and makes no request to anywhere else.";
+live.runsKey = DATA.runs.map((r) => `${r.name}:${r.updated}:${r.status}:${r.rows}`).join("|");
+
+const every = (ms, fn) => {
+  let timer = null;
+  const tick = async () => {
+    if (!document.hidden) await fn();
+    timer = setTimeout(tick, ms);
+  };
+  tick();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) { clearTimeout(timer); tick(); }
+  });
+};
+every(2000, pollGames);
+every(3000, pollMachine);
+every(3000, pollFleet);
+every(5000, pollTrainers);
+every(5000, pollLaunch);
+every(20000, pollRuns);
+</script>

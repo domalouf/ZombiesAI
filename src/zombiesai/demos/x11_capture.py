@@ -500,19 +500,34 @@ class X11Grabber:
                 self._attach_shm()
             self.backend = "xshm" if self.image else "xgetimage"
 
+    def grab_bgrx(self) -> np.ndarray:
+        """The region exactly as X hands it over: (H, W, 4) BGRX, unconverted and uncopied -- a view of the
+        shared segment, overwritten by the next grab. For passing frames straight on (realgame/viewer.py pipes
+        them to a player); anything that keeps or reads a frame wants `grab()`. MIT-SHM only."""
+        if self.image is None:
+            raise X11Error("grab_bgrx needs MIT-SHM")
+        width, height = self.size
+        raw, stride = self._shm_read()
+        return raw.reshape(height, stride // 4, 4)[:, :width]
+
+    def _shm_read(self) -> tuple[np.ndarray, int]:
+        x, (left, top, _, height) = self.x, self.region
+        clear_errors()
+        ok = x.shm_get_image(self.display, self.window, self.image, left, top, ALL_PLANES)
+        # The window can go away between ticks -- the game crashed, or someone closed it. That has to
+        # arrive as an exception the env loop can turn into a watchdog incident, not as process death.
+        check_errors(x, self.display, f"grabbing window 0x{self.window:x}")
+        if not ok:
+            raise X11Error("XShmGetImage failed; is the window still mapped?")
+        stride = self.image.contents.bytes_per_line
+        return np.frombuffer(self._buffer, dtype=np.uint8, count=stride * height), stride
+
     def _read(self) -> np.ndarray:
         x, (left, top, width, height) = self.x, self.region
-        clear_errors()
         if self.image is not None:
-            ok = x.shm_get_image(self.display, self.window, self.image, left, top, ALL_PLANES)
-            # The window can go away between ticks -- the game crashed, or someone closed it. That has to
-            # arrive as an exception the env loop can turn into a watchdog incident, not as process death.
-            check_errors(x, self.display, f"grabbing window 0x{self.window:x}")
-            if not ok:
-                raise X11Error("XShmGetImage failed; is the window still mapped?")
-            stride = self.image.contents.bytes_per_line
-            raw = np.frombuffer(self._buffer, dtype=np.uint8, count=stride * height)
+            raw, stride = self._shm_read()
         else:
+            clear_errors()
             image = x.get_image(self.display, self.window, left, top, width, height, ALL_PLANES, ZPIXMAP)
             check_errors(x, self.display, f"grabbing window 0x{self.window:x}")
             if not image:

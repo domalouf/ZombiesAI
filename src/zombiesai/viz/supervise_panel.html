@@ -1,0 +1,156 @@
+<style>
+  /* The live server's additions (viz/supervise.py), in the Training Room's own tokens. */
+  .live-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+  .live-bar .caption { font-size: 13.5px; color: var(--chalk-dim); margin-right: 2px; }
+  .live-bar .spacer { flex: 1 1 auto; }
+  .live-bar select {
+    font: 600 13.5px/1 var(--ui);
+    color: var(--chalk);
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 6px 8px;
+  }
+  .chip[disabled] { opacity: 0.45; cursor: default; }
+  .chip.primary[aria-pressed="true"] { background: var(--floor); border-color: var(--good); }
+  .chip.primary[aria-pressed="true"] .key { color: var(--good); }
+
+  .games { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+  .game { display: grid; gap: 10px; align-content: start; }
+  .thumb {
+    display: block;
+    width: 100%;
+    height: auto;  /* the width/height attributes only reserve the ratio before the first frame loads */
+    aspect-ratio: 16 / 9;
+    object-fit: cover;
+    background: var(--floor);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+  }
+  .thumb.off { display: grid; place-items: center; color: var(--chalk-faint); font-size: 13px; }
+  .game-head { display: flex; align-items: center; gap: 10px; }
+  .game-head .name { font: 700 17px/1 var(--ui); }
+  .game-head .chip { margin-left: auto; }
+  .state { font: 600 12.5px/1 var(--ui); display: inline-flex; gap: 5px; align-items: baseline; }
+  .state .icon { font: 700 12px var(--mono); }
+  .state.good .icon { color: var(--good); }
+  .state.warning .icon { color: var(--warning); }
+  .state.serious .icon { color: var(--serious); }
+  .state.info .icon { color: var(--chalk-dim); }
+  .game-stats { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; align-items: baseline; }
+  .game-stats .value { font: 600 30px/1 var(--ui); }
+  .game-stats .label { font-size: 13px; color: var(--chalk-dim); }
+  .game-stats .detail { grid-column: 1 / -1; font-size: 12.5px; color: var(--chalk-faint); }
+
+  .trainers { display: grid; gap: 14px; }
+  .trainer { display: grid; gap: 8px; }
+  .trainer .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+  .trainer .run { font: 700 17px/1.2 var(--ui); }
+  .trainer .facts { font-size: 13px; color: var(--chalk-dim); }
+  .trainer .facts code { font-size: 12px; }
+  .log {
+    margin: 0;
+    max-height: 17.5em;
+    overflow: auto;
+    padding: 10px 12px;
+    background: var(--ground);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    font: 500 12px/1.45 var(--mono);
+    color: var(--chalk-dim);
+    white-space: pre;
+  }
+  .trainer .top .actions { margin-left: auto; display: flex; gap: 8px; }
+  .chip.danger { border-color: var(--critical); color: var(--chalk); }
+  .chip.danger:hover { background: var(--floor); }
+
+  .launcher { display: grid; gap: 12px; }
+  .launcher .title { font: 700 15px/1.2 var(--ui); }
+  .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px 14px; }
+  .fields .wide { grid-column: span 2; }
+  @media (max-width: 560px) { .fields .wide { grid-column: auto; } }
+  .field { display: grid; gap: 4px; }
+  .field span { font-size: 12.5px; color: var(--chalk-dim); }
+  .field select, .field input {
+    width: 100%;
+    font: 500 14px/1.2 var(--ui);
+    color: var(--chalk);
+    background: var(--ground);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 7px 9px;
+  }
+  .field input::placeholder { color: var(--chalk-faint); }
+  .launch-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+  .launch-row .state { font-size: 13.5px; }
+  .launch-msg { font-size: 13.5px; color: var(--chalk-dim); }
+  .launch-msg.error { color: var(--serious); }
+  .machine { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1px;
+             background: var(--line); border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .mtile { background: var(--panel); padding: 12px 14px; display: grid; gap: 2px; align-content: start; }
+  .mtile .label { font-size: 13px; color: var(--chalk-dim); }
+  .mtile .value { font: 600 26px/1.1 var(--ui); }
+  .mtile .sub { font-size: 12px; color: var(--chalk-faint); }
+  .mtile .state { font-size: 12.5px; margin-top: 2px; }
+  .mtile .state:empty { display: none; }
+  .mtile.warning { box-shadow: inset 0 3px 0 var(--warning); }
+  .mtile.serious { box-shadow: inset 0 3px 0 var(--serious); }
+  .mtile.critical { box-shadow: inset 0 3px 0 var(--critical); }
+  .state.critical .icon { color: var(--critical); }
+  .fleet-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 10px; }
+  .fleet-bar .caption { font-size: 13.5px; color: var(--chalk-dim); }
+  .fleet-bar .count { font: 600 14px var(--ui); }
+  .fleet-bar input { width: 64px; font: 600 13.5px/1 var(--ui); color: var(--chalk); background: var(--panel);
+                     border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px; }
+  .fleet-bar .op { font-size: 13px; color: var(--chalk-dim); }
+  .launcher .caption { font-size: 13px; color: var(--chalk-dim); margin-right: 2px; }
+  .launcher .subhead { font: 700 12px/1.2 var(--ui); letter-spacing: 0.11em; text-transform: uppercase; color: var(--chalk-dim); margin-top: 4px; }
+  .launcher .estimate { margin: 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 100ch; }
+  .launcher details.more { border-top: 1px solid var(--line); padding-top: 10px; }
+  .launcher details.more summary { cursor: pointer; font: 600 14px var(--ui); color: var(--chalk); }
+  .launcher .settings { display: grid; gap: 12px; margin-top: 12px; }
+  .settings-group { border: 1px solid var(--line); border-radius: 3px; padding: 10px 12px 12px; margin: 0; }
+  .settings-group legend { font: 700 12px var(--ui); letter-spacing: 0.1em; text-transform: uppercase; color: var(--chalk-dim); padding: 0 6px; }
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px 16px; }
+  .setting { display: grid; gap: 3px; align-content: start; }
+  .setting .name { font-size: 13px; color: var(--chalk); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .setting .name code { font-size: 11px; color: var(--chalk-faint); }
+  .setting input[type="number"], .setting input[type="text"] {
+    width: 100%; font: 500 14px/1.2 var(--ui); color: var(--chalk); background: var(--ground);
+    border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px;
+  }
+  .setting input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; accent-color: var(--good); }
+  .setting .hint { font-size: 12px; color: var(--chalk-faint); }
+  .setting .default { font: 500 11px var(--mono); color: var(--amber); }
+  .setting.changed input { border-color: var(--amber); }
+  .field .default { font: 500 11px var(--mono); color: var(--amber); }
+  .field.changed input { border-color: var(--amber); }
+  .field span code { font-size: 11px; color: var(--chalk-faint); margin-left: 8px; }
+  .preview { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .preview .command { white-space: pre-wrap; word-break: break-all; }
+  .conn { font: 500 12px var(--mono); color: var(--chalk-faint); }
+  .conn.lost { color: var(--critical); }
+
+</style>
+
+<section aria-labelledby="machine-title">
+  <h2 id="machine-title">The machine</h2>
+  <p class="specs" id="system-specs"></p>
+  <div class="machine" id="machine"></div>
+  <div id="system" style="margin-top: 14px"><p class="empty-note">Reading the machine…</p></div>
+</section>
+
+<section aria-labelledby="games-title">
+  <h2 id="games-title">The games</h2>
+  <div id="fleet-bars"></div>
+  <div class="live-bar" id="viewer-bar"></div>
+  <div class="games" id="games"></div>
+</section>
+
+<section aria-labelledby="trainers-title">
+  <h2 id="trainers-title">Training now</h2>
+  <div class="trainers" id="trainers"></div>
+  <div class="card launcher" id="launcher" style="margin-top: 14px"></div>
+</section>
+
+<h2>Every run</h2>

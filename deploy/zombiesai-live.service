@@ -1,0 +1,23 @@
+# Keep domalouf.com/zombies/training/ live: this PC pushes its machine and training runs to the site every
+# 5 s (scripts/publish_live.py). A user unit, so it runs while you are logged in -- which is when training runs.
+#
+#   cp deploy/zombiesai-live.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now zombiesai-live
+#   journalctl --user -u zombiesai-live -f        # "pushing to zombies-live:", or why it is not
+#
+# ZOMBIES_LIVE_DEST is the ssh alias README.md's "Live on the site" sets up, with its restricted key.
+
+[Unit]
+Description=ZombiesAI: keep domalouf.com/zombies/training/ live
+After=network-online.target
+
+[Service]
+Environment=ZOMBIES_LIVE_DEST=zombies-live:
+WorkingDirectory=%h/Projects/ZombiesAI
+ExecStart=/usr/bin/uv run --no-sync python -u scripts/publish_live.py
+Restart=always
+RestartSec=30
+Nice=10
+
+[Install]
+WantedBy=default.target

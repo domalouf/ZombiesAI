@@ -1,0 +1,102 @@
+<script>
+/* Live on the site: the gaming PC pushes live/machine.json every 5 s and live/runs.json every minute
+   (scripts/publish_live.py); this page reads them from its own site and nowhere else. When the PC stops
+   pushing -- asleep, off, not publishing -- the page says so and keeps the last numbers it had. */
+sysview.opts.full = false;  // a public process list is names and load: no ids, users or command lines
+const pub = { at: null, runsAt: null, failed: false };
+const OFFLINE_AFTER_S = 30;
+
+async function liveJSON(name) {
+  const response = await fetch(`live/${name}`, { cache: "no-store" });
+  if (!response.ok) throw new Error(`${name}: ${response.status}`);
+  return response.json();
+}
+
+function liveStatus() {
+  const node = document.getElementById("live-status");
+  const age = pub.at == null ? null : Math.max(0, Date.now() / 1000 - pub.at);
+  let verdict, text;
+  if (age == null) {
+    verdict = { level: "warning", text: "! offline" };
+    text = "The PC is not reporting. The runs below are as they stood when this page was published.";
+  } else if (age > OFFLINE_AFTER_S) {
+    verdict = { level: "warning", text: "! offline" };
+    text = `The PC last reported ${fmtDuration(age)} ago; these are its last numbers.`;
+  } else {
+    verdict = { level: "good", text: "OK live" };
+    text = `Updated ${Math.round(age)}s ago, straight from the PC it trains on.`;
+  }
+  mount(node, [flag(verdict), document.createTextNode(text)]);
+}
+
+function nowRunCard(t) {
+  const pct = t.progress == null ? null : 100 * t.progress;
+  const facts = [
+    t.progress_text,
+    t.elapsed_s != null ? `running ${fmtDuration(t.elapsed_s)}` : null,
+    t.eta_s ? `about ${fmtDuration(t.eta_s)} left` : null,
+    t.steps_per_s ? `${fmtValue(t.steps_per_s)} steps/s` : null,
+  ].filter(Boolean).join(" · ");
+  const h = t.headline;
+  return el("article", { class: "card now-run" }, [
+    el("div", { class: "top" }, [
+      el("span", { class: "run" }, [t.color ? el("i", { style: `background:${t.color}` }) : null,
+                                     document.createTextNode(t.run || "a run just starting")]),
+      el("span", { class: "kind", text: [KIND_LABEL[t.kind] || t.kind, t.env].filter(Boolean).join(" · ") }),
+    ]),
+    pct != null ? meterRow("Progress", pct, `${pct.toFixed(0)}%`) : null,
+    h ? el("div", { class: "head" }, [
+      el("span", { class: "value", text: fmtValue(h.last) }),
+      el("span", { class: "label", text: `${h.label.toLowerCase()} · best ${fmtValue(h.best)}` + (h.trend ? ` · ${h.trend}` : "") }),
+    ]) : null,
+    el("div", { class: "facts", text: facts }),
+  ]);
+}
+
+function renderTrainingNow(training) {
+  const holder = document.getElementById("training-now");
+  mount(holder, training && training.length ? training.map(nowRunCard)
+    : [el("p", { class: "empty-note", text: "Nothing is training right now." })]);
+}
+
+async function pollLiveRuns() {
+  try {
+    refreshData(await liveJSON("runs.json"));  // the page's own renderer: what the reader chose stays chosen
+  } catch (e) { /* the machine's file says when there is a newer one; next time */ }
+}
+
+async function pollLive() {
+  let m;
+  try {
+    m = await liveJSON("machine.json");
+  } catch (e) {
+    liveStatus();
+    return;
+  }
+  pub.at = m.at;
+  sysview.history = m.history;  // the whole half hour each time: at 10 s a point it is small
+  if (m.now) {
+    if (!sysview.built) buildSystem();
+    renderSystem(m);
+  }
+  renderTrainingNow(m.training);
+  if (m.runs_at && m.runs_at !== pub.runsAt) {
+    pub.runsAt = m.runs_at;
+    await pollLiveRuns();
+  }
+  liveStatus();
+}
+
+document.getElementById("footer").textContent =
+  "Live from the gaming PC it trains on: it pushes these numbers to this site every few seconds " +
+  "(scripts/publish_live.py), and nothing on the site reaches back in.";
+(function every5s() {
+  const tick = async () => {
+    if (!document.hidden) await pollLive();
+    setTimeout(tick, 5000);
+  };
+  tick();
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) pollLive(); });
+})();
+setInterval(liveStatus, 1000);
+</script>

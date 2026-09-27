@@ -104,6 +104,9 @@ def main() -> None:
     parser.add_argument("--full-turn", action="store_true", help="also measure by turning all the way around")
     parser.add_argument("--turn-step", type=int, default=200, help="counts per step of the full turn")
     parser.add_argument("--countdown", type=int, default=5, help="seconds to click into the game first")
+    parser.add_argument("--xtest", action="store_true",
+                        help="inject into --display through XTEST instead of the uinput device: a parallel game "
+                             "instance's own X server (scripts/instances.py), no focusing by hand")
     args = parser.parse_args()
 
     if not sys.platform.startswith("linux"):
@@ -113,7 +116,16 @@ def main() -> None:
     print(f"capturing {grabber.describe()}")
 
     config = DispatchConfig(counts_per_degree=1.0)
-    device = UinputDevice(config.codes.values())
+    if args.xtest:
+        from zombiesai.realgame.xtest import XTestSink
+
+        if not args.display:
+            raise SystemExit("--xtest needs --display: the instance's X server, e.g. :60")
+        device = XTestSink(args.display)
+        device.focus(window)
+        args.countdown = 0  # the server is the game's alone: nothing to click into
+    else:
+        device = UinputDevice(config.codes.values())
     print(f"virtual device: {device.describe()}")
     dispatcher = ActionDispatcher(device, config)
     try:

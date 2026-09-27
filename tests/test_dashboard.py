@@ -191,7 +191,7 @@ def test_page_is_standalone_and_embeds_the_data(tmp_path):
     # Self-contained: fonts inlined, and nothing fetched from anywhere.
     assert "fonts.googleapis.com" not in html and "data:font/woff2;base64," in html
     assert not re.search(r"(src|href)=\"(?!#)(https?:)?//", html)
-    embedded = json.loads(re.search(r"const DATA = (\{.*?\});\n", html, re.S).group(1))
+    embedded = json.loads(re.search(r"(?:const|let) DATA = (\{.*?\});\n", html, re.S).group(1))
     assert embedded["runs"][0]["name"] == "ppo-nacht-state-s1"
     assert embedded["gates"]["max_term_share"]["limit"] == 0.60
 
@@ -208,7 +208,7 @@ def test_embedded_data_cannot_close_the_script_tag(tmp_path):
     hostile = "</script><script>alert(1)</script>"
     write_run(tmp_path, "<img src=x onerror=alert(1)>", ppo_rows(5), {"env": "nacht-state", "note": hostile})
     html = write_dashboard_html(build_dashboard(tmp_path), tmp_path / "d.html").read_text()
-    blob = re.search(r"const DATA = (\{.*?\});\n", html, re.S).group(1)
+    blob = re.search(r"(?:const|let) DATA = (\{.*?\});\n", html, re.S).group(1)
     assert "</script>" not in blob and "<\\/script>" in blob
     data = json.loads(blob)  # \/ is a legal JSON escape, so the value survives intact
     assert data["runs"][0]["config"]["note"] == hostile
@@ -255,5 +255,5 @@ def test_site_build_is_a_static_directory_with_no_external_request(tmp_path):
     assert not re.search(r'(src|href)="(?!#)(https?:)?//', html)  # nothing fetched from anywhere
     assert '<meta name="description" content="Learning curves for an RL agent.">' in html
     assert 'http-equiv="refresh"' not in html  # a published page is a snapshot, not a poller
-    data = json.loads(re.search(r"const DATA = (\{.*?\});\n", html, re.S).group(1))
+    data = json.loads(re.search(r"(?:const|let) DATA = (\{.*?\});\n", html, re.S).group(1))
     assert data["intro"] == "How training is going." and data["links"][0] == ["← domalouf.com", "/"]

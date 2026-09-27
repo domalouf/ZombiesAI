@@ -1,0 +1,331 @@
+<style>
+  /* The machine (viz/system.py): btop's panels, in the room's own tokens. */
+  .specs { margin: 0 0 12px; display: flex; flex-wrap: wrap; gap: 4px 18px; font-size: 13.5px; color: var(--chalk-dim); }
+  .specs b { color: var(--chalk); font-weight: 700; }
+  .machine-tiles { margin-bottom: 14px; }
+  .machine-tiles .value { display: flex; align-items: baseline; gap: 8px; }
+  .machine-tiles .flag { font: 700 12px var(--mono); }
+  .flag.good { color: var(--good); }
+  .flag.warning { color: var(--warning); }
+  .flag.serious { color: var(--serious); }
+  .flag.critical { color: var(--critical); }
+  .chart .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--chalk-dim); }
+  .chart .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .chart .legend i { display: block; width: 12px; height: 3px; border-radius: 2px; }
+  .chart .legend b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .machine-charts { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; }
+  .machine-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; margin-top: 14px; }
+  .machine-cards .card { display: grid; gap: 8px; align-content: start; }
+  .machine-cards .title { font: 700 15px/1.2 var(--ui); display: flex; gap: 10px; align-items: baseline; }
+  .machine-cards .title .aside { margin-left: auto; font: 500 12px var(--mono); color: var(--chalk-faint); }
+  .meter-row { display: grid; grid-template-columns: minmax(64px, auto) minmax(60px, 1fr) auto; gap: 10px; align-items: center; font-size: 13px; }
+  .meter-row .name { color: var(--chalk-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meter-row .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+  .meter-row .num small { color: var(--chalk-faint); font-size: 12px; margin-left: 6px; }
+  .meter { height: 8px; background: var(--floor); border-radius: 2px; overflow: hidden; }
+  .meter > i { display: block; height: 100%; border-radius: 0 2px 2px 0; background: var(--fill, #3987e5); }
+  .cores { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: 6px 14px; }
+  .cores .meter-row { grid-template-columns: 22px minmax(30px, 1fr) auto; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 3px 14px; font-size: 13px; margin: 0; }
+  .kv dt { color: var(--chalk-dim); }
+  .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .machine-procs { margin-top: 14px; }
+  .machine-procs td.cmd { text-align: left; max-width: 46ch; overflow: hidden; text-overflow: ellipsis; color: var(--chalk-dim); font: 500 12px var(--mono); }
+  .machine-procs th.cmd { text-align: left; }
+</style>
+<script>
+/* The machine, every 2 s, from /api/system (viz/system.py): what btop shows, beside the training it is running.
+   The server samples whether or not anyone looks and keeps half an hour, so this asks only for what it lacks. */
+// opts.tiles: the headline tiles (the local page has its own, /api/machine's); opts.full: every process column
+// (the public page gets names and load only -- a command line carries paths).
+const sysview = { history: [], since: 0, built: false, nodes: {}, charts: [], opts: { tiles: true, full: true } };
+// Two series to a chart, always the first validated pair: the machine's side in slot 0, the GPU's in slot 1.
+const SLOT0 = "#3987e5", SLOT1 = "#d95926";
+
+const GiB = 2 ** 30;
+function fmtBytes(b) {
+  if (b == null) return "--";
+  if (b >= GiB) return (b / GiB).toFixed(b >= 100 * GiB ? 0 : 1) + " GiB";
+  if (b >= 2 ** 20) return (b / 2 ** 20).toFixed(0) + " MiB";
+  return (b / 1024).toFixed(0) + " KiB";
+}
+const fmtRateTick = (b) => b >= 2 ** 20 ? +(b / 2 ** 20).toFixed(1) + "M" : b >= 1024 ? Math.round(b / 1024) + "K" : Math.round(b) + "";
+function fmtRate(b) {
+  if (b == null) return "--";
+  if (b >= 2 ** 20) return (b / 2 ** 20).toFixed(b >= 100 * 2 ** 20 ? 0 : 1) + " MiB/s";
+  if (b >= 1024) return (b / 1024).toFixed(0) + " KiB/s";
+  return Math.round(b) + " B/s";
+}
+const fmtPct = (v) => v == null ? "--" : (v >= 10 ? v.toFixed(0) : v.toFixed(1)) + "%";
+const fmtC = (v) => v == null ? "--" : v.toFixed(0) + "°C";
+const fmtClock = (t) => new Date(t * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+/* A temperature's verdict against the part's limits: an icon and a word, never the colour alone. */
+function heat(kind, value, limits) {
+  const lim = limits && limits[kind];
+  if (!lim || value == null) return null;
+  if (value >= lim[1]) return { level: "critical", text: "X hot" };
+  if (value >= lim[0]) return { level: "warning", text: "! warm" };
+  return { level: "good", text: "OK" };
+}
+const flag = (v) => v ? el("span", { class: `flag ${v.level}`, text: v.text }) : null;
+
+function meterRow(name, pct, num, detail, fill) {
+  const bar = el("i", { style: `width:${Math.max(0, Math.min(100, pct || 0)).toFixed(1)}%` + (fill ? `;--fill:${fill}` : "") });
+  return el("div", { class: "meter-row" }, [
+    el("span", { class: "name", text: name, title: name }),
+    el("div", { class: "meter", role: "meter", "aria-valuemin": 0, "aria-valuemax": 100,
+                "aria-valuenow": pct == null ? null : Math.round(pct), "aria-label": name }, [bar]),
+    el("span", { class: "num" }, [document.createTextNode(num), detail ? el("small", { text: detail }) : null]),
+  ]);
+}
+
+/* -- history charts --------------------------------------------------------
+   One measure per chart, one axis, the last half hour against the clock; hover or arrow keys for any moment. */
+function SystemChart(spec) {
+  const tip = el("div", { class: "tip", role: "status", "aria-live": "polite" });
+  const legend = el("div", { class: "legend" });
+  const plot = el("div", { style: "position: relative" }, [tip]);
+  const node = el("figure", { class: "card chart" }, [
+    el("div", { class: "title", text: spec.title }), legend, plot]);
+  const height = 150, pad = { l: 50, r: 12, t: 8, b: 24 };
+  let hover = null;
+
+  function draw(points) {
+    mount(legend, spec.series.map((s) => {
+      const last = [...points].reverse().find((p) => p[s.key] != null);
+      return el("span", {}, [el("i", { style: `background:${s.color}` }), document.createTextNode(s.name),
+                             el("b", { text: last ? spec.fmt(last[s.key]) : "--" })]);
+    }));
+    plot.querySelectorAll("svg").forEach((n) => n.remove());
+    const width = Math.max(240, plot.clientWidth || 300);
+    const frame = svg("svg", { width, height, role: "img", "aria-label": spec.title });
+    plot.append(frame);
+    if (points.length < 2) {
+      frame.append(Object.assign(svg("text", { x: pad.l, y: height / 2, class: "axis" }), { textContent: "collecting…" }));
+      return;
+    }
+    const x0 = points[0].t, x1 = Math.max(points[points.length - 1].t, x0 + 1);
+    let y1 = spec.max ?? 0;
+    if (spec.max == null) for (const p of points) for (const s of spec.series) if (p[s.key] > y1) y1 = p[s.key];
+    y1 = y1 > 0 ? y1 * (spec.max == null ? 1.1 : 1) : 1;
+    const y0 = spec.min ?? 0;
+    const px = (v) => pad.l + ((v - x0) / (x1 - x0)) * (width - pad.l - pad.r);
+    const py = (v) => height - pad.b - ((v - y0) / (y1 - y0)) * (height - pad.t - pad.b);
+    for (const t of ticks(y0, y1, 3)) {
+      frame.append(svg("line", { class: "rule", x1: pad.l, x2: width - pad.r, y1: py(t), y2: py(t) }));
+      frame.append(Object.assign(svg("text", { class: "axis", x: pad.l - 8, y: py(t) + 4, "text-anchor": "end" }),
+                                 { textContent: spec.tick(t) }));
+    }
+    const span = x1 - x0, step = [60, 120, 300, 600, 900].find((s) => span / s <= 4) || 1800;
+    for (let t = Math.ceil(x0 / step) * step; t <= x1; t += step) {
+      frame.append(Object.assign(svg("text", { class: "axis", x: px(t), y: height - 7, "text-anchor": "middle" }),
+                                 { textContent: fmtClock(t) }));
+    }
+    for (const s of spec.series) {
+      let d = "", pen = "M";
+      for (const p of points) {
+        if (p[s.key] == null) { pen = "M"; continue; }  // a gap stays a gap: no line across a missing sample
+        d += `${pen}${px(p.t).toFixed(1)},${py(p[s.key]).toFixed(1)}`;
+        pen = "L";
+      }
+      frame.append(svg("path", { d, fill: "none", stroke: s.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+    }
+    const cross = svg("line", { class: "crosshair", y1: pad.t, y2: height - pad.b, opacity: 0 });
+    const hit = svg("rect", { x: 0, y: 0, width, height, fill: "transparent", tabindex: 0 });
+    frame.append(cross, hit);
+
+    function show(t) {
+      hover = t;
+      let best = 0;
+      for (let i = 1; i < points.length; i++) if (Math.abs(points[i].t - t) < Math.abs(points[best].t - t)) best = i;
+      const p = points[best];
+      cross.setAttribute("x1", px(p.t)); cross.setAttribute("x2", px(p.t)); cross.setAttribute("opacity", 1);
+      tip.replaceChildren(
+        el("div", { class: "when", text: new Date(p.t * 1000).toLocaleTimeString() }),
+        ...spec.series.map((s) => el("div", { class: "row" }, [
+          el("i", { style: `background:${s.color}` }), el("span", { text: s.name }), el("b", { text: spec.fmt(p[s.key]) })])));
+      tip.style.opacity = 1;
+      const cx = px(p.t), w = tip.offsetWidth;
+      tip.style.left = Math.max(4, cx + 14 + w > width - 4 ? cx - 14 - w : cx + 14) + "px";
+      tip.style.top = pad.t + "px";
+    }
+    function hide() { hover = null; cross.setAttribute("opacity", 0); tip.style.opacity = 0; }
+    const inverse = (cx) => x0 + ((cx - pad.l) / (width - pad.l - pad.r)) * (x1 - x0);
+    hit.addEventListener("pointermove", (e) => show(inverse(e.offsetX)));
+    hit.addEventListener("pointerleave", hide);
+    hit.addEventListener("blur", hide);
+    hit.addEventListener("focus", () => show(hover ?? x1));
+    hit.addEventListener("keydown", (e) => {
+      const stepSize = (x1 - x0) / 40;
+      if (e.key === "ArrowRight") { show(Math.min(x1, (hover ?? x1) + stepSize)); e.preventDefault(); }
+      else if (e.key === "ArrowLeft") { show(Math.max(x0, (hover ?? x1) - stepSize)); e.preventDefault(); }
+      else if (e.key === "Escape") hide();
+    });
+    if (hover != null) show(Math.min(x1, Math.max(x0, hover)));  // a new sample keeps the reader's place
+  }
+  return { node, draw };
+}
+
+const SYSTEM_CHARTS = [
+  { title: "Load, %", max: 100, fmt: fmtPct, tick: (t) => t + "%",
+    series: [{ key: "cpu", name: "CPU", color: SLOT0 }, { key: "gpu", name: "GPU", color: SLOT1 }] },
+  { title: "Temperature, °C", fmt: fmtC, tick: (t) => t + "°",
+    series: [{ key: "cpu_temp", name: "CPU", color: SLOT0 }, { key: "gpu_temp", name: "GPU", color: SLOT1 }] },
+  { title: "Memory in use, %", max: 100, fmt: fmtPct, tick: (t) => t + "%",
+    series: [{ key: "mem", name: "RAM", color: SLOT0 }, { key: "vram", name: "VRAM", color: SLOT1 }] },
+  { title: "GPU power, W", fmt: (v) => v == null ? "--" : v.toFixed(0) + " W", tick: (t) => t + "",
+    series: [{ key: "gpu_power", name: "GPU", color: SLOT1 }] },
+  { title: "Network", fmt: fmtRate, tick: fmtRateTick,
+    series: [{ key: "net_rx", name: "Down", color: SLOT0 }, { key: "net_tx", name: "Up", color: SLOT1 }] },
+  { title: "Disk", fmt: fmtRate, tick: fmtRateTick,
+    series: [{ key: "disk_read", name: "Read", color: SLOT0 }, { key: "disk_write", name: "Write", color: SLOT1 }] },
+];
+
+/* -- the panel ------------------------------------------------------------- */
+function buildSystem() {
+  const n = sysview.nodes;
+  n.tiles = el("div", { class: "tiles machine-tiles" });
+  sysview.charts = SYSTEM_CHARTS.map(SystemChart);
+  n.cores = el("div", { class: "cores" });
+  n.coresAside = el("span", { class: "aside" });
+  n.gpu = el("dl", { class: "kv" });
+  n.gpuTitle = el("span", {});
+  n.memory = el("div", { style: "display:grid;gap:8px" });
+  n.sensors = el("div", { style: "display:grid;gap:6px" });
+  n.disks = el("div", { style: "display:grid;gap:8px" });
+  n.net = el("div", { style: "display:grid;gap:8px" });
+  n.procs = el("tbody");
+  n.procsAside = el("span", { class: "aside" });
+  const card = (title, body, aside) => el("article", { class: "card" }, [
+    el("div", { class: "title" }, [typeof title === "string" ? document.createTextNode(title) : title, aside]), body]);
+  const head = sysview.opts.full ? ["PID", "Name", "User", "CPU", "Memory", "Mem %", "Threads", "Command"]
+                                 : ["Name", "CPU", "Memory", "Mem %", "Threads"];
+  mount(document.getElementById("system"), [
+    sysview.opts.tiles ? n.tiles : null,
+    el("div", { class: "machine-charts" }, sysview.charts.map((c) => c.node)),
+    el("div", { class: "machine-cards" }, [
+      card("CPU cores", n.cores, n.coresAside),
+      card(n.gpuTitle, n.gpu),
+      card("Memory", n.memory),
+      card("Temperatures", n.sensors),
+      card("Disks", n.disks),
+      card("Network", n.net),
+    ]),
+    el("div", { class: "card machine-procs", style: "display:grid;gap:8px" }, [
+      el("div", { class: "title", style: "font:700 15px/1.2 var(--ui);display:flex;gap:10px;align-items:baseline" },
+         [document.createTextNode("Busiest processes"), n.procsAside]),
+      el("div", { class: "scroll" }, [el("table", {}, [
+        el("thead", {}, [el("tr", {}, head.map((h) => el("th", { class: ["Name", "User", "Command"].includes(h) ? "cmd" : null, text: h })))]),
+        n.procs])]),
+    ]),
+  ]);
+  n.procsAside.setAttribute("style", "margin-left:auto;font:500 12px var(--mono);color:var(--chalk-faint)");
+  sysview.built = true;
+}
+
+function tile(label, value, sub, verdict) {
+  return el("div", { class: "card" }, [
+    el("span", { class: "label", text: label }),
+    el("span", { class: "value" }, [document.createTextNode(value), flag(verdict)]),
+    el("span", { class: "sub", text: sub }),
+  ]);
+}
+
+function renderSpecs(sp, now) {
+  if (!sp) return;
+  const parts = [
+    ...(sp.host ? [["", sp.host]] : []),
+    ["", `${sp.cpu || "CPU"} · ${sp.cores ?? "?"} cores / ${sp.threads ?? "?"} threads` + (sp.cpu_max_ghz ? ` · up to ${sp.cpu_max_ghz} GHz` : "")],
+    ["", `${fmtBytes(sp.ram)} RAM`],
+    ...sp.gpus.map((g) => ["", `${g.name} · ${fmtBytes(g.vram)} · driver ${g.driver}`]),
+    ...(sp.os ? [["", sp.kernel ? `${sp.os}, kernel ${sp.kernel}` : sp.os]] : []),
+  ];
+  if (now && now.uptime_s != null) parts.push(["up ", fmtDuration(now.uptime_s)]);
+  mount(document.getElementById("system-specs"), parts.map(([pre, b], i) =>
+    el("span", {}, [pre ? document.createTextNode(pre) : null, i === 0 && sp.host ? el("b", { text: b }) : document.createTextNode(b)])));
+}
+
+function renderSystem(data) {
+  const now = data.now, n = sysview.nodes, lim = now.limits;
+  renderSpecs(data.specs, now);
+  const cpu = now.cpu, mem = now.memory, gpu = now.gpus[0];
+  const disk = now.disks.reduce((a, d) => [a[0] + (d.read || 0), a[1] + (d.write || 0)], [0, 0]);
+  const net = now.net.reduce((a, d) => [a[0] + (d.rx || 0), a[1] + (d.tx || 0)], [0, 0]);
+  // The driver reports "power cap" even idling at 15 W; a reason to slow down is only news while the GPU works.
+  const slow = gpu && gpu.util >= 20 && gpu.slowdown.length ? ` · slowing: ${gpu.slowdown.join(", ")}` : "";
+  if (sysview.opts.tiles) mount(n.tiles, [
+    tile("CPU", fmtPct(cpu.pct), `${cpu.freq ?? "--"} GHz avg · load ${cpu.load.map((l) => l ?? "-").join(" ")}`),
+    tile("CPU temperature", fmtC(cpu.temp), `throttles at ${lim.cpu[1]}°C`, heat("cpu", cpu.temp, lim)),
+    gpu ? tile("GPU", fmtPct(gpu.util), `${gpu.power?.toFixed(0) ?? "--"} of ${gpu.power_limit?.toFixed(0) ?? "--"} W · ${gpu.clock ?? "--"} MHz${slow}`) : null,
+    gpu ? tile("GPU temperature", fmtC(gpu.temp), `fan ${gpu.fan ?? "--"}% · ${gpu.pstate}`, heat("gpu", gpu.temp, lim)) : null,
+    gpu ? tile("VRAM", fmtBytes(gpu.vram_used), `of ${fmtBytes(gpu.vram_total)} (${fmtPct(100 * gpu.vram_used / gpu.vram_total)})`) : null,
+    tile("RAM", fmtBytes(mem.used), `of ${fmtBytes(mem.total)} · swap ${fmtBytes(mem.swap_used)}`),
+    tile("Disk", fmtRate(disk[0] + disk[1]), `read ${fmtRate(disk[0])} · write ${fmtRate(disk[1])}`),
+    tile("Network", fmtRate(net[0]), `down · up ${fmtRate(net[1])}`),
+  ]);
+  for (const c of sysview.charts) c.draw(sysview.history);
+
+  n.coresAside.textContent = `${cpu.tasks} tasks · ${cpu.threads} threads`;
+  mount(n.cores, cpu.cores.map((pct, i) =>
+    meterRow(String(i), pct, fmtPct(pct), cpu.freqs[i] != null ? cpu.freqs[i].toFixed(1) + " GHz" : null)));
+
+  n.gpuTitle.textContent = gpu ? gpu.name.replace(/^NVIDIA /, "") : "GPU";
+  mount(n.gpu, !gpu ? [el("dt", { text: "no NVIDIA GPU answering (nvidia-smi)" })] : [
+    ["Utilisation", fmtPct(gpu.util)], ["Memory controller", fmtPct(gpu.mem_util)],
+    ["VRAM", `${fmtBytes(gpu.vram_used)} of ${fmtBytes(gpu.vram_total)}`],
+    ["Temperature", fmtC(gpu.temp)], ["Power", `${gpu.power?.toFixed(1) ?? "--"} of ${gpu.power_limit?.toFixed(0) ?? "--"} W`],
+    ["Fan", gpu.fan == null ? "--" : gpu.fan + "%"], ["Core clock", `${gpu.clock ?? "--"} MHz`],
+    ["Memory clock", `${gpu.mem_clock ?? "--"} MHz`], ["Performance state", gpu.pstate],
+    ["Slowing down for", !gpu.slowdown.length ? "nothing" : gpu.slowdown.join(", ") + (gpu.util < 20 ? " (normal when idle)" : "")],
+  ].flatMap(([k, v]) => [el("dt", { text: k }), el("dd", { text: v })]));
+
+  mount(n.memory, [
+    meterRow("Used", mem.pct, fmtBytes(mem.used), fmtPct(mem.pct)),
+    meterRow("Cache", 100 * mem.cached / mem.total, fmtBytes(mem.cached)),
+    meterRow("Available", 100 * mem.available / mem.total, fmtBytes(mem.available)),
+    mem.swap_total ? meterRow("Swap", mem.swap_pct, fmtBytes(mem.swap_used), `of ${fmtBytes(mem.swap_total)}`) : null,
+  ]);
+
+  const temps = (gpu ? [{ chip: "nvidia", label: gpu.name.replace(/^NVIDIA /, ""), kind: "gpu", value: gpu.temp }] : [])
+    .concat(now.sensors.filter((s) => !s.fan)).map((s) => {
+      // The Tctl reading is the one the CPU throttles on; the amdgpu here is the CPU's integrated graphics.
+      const kind = s.chip === "nvidia" ? "gpu" : s.kind === "cpu" || s.kind === "nvme" ? s.kind : null;
+      return el("div", { class: "meter-row", style: "grid-template-columns:minmax(0,1fr) auto auto" }, [
+        el("span", { class: "name", text: `${s.chip} · ${s.label}` }),
+        el("span", { class: "num", text: fmtC(s.value) }),
+        flag(heat(kind, s.value, lim)) || el("span", {}),
+      ]);
+    });
+  const fans = now.sensors.filter((s) => s.fan).map((s) =>
+    el("div", { class: "meter-row", style: "grid-template-columns:minmax(0,1fr) auto" }, [
+      el("span", { class: "name", text: `${s.chip} · ${s.label}` }), el("span", { class: "num", text: `${s.value} rpm` })]));
+  mount(n.sensors, temps.concat(fans));
+
+  mount(n.disks, now.mounts.map((m) => meterRow(m.mount, m.pct, `${fmtBytes(m.used)} of ${fmtBytes(m.total)}`, fmtPct(m.pct)))
+    .concat(now.disks.map((d) => el("div", { class: "meter-row", style: "grid-template-columns:max-content minmax(0,1fr)" }, [
+      el("span", { class: "name", text: d.name }),
+      el("span", { class: "num", text: `read ${fmtRate(d.read)} · write ${fmtRate(d.write)} · busy ${fmtPct(d.busy)}` })]))));
+
+  mount(n.net, now.net.length ? now.net.map((d) => el("div", { class: "meter-row", style: "grid-template-columns:max-content minmax(0,1fr)" }, [
+    el("span", { class: "name", text: d.name }),
+    el("span", { class: "num" }, [document.createTextNode(`down ${fmtRate(d.rx)} · up ${fmtRate(d.tx)}`),
+      el("small", { text: `${fmtBytes(d.rx_total)} / ${fmtBytes(d.tx_total)} since boot` })])])) :
+    [el("p", { class: "empty-note", text: "No network interface has moved a byte." })]);
+
+  n.procsAside.textContent = "100% is one whole core";
+  const full = sysview.opts.full;
+  mount(n.procs, now.procs.map((p) => el("tr", {}, [
+    full ? el("td", { text: String(p.pid) }) : null, el("td", { text: p.name, style: "text-align:left" }),
+    full ? el("td", { text: p.user, style: "text-align:left" }) : null, el("td", { text: fmtPct(p.cpu) }),
+    el("td", { text: fmtBytes(p.rss) }), el("td", { text: fmtPct(p.mem_pct) }), el("td", { text: String(p.threads) }),
+    full ? el("td", { class: "cmd", text: p.command || `[${p.name}]`, title: p.command }) : null,
+  ])));
+}
+
+let sysviewResize = null;
+window.addEventListener("resize", () => {
+  clearTimeout(sysviewResize);
+  sysviewResize = setTimeout(() => { for (const c of sysview.charts) c.draw(sysview.history); }, 120);
+});
+</script>

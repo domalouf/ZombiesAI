@@ -1,0 +1,31 @@
+<style>
+  /* The site's live additions (viz/live_site.py): is the PC reporting, and what is it training. */
+  .live-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 4px; font-size: 14px; color: var(--chalk-dim); }
+  .live-status b { color: var(--chalk); font-weight: 600; }
+  .now-runs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; }
+  .now-run { display: grid; gap: 8px; align-content: start; }
+  .now-run .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .now-run .run { font: 700 17px/1.2 var(--ui); display: inline-flex; align-items: center; gap: 8px; }
+  .now-run .run i { display: block; width: 14px; height: 3px; border-radius: 2px; }
+  .now-run .kind { font-size: 13px; color: var(--chalk-dim); }
+  .now-run .facts { font-size: 13px; color: var(--chalk-dim); }
+  .now-run .facts b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .now-run .head { display: flex; align-items: baseline; gap: 10px; }
+  .now-run .head .value { font: 600 30px/1 var(--ui); }
+  .now-run .head .label { font-size: 13px; color: var(--chalk-dim); }
+</style>
+
+<p class="live-status" id="live-status" role="status">Connecting to the PC…</p>
+
+<section aria-labelledby="now-title">
+  <h2 id="now-title">Training now</h2>
+  <div class="now-runs" id="training-now"><p class="empty-note">Waiting for the PC to report…</p></div>
+</section>
+
+<section aria-labelledby="system-title">
+  <h2 id="system-title">The machine</h2>
+  <p class="specs" id="system-specs"></p>
+  <div id="system"><p class="empty-note">Waiting for the PC to report…</p></div>
+</section>
+
+<h2>Every run</h2>
