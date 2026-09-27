@@ -21,14 +21,59 @@ is cheap. So each instance gets:
 
 | | how | module |
 |---|---|---|
-| a display | a rootful Xwayland, `:60`, `:61`, ... on a hidden Hyprland special workspace, floating, at a fixed size | `realgame/instances.py` |
-| a game | `umu-run CoDWaW.exe` in a private copy of the Steam prefix, settings as `+set` arguments, `+map` straight into Nacht | `realgame/instances.py` |
+| a display | a rootful Xwayland with glamor, `:60`, `:61`, ..., inside a headless Weston (GL renderer) of exactly the game's size (or, without weston, in `-shm` mode on a hidden Hyprland special workspace) | `realgame/instances.py` |
+| a game | Plutonium's T4 client in LAN mode (`umu-run plutonium-bootstrapper-win32.exe t4sp <game dir> -lan`), with a private copy of the Steam prefix and of Plutonium, settings as `+set` arguments | `realgame/instances.py` |
+| no network | a network namespace with loopback only: the game cannot reach anything outside the machine | `realgame/instances.py` |
 | input | XTEST into that X server only -- the same key names and counts as the uinput device | `realgame/xtest.py` |
 | capture | MIT-SHM grabs of the game window on that display (the existing capture, pointed at `:6x`) | `demos/x11_capture.py` |
 | sound | a PulseAudio null sink per instance, so a policy that hears hears its own game | `realgame/instances.py` |
 
 Nothing touches your desktop's X server, mouse or keyboard: you can keep using the computer while it trains.
-`scripts/instances.py show` toggles the workspace if you want to watch.
+Under Weston nothing appears on your desktop at all; `scripts/watch.py`-style captures, or a screenshot of a
+display (`DISPLAY=:60 import -window root shot.png`), are how to look. (With the Hyprland host,
+`scripts/instances.py show` toggles the workspace.)
+
+### Setup, once
+
+```sh
+sudo pacman -S weston                       # the headless host (without it the fleet falls back to Hyprland;
+                                            # ~/.local/bin/weston is a no-root stand-in, unpacked from the package)
+# Plutonium, from its CDN, with the open-source CLI updater (github.com/mxve/plutonium-updater.rs):
+curl -L https://github.com/mxve/plutonium-updater.rs/releases/latest/download/plutonium-updater-x86_64-unknown-linux-gnu.tar.gz | tar xz
+./plutonium-updater -d ~/.local/share/plutonium
+```
+
+Plutonium runs the Steam copy's own game files; nothing in the Steam install changes, and the Steam game keeps
+working as before. Your Steam `config.cfg` (bindings, sensitivity) is copied into each instance's Plutonium
+profile at every launch, so the instances play with the settings the demos were recorded with.
+
+### Why Plutonium, Weston, `-shm`, 1440p -- each was a failure first (2026-09-27)
+
+- **Steam's `CoDWaW.exe` cannot start outside the Steam client**: it is wrapped in SteamStub DRM and stops at
+  "Application load error P:0000065432". Plutonium starts the same game files through its own executable,
+  and in `-lan` mode never logs in, contacts its servers or runs its anti-cheat.
+- **Xwayland's default GPU path crashed under Hyprland** (abort in `xwl_glamor_gbm_dispose_syncpts`, NVIDIA
+  explicit sync) as soon as the game started, and drew ~2 fps while hidden, so the Hyprland host uses `-shm`.
+- **But `-shm` costs the game most of its frames, and tears every capture.** Without DRI3, NVIDIA's Vulkan
+  reads each frame back and sends it as PutImage: a 1440p frame arrives as four 4 MB strips over ~65 ms, so
+  the game ran at ~11 fps on ~1.2 cores, and a grab between strips got two frames in four bands. Under a
+  headless Weston with the GL renderer, glamor works (DRI3 through linux-dmabuf; no crash) and a frame is one
+  GPU copy: 60 fps, whole frames, the game ~0.6 of a core, a 1440p grab 1.4 ms. It needs `-noreset`: a reset
+  (last X client gone) re-creates Xwayland's window, which crashes Weston 15.0.1's kiosk shell.
+- **Hyprland's special workspace does not survive the monitor sleeping.** When the last physical monitor
+  disconnects, Hyprland folds special workspaces into normal ones and tiles the windows -- and a rootful
+  Xwayland resizes its root, and the game, to the tile (941x1030 here). A headless Weston per instance, sized
+  to the game, has no monitor to lose.
+- **One Plutonium folder cannot serve two games**: it keeps the running game's profile and logs beside its
+  executable. Each instance gets a reflink copy (free on btrfs), remade when Plutonium updates.
+- **The game will not finish loading until its window has focus**, and there is no window manager to give it:
+  `instances.py up` focuses each window as it appears, and the env's focuser keeps it focused.
+- **`+map` on the command line is thrown back to the menu** in LAN mode (the co-op menu asks for an "online
+  profile" -- a local save profile despite the name -- that LAN mode cannot create). The same `map` typed into
+  the console loads and stays, so the reset types it, then taps Enter through "Click to Start the Mission".
+  From launch to a settled 500 takes ~1-4 minutes at 1440p; later resets are just the map load.
+- **The HUD reads at 2560x1440, not 1280x720**: the glyph atlas is 1440p text at half scale, and natively
+  rendered 720p text does not match it. The fleet defaults to 1440p.
 
 **What was measured on this machine before any of it was written** (a throwaway rootful Xwayland on the
 hidden special workspace, never focused):
@@ -43,9 +88,11 @@ hidden special workspace, never focused):
   the RTX 5070, not a software renderer. Grabs take ~5 ms at that size.
 - With a `float; size` rule the root is exactly the requested size, so a 16:9 game fits it.
 
-**What only the game can answer**, and `scripts/spike_instances.py` asks: whether WaW under Proton, in such a
-server, takes that input (DirectInput acquires, the view turns), and whether several can run at once (Steam
-API, memory). Run it before anything long; each check is pass/fail.
+**What only the game can answer**, and `scripts/spike_instances.py` asks: whether WaW in such a server takes
+that input (DirectInput acquires, the view turns), and whether several can run at once. Run it before anything
+long; each check is pass/fail. **Result on 2026-09-27, two Plutonium instances at 1440p under Weston,
+offline: all six checks pass on both** -- a 20-degree turn moved the turned game 27 px (expected ~32) and the
+other 0 px; points read 500; the console opens on a key; grabs ~30 ms.
 
 ## The loop
 
@@ -105,6 +152,53 @@ watching a policy play, not for training one.
 BC-format checkpoint with an `rl` section, so `play_real.py`, `eval_bc.py` and `watch.py` play it unchanged,
 and it can be passed back to `train_rl.py` to continue. `--record-every 5` keeps every fifth episode of each
 actor as a clip (frames, actions, HUD crops, rewards) under `runs/<run>/episodes/`.
+
+## What the first real runs taught (2026-09-27)
+
+Four Plutonium games, `bc_real3` (all five demos, 61k decisions) as the starting policy. Each of these was
+found by watching a run go wrong, then fixed:
+
+- **95% of steps late** (`bad_step_frac`). Every actor's NumPy started an OpenBLAS pool of one thread per core
+  -- the frame resize is a matrix product -- and four of them fought over 12 threads (load average 52).
+  `train()` now pins `OMP/OPENBLAS/MKL_NUM_THREADS=1` before spawning actors: a step's grab, resize and HUD
+  read take ~25 ms single-threaded, and late steps fell to under 5%.
+- **The console left open.** The console key is a toggle, and a reset pressing it blind closes a console that
+  was already open -- so `map nazi_zombie_prototype` went to the game as key presses (`t` opened the chat:
+  "(Dead)zombiesai0: type"), and the policy's WASD went into the console. `realgame/console.py` now reads
+  whether the console bar is on screen; `console_command` only toggles when it must, types nothing unless it
+  sees the console open, and the env closes a console it finds open mid-episode (a bad step).
+- **Every agent staring at the floor.** The cloned policy drifts ~1.4 deg/s in pitch and never learned to look
+  back up. `RealGameEnv` adds a pitch spring back to level (2 s time constant): the policy's look bins go out as
+  chosen, plus the spring's pull -- part of the environment, like aim assist, so the PPO ratio stays right.
+- **A game-over screen taken for a fresh game.** It still shows the dead game's 500 points; after typing a
+  command the reset now also requires the HUD to disappear (the load) before a 500 counts.
+- **A slow load restarted forever.** A reset try that times out types `map` again, which starts the load over;
+  beside three live games a 1440p load can outlast a 90 s try, so it never finished until the game was
+  relaunched. Tries are now 240 s (420 s after a relaunch).
+- **A relaunch that waited for a map nobody started.** After a relaunch the command is typed too (Plutonium's
+  LAN mode cannot start one from its command line), and retried every 3 s until the console takes it.
+- **Resets cost 60-90 s.** `fast_restart` restarts Nacht in ~4 s from play or from the game-over screen; the
+  reset tries it first and falls back to `map`.
+- **Deaths the HUD never showed.** `map` from Plutonium's LAN menu starts a *co-op* game, and co-op has last
+  stand: downed on the floor with a pistol until bleed-out, no points penalty -- unlike the solo game the demos
+  were recorded in, where going down is the game over. Co-op does draw the scoreboard by itself when the player
+  goes down (`realgame/scoreboard.py` reads its header by shape). A fresh co-op game also opens with it drawn,
+  so the reset clears it with the scores key -- held 150 ms: 30 ms taps are too short for the game to see --
+  and from then on its return for 3 steps ends the episode as a death (`reason: down`), as solo Nacht would.
+
+## Running it unattended
+
+```sh
+uv run python scripts/instances.py up --n 4        # once; the games keep running between training runs
+setsid nohup uv run python -u scripts/train_rl.py runs/bc_real3/bc.pt --actors 4 --out runs/rlN \
+    > runs/rlN.log 2>&1 < /dev/null &              # survives the terminal closing
+tail -f runs/rlN.log                               # one line per PPO update, one per episode
+pkill -INT -f scripts/train_rl.py                  # stop: releases every key, writes checkpoint.pt
+```
+
+To continue, pass the last run's `checkpoint.pt` as the first argument with a new `--out`: the update count
+(so no second critic warm-up), the KL weight and the KL anchor carry over -- the anchor is always the BC
+policy the chain started from (`rl/parallel_ppo.py: root_prior`), never the checkpoint being continued.
 
 ## Rehearse on the sim first
 

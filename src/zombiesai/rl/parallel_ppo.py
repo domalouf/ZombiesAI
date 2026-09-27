@@ -276,7 +276,9 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
     from zombiesai.realgame.dispatch import ActionDispatcher, DispatchConfig
     from zombiesai.realgame.env import RealGameEnv
     from zombiesai.realgame.instances import Instance, load_fleet, specs
-    from zombiesai.realgame.xtest import console_command
+    from zombiesai.realgame.console import console_open
+    from zombiesai.realgame.scoreboard import scoreboard_shown
+    from zombiesai.realgame.xtest import console_command, tap_key
 
     fleet = load_fleet(config.fleet_root)
     instance = Instance(fleet, specs(fleet)[index], say=lambda m: print(f"[actor {index}] {m}", flush=True))
@@ -291,8 +293,21 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
 
         hearing = LiveAudio(PulseMonitorStream(instance.spec.monitor, stream_name=f"actor {index}"),
                             audio_features).start()
-    return RealGameEnv(instance.capture(), dispatcher, focus=instance.focuser(sink),
-                       console=lambda command: console_command(sink, command), restart=instance.restart_game,
+    capture = instance.capture()
+
+    def shows_console() -> bool:
+        return console_open((capture.last_hud or {}).get("console"))
+
+    def looks_open() -> bool:  # a fresh look, for the console typing between frames
+        capture.read()
+        return shows_console()
+
+    return RealGameEnv(capture, dispatcher, focus=instance.focuser(sink),
+                       console=lambda command: console_command(sink, command, is_open=looks_open),
+                       # 30 ms taps are shorter than the game notices for some keys (the scores key); 150 ms is sure
+                       restart=instance.restart_game, press=lambda key: tap_key(sink, key, hold_s=0.15),
+                       console_open=shows_console,
+                       downed=lambda: scoreboard_shown((capture.last_hud or {}).get("scores")),
                        hearing=hearing, say=lambda m: print(f"[actor {index}] {m}", flush=True))
 
 
@@ -434,6 +449,21 @@ def _episode_writer(run_dir: Path, index: int, episode: int, env):
 # ------------------------------------------------------------------------------------------------ learner
 
 
+def root_prior(path: str | Path) -> str:
+    """The behavioural-cloning checkpoint an RL checkpoint's chain of continuations started from."""
+    seen = set()
+    path = str(path)
+    while path not in seen:
+        seen.add(path)
+        rl = torch.load(path, map_location="cpu", weights_only=False).get("rl") or {}
+        if not rl:
+            return path
+        if rl.get("reference"):
+            return rl["reference"]
+        path = str(rl["init"])
+    raise ValueError(f"checkpoint chain loops at {path}")
+
+
 class Learner:
     """The PPO update over a batch of segments, on the learner's device. Separate from the process plumbing
     so it can be tested (and driven) in-process."""
@@ -444,7 +474,17 @@ class Learner:
         self.config, self.device = config, device
         self.net, self.bc_config, self.meta = bc.load(config.init, device)
         self.net.train()
-        self.ref = copy.deepcopy(self.net).eval()
+        # Continuing from an RL checkpoint picks up where it stopped: the KL anchor is still the behavioural
+        # prior the chain started from (not the checkpoint itself, or every restart would let the policy drift
+        # further), and the update count -- so the critic warm-up is not redone -- and the anchor's weight carry
+        # on.
+        previous = self.meta.get("rl") or {}
+        self.reference = previous.get("reference") or (root_prior(previous["init"]) if previous else config.init)
+        if previous:
+            self.ref, _, _ = bc.load(self.reference, device)
+            self.ref.eval()
+        else:
+            self.ref = copy.deepcopy(self.net).eval()
         for p in self.ref.parameters():
             p.requires_grad_(False)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=config.lr, eps=1e-5)
@@ -452,8 +492,8 @@ class Learner:
         self.offsets = self.bc_config.offsets
         self.uses_audio = self.bc_config.use_audio
         self.scaler = RunningStd(config.gamma)
-        self.updates = 0
-        self.kl_coef = config.kl_coef
+        self.updates = int(previous.get("updates", 0))
+        self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
 
     def _forward(self, net, pixels, audio=None, mask=None):
         return net(pixels, None, audio, mask)
@@ -581,7 +621,8 @@ class Learner:
         blob.update({
             "kind": "bc",
             "model": {k: v.detach().cpu() for k, v in self.net.state_dict().items()},
-            "rl": {"init": self.config.init, "updates": self.updates, "step": step, "env": self.config.env_name,
+            "rl": {"init": self.config.init, "reference": self.reference, "kl_coef": self.kl_coef,
+                   "updates": self.updates, "step": step, "env": self.config.env_name,
                    "config": asdict(self.config), **(extra or {})},
         })
         torch.save(blob, tmp)
@@ -606,6 +647,11 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
     learner = Learner(config, resolve_device(config.device))
     version = 0
     publish(run_dir / "weights.pt", learner.net, version)
+    # One thread of work per actor. Actors inherit this environment when spawned, before they import numpy:
+    # otherwise OpenBLAS starts a thread per core in every actor (the frame resize is a matrix product), and
+    # four actors' pools fighting over 12 threads made 95% of real-game steps late.
+    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ[var] = "1"
     ctx = mp.get_context("spawn")
     out = ctx.Queue(maxsize=max(8, 4 * config.n_actors))
     stop = ctx.Event()

@@ -5,15 +5,17 @@ DirectInput only listens to the foreground window, and a desktop has one. That w
 desktop session is the unit and multiplying sessions needs a GPU per seat. On Linux the unit is the *X server*,
 and X servers are cheap. So each instance here gets:
 
-* **A rootful Xwayland** (`:60`, `:61`, ...) -- a complete X server of its own, GPU-accelerated through the
-  compositor, sized to the game's resolution. By default it is opened on a hidden Hyprland special workspace
-  (`special:zombiesai`), floating, at a fixed size, so the instances neither take your focus nor retile your
-  windows. `hyprctl dispatch togglespecialworkspace zombiesai` shows them all when you want to watch.
-  Checked on this machine: Vulkan-over-X11 (DXVK's path) renders at 60 fps in such a server while it is
-  hidden, and MIT-SHM capture reads every frame (Xwayland paces a client's copy-presents with its own timer,
-  not the compositor's frame callbacks).
+* **A rootful Xwayland** (`:60`, `:61`, ...) -- a complete X server of its own, sized to the game's resolution,
+  hosted by a headless Weston of exactly that size (`host="weston"`), which nothing on the desktop can resize or
+  hide. Under Weston it runs glamor, so the game's frames arrive as GPU buffers, whole, at 60 fps (see
+  XWAYLAND_FLAGS). Without weston it opens on a hidden Hyprland special workspace instead, in `-shm` mode --
+  fine until the monitor sleeps (see `_start_under_hyprland`). MIT-SHM capture reads every frame.
 * **Its own game process**, launched with `umu-run` into a private copy of the Steam prefix (Wine keeps its
-  named objects, and so any single-instance guard, per prefix), with the settings the agent needs passed as
+  named objects, and so any single-instance guard, per prefix). The client is Plutonium's T4 in LAN mode by
+  default (`client="plutonium"`): Steam's `CoDWaW.exe` is wrapped in SteamStub DRM and, started outside the
+  Steam client, stops at "Application load error P:0000065432"; Plutonium runs the same game files through its
+  own executable and never asks Steam. By default (`offline=True`) the game runs in a network namespace with
+  loopback only. Either way, the settings the agent needs passed as
   `+set` arguments on the command line rather than edited into your config: the resolution (fullscreen at the
   X server's own size), the console (for resets), mouse acceleration and smoothing off, and `+map` straight
   into Nacht.
@@ -40,7 +42,12 @@ STEAM_ROOTS = (Path.home() / ".local" / "share" / "Steam", Path.home() / ".steam
 GAME_DIR_NAME = "Call of Duty World at War"
 PROTON_NAME = "Proton - Experimental"
 SPECIAL_WORKSPACE = "zombiesai"
-WINDOW_TITLE = "Call of Duty"
+WINDOW_TITLE = "Call of Duty"  # the Steam client's window
+PLUTONIUM_TITLE = "Plutonium T4"  # "Plutonium T4 Co-Op (r5354) (LAN)"; it also opens a small "Call of Duty®" window
+PLUTONIUM_DIR = Path.home() / ".local" / "share" / "plutonium"  # where plutonium-updater -d puts it
+PLUTONIUM_BOOTSTRAPPER = Path("bin") / "plutonium-bootstrapper-win32.exe"
+# Plutonium keeps its profiles in its own storage, not the prefix. `$$$` is the profile it makes on first run.
+PLUTONIUM_PROFILE = Path("storage") / "t4" / "players" / "profiles" / "$$$"
 NACHT = "nazi_zombie_prototype"
 
 
@@ -57,16 +64,25 @@ class FleetConfig:
     """How to run N instances. Every path defaults to what Steam installed; override any of them."""
 
     n: int = 4
-    width: int = 1280
-    height: int = 720
+    width: int = 2560  # the HUD glyph atlas is 1440p read at half scale; native 720p text does not match it
+    height: int = 1440
     display_base: int = 60  # instance i lives on DISPLAY=:{display_base + i}
     root: str = "runs/instances"
-    hidden: bool = True  # a hidden Hyprland special workspace; False opens ordinary windows
+    # Who hosts the X servers: "weston" -- a headless Weston per instance, nothing on your desktop (the default
+    # when weston is installed) -- or "hyprland", your own session, on a hidden special workspace. "auto" picks.
+    host: str = "auto"
+    hidden: bool = True  # hyprland host: a hidden special workspace; False opens ordinary windows
     game_dir: str | None = None
     exe: str = "CoDWaW.exe"
     template_prefix: str | None = None  # a Steam compatdata dir to copy (default: WaW's own)
     proton: str | None = None
     launcher: str = "umu-run"
+    client: str = "plutonium"  # "plutonium" (T4, LAN mode) or "steam" (CoDWaW.exe; needs the Steam client)
+    plutonium_dir: str | None = None
+    # Run each game with no network at all: a network namespace with only loopback (the solo game still talks
+    # to its own local server over 127.0.0.1). Plutonium's -lan mode already never logs in or contacts its
+    # servers; this makes that a guarantee rather than a promise. Needs unprivileged user namespaces.
+    offline: bool = True
     # Passed to the game after the exe. The engine takes `+set dvar value` and `+command` on its command line,
     # which leaves your config.cfg alone. monkeytoy 0 enables the console the reset FSM types into.
     dvars: dict = field(default_factory=lambda: {
@@ -78,7 +94,8 @@ class FleetConfig:
         "cl_mouseAccel": "0",
         "m_filter": "0",
         "r_vsync": "0",
-        "com_maxfps": "60",
+        # Twice the policy's 15 Hz is enough to see, and each game costs about two thirds of the CPU of 60 fps.
+        "com_maxfps": "30",
     })
     start_command: str = f"map {NACHT}"
     extra_env: dict = field(default_factory=dict)
@@ -96,6 +113,25 @@ class FleetConfig:
         if path is None or not (path / "pfx").is_dir():
             raise FileNotFoundError(f"no Proton prefix at {path}; run the game once from Steam, or pass --template-prefix")
         return path
+
+    def resolved_host(self) -> str:
+        if self.host == "auto":
+            return "weston" if shutil.which("weston") else "hyprland"
+        if self.host not in ("weston", "hyprland"):
+            raise ValueError(f"unknown host {self.host!r}: weston, hyprland or auto")
+        return self.host
+
+    def resolved_plutonium(self) -> Path:
+        path = Path(self.plutonium_dir) if self.plutonium_dir else PLUTONIUM_DIR
+        if not (path / PLUTONIUM_BOOTSTRAPPER).exists():
+            raise FileNotFoundError(
+                f"no Plutonium at {path}; install it with mxve/plutonium-updater.rs "
+                f"(`plutonium-updater -d {path}`), or pass --plutonium-dir")
+        return path
+
+    @property
+    def window_title(self) -> str:
+        return PLUTONIUM_TITLE if self.client == "plutonium" else WINDOW_TITLE
 
     def resolved_proton(self) -> Path:
         path = Path(self.proton) if self.proton else _steam_path("steamapps", "common", PROTON_NAME)
@@ -121,6 +157,10 @@ class InstanceSpec:
         return self.dir / "compat"
 
     @property
+    def plutonium(self) -> Path:
+        return self.dir / "plutonium"
+
+    @property
     def sink(self) -> str:
         return f"zombiesai_{self.index}"
 
@@ -132,6 +172,11 @@ class InstanceSpec:
     def socket(self) -> Path:
         return Path("/tmp/.X11-unix") / f"X{self.number}"
 
+    @property
+    def wayland_socket(self) -> str:
+        """The name of this instance's headless Weston socket, under $XDG_RUNTIME_DIR (weston host)."""
+        return f"zombiesai-{self.number}"
+
 
 def specs(config: FleetConfig) -> list[InstanceSpec]:
     root = Path(config.root)
@@ -141,14 +186,87 @@ def specs(config: FleetConfig) -> list[InstanceSpec]:
     ]
 
 
-def game_args(config: FleetConfig, spec: InstanceSpec) -> list[str]:
-    """The exe's arguments: the resolution, the dvars, then the command that loads Nacht."""
+def game_args(config: FleetConfig, spec: InstanceSpec, *, start: bool = True) -> list[str]:
+    """The exe's arguments: the resolution, the dvars, then (if `start`) the command that loads Nacht."""
     args = ["+set", "r_mode", f"{spec.width}x{spec.height}"]
     for name, value in config.dvars.items():
         args += ["+set", name, str(value)]
-    if config.start_command:
+    if start and config.start_command:
         args += ["+" + config.start_command.split()[0], *config.start_command.split()[1:]]
     return args
+
+
+def windows_path(path: Path) -> str:
+    """A Linux path as Wine sees it: the whole filesystem is drive Z:."""
+    return "Z:" + str(Path(path).resolve()).replace("/", "\\")
+
+
+def game_command(config: FleetConfig, spec: InstanceSpec) -> tuple[list[str], Path]:
+    """The command that starts this instance's game, and the directory to start it in."""
+    game_dir = config.resolved_game_dir()
+    if config.client == "plutonium":
+        pluto = spec.plutonium.resolve()
+        # -lan: no Plutonium login, no servers, no anti-cheat; the game is offline and solo.
+        command = [config.launcher, str(pluto / PLUTONIUM_BOOTSTRAPPER), "t4sp", windows_path(game_dir),
+                   "-lan", "+name", f"zombiesai{spec.index}"]
+        # No `+map`: in LAN mode the co-op menu asks for an "online profile" it cannot make, and a map started
+        # from the command line is thrown back to that dialog. The same `map` typed into the console once the
+        # menu is up loads and stays -- which is what RealGameEnv's reset types.
+        return command + game_args(config, spec, start=False), pluto
+    if config.client != "steam":
+        raise ValueError(f"unknown client {config.client!r}: plutonium or steam")
+    return [config.launcher, str(game_dir / config.exe), *game_args(config, spec)], game_dir
+
+
+def prepare_plutonium(config: FleetConfig, spec: InstanceSpec, *, say=print) -> Path:
+    """A private copy of Plutonium for this instance, remade whenever the installed revision changes.
+
+    Plutonium keeps everything the running game writes -- the profile, console.log, mpdata -- in `storage/`
+    beside its executable, so two games started from one install share it, and the second hangs on a black
+    screen. A copy each is the fix; on btrfs/xfs `--reflink` makes it share the blocks (~430 MB otherwise)."""
+    source = config.resolved_plutonium()
+    stamp = (source / "cdn_info.json").read_bytes() if (source / "cdn_info.json").exists() else b""
+    target = spec.plutonium
+    if target.is_dir() and (target / "cdn_info.json").exists() and (target / "cdn_info.json").read_bytes() == stamp:
+        return target
+    say(f"  instance {spec.index}: copying Plutonium {source} -> {target}")
+    spec.dir.mkdir(parents=True, exist_ok=True)
+    tmp = spec.dir / "plutonium.partial"
+    for old in (tmp, target):
+        if old.exists():
+            shutil.rmtree(old)
+    result = subprocess.run(["cp", "-a", "--reflink=auto", str(source), str(tmp)], capture_output=True, text=True)
+    if result.returncode:
+        raise RuntimeError(f"copying Plutonium failed: {result.stderr.strip()}")
+    tmp.rename(target)
+    return target
+
+
+def offline_wrapper() -> list[str]:
+    """A command prefix that runs the rest with loopback and nothing else. Two user namespaces: the outer maps
+    us to root just long enough to bring `lo` up, the inner maps us back to our own uid, so Wine and the
+    prefix see the same owner as always."""
+    return ["unshare", "--user", "--map-root-user", "--net", "sh", "-c",
+            f'ip link set lo up && exec unshare --user --map-user={os.getuid()} --map-group={os.getgid()} -- "$@"',
+            "sh"]
+
+
+def sync_plutonium_profile(root: Path, *, say=print) -> Path | None:
+    """Copy your Steam profile's config.cfg over Plutonium's before a launch, so the instances play with the
+    bindings and sensitivity the demos were recorded with. Plutonium's own defaults differ where it matters:
+    right mouse is `+toggleads_throw` there, `+speed_throw` (hold) in the Steam game."""
+    from zombiesai.demos.game_settings import candidate_configs
+
+    found = candidate_configs()
+    if not found:
+        say("  no Steam config.cfg to copy: Plutonium plays with its own bindings -- check them")
+        return None
+    profile = root / PLUTONIUM_PROFILE
+    profile.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(found[0], profile / "config.cfg")
+    # Without active.txt naming a profile the game opens on "Create Online Profile", and `+map` never runs.
+    (profile.parent / "active.txt").write_text(profile.name)
+    return profile / "config.cfg"
 
 
 def game_env(config: FleetConfig, spec: InstanceSpec, base: dict | None = None) -> dict[str, str]:
@@ -160,12 +278,14 @@ def game_env(config: FleetConfig, spec: InstanceSpec, base: dict | None = None) 
         "PROTONPATH": str(config.resolved_proton()),
         "GAMEID": f"umu-{WAW_STEAM_APP_ID}",
         "STORE": "steam",
-        # Lets steam_api find the running Steam client, as a Steam launch would.
-        "SteamAppId": str(WAW_STEAM_APP_ID),
-        "SteamGameId": str(WAW_STEAM_APP_ID),
+        # Offline means offline: no runtime update check either (the runtime is already installed).
+        "UMU_RUNTIME_UPDATE": "0",
         # Proton would otherwise prefer its Wayland driver when it finds a compositor.
         "PROTON_ENABLE_WAYLAND": "0",
     })
+    if config.client == "steam":
+        # Lets steam_api find the running Steam client, as a Steam launch would.
+        env["SteamAppId"] = env["SteamGameId"] = str(WAW_STEAM_APP_ID)
     if config.audio_sinks:
         env["PULSE_SINK"] = spec.sink
     env.update({k: str(v) for k, v in config.extra_env.items()})
@@ -222,8 +342,46 @@ def toggle_shown(*, run=subprocess.run) -> bool:
                              ["togglespecialworkspace", SPECIAL_WORKSPACE], run=run)
 
 
-def xwayland_command(spec: InstanceSpec) -> str:
-    return f"Xwayland {spec.display} -geometry {spec.width}x{spec.height}"
+# How the game's frames reach the X server decides what the game and every capture of it cost.
+#
+# Under a headless Weston: glamor. Weston's GL renderer offers linux-dmabuf, so Xwayland has DRI3 and a frame is
+# one GPU copy into the root. Measured 2026-09-27 at 1440p in Nacht: 60 fps delivered, each frame one whole
+# damage rectangle; the game ~0.6 of a core, Xwayland + Weston ~4%; a full XShmGetImage 1.4 ms.
+# `-shm` instead has no DRI3, so NVIDIA's Vulkan reads every frame back and sends it as PutImage requests: a
+# 1440p frame is four 4 MB requests (409 rows each) arriving over ~65 ms. That caps the game at ~11 fps at
+# ~1.2 cores (it waits on its own presents) and Xwayland at ~15%, and a grab on a clock lands mid-frame: most
+# captured frames are torn into four bands of two different frames.
+#
+# Under Hyprland: `-shm`, because there Xwayland's glamor path (with Hyprland's explicit sync) aborts in
+# xwl_glamor_gbm_dispose_syncpts as soon as WaW starts, and hidden only draws ~2 fps besides.
+#
+# `-noreset` on both: without it Xwayland resets when its last X client disconnects (a launcher's short probe
+# connection does, before the game connects) and re-creates its window. Weston 15.0.1's kiosk shell answers a
+# re-created window with a use-after-free (kiosk_shell_output_set_active_surface_tree) and segfaults.
+XWAYLAND_FLAGS = {"weston": "-glamor gl -noreset", "hyprland": "-shm -noreset"}
+
+
+def xwayland_command(spec: InstanceSpec, host: str = "weston") -> str:
+    return f"Xwayland {spec.display} -geometry {spec.width}x{spec.height} {XWAYLAND_FLAGS[host]}"
+
+
+def weston_command(spec: InstanceSpec) -> list[str]:
+    """A headless compositor exactly the game's size. The kiosk shell makes the rootful Xwayland fullscreen,
+    i.e. exactly the output, so the X root -- which follows its Wayland window's size -- is the game's size and
+    nothing can change it. The GL renderer, although nothing is ever shown: it is what offers linux-dmabuf, and
+    so DRI3 to Xwayland (XWAYLAND_FLAGS). Needs gl-renderer.so in the weston wrapper's WESTON_MODULE_MAP."""
+    return ["weston", "--backend=headless", "--renderer=gl", "--shell=kiosk", f"--width={spec.width}",
+            f"--height={spec.height}", f"--socket={spec.wayland_socket}", "--idle-time=0"]
+
+
+def weston_pids(spec: InstanceSpec) -> list[int]:
+    result = subprocess.run(["pgrep", "-f", f"weston .*--socket={spec.wayland_socket}( |$)"],
+                            capture_output=True, text=True)
+    return [int(p) for p in result.stdout.split()]
+
+
+def runtime_dir() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}")
 
 
 def display_rules(spec: InstanceSpec) -> str:
@@ -245,15 +403,12 @@ def start_display(config: FleetConfig, spec: InstanceSpec, *, timeout_s: float =
     if spec.socket.exists():
         raise RuntimeError(f"{spec.socket} exists but no Xwayland {spec.display} is running; another X server "
                            f"owns display {spec.display} -- pick another --display-base")
-    command = xwayland_command(spec)
-    launched = config.hidden and os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and hyprland_exec(
-        command, display_rules(spec))
-    if not launched:
-        if config.hidden:
-            say("  (not under Hyprland, or it refused the rule: the X servers open as ordinary windows)")
-        env = {k: v for k, v in os.environ.items()}
-        subprocess.Popen(command.split(), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                         stderr=subprocess.DEVNULL, start_new_session=True)
+    host = config.resolved_host()
+    command = xwayland_command(spec, host)
+    if host == "weston":
+        _start_under_weston(spec, command, timeout_s=timeout_s, say=say)
+    else:
+        _start_under_hyprland(config, spec, command, say=say)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         if display_alive(spec):
@@ -262,8 +417,47 @@ def start_display(config: FleetConfig, spec: InstanceSpec, *, timeout_s: float =
     raise RuntimeError(f"Xwayland {spec.display} did not come up within {timeout_s:.0f} s")
 
 
+def _quiet_env(**extra) -> dict[str, str]:
+    env = {k: v for k, v in os.environ.items() if k not in ("WAYLAND_DISPLAY", "DISPLAY")}
+    env.update(extra)
+    return env
+
+
+def _start_under_weston(spec: InstanceSpec, command: str, *, timeout_s: float, say=print) -> None:
+    socket = runtime_dir() / spec.wayland_socket
+    if not weston_pids(spec):
+        socket.unlink(missing_ok=True)
+        spec.dir.mkdir(parents=True, exist_ok=True)
+        log = open(spec.dir / "weston.log", "ab")
+        subprocess.Popen(weston_command(spec), env=_quiet_env(), stdin=subprocess.DEVNULL, stdout=log,
+                         stderr=subprocess.STDOUT, start_new_session=True)
+        log.close()
+        deadline = time.monotonic() + timeout_s
+        while not socket.exists():
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"headless weston for {spec.display} did not come up; see {spec.dir / 'weston.log'}")
+            time.sleep(0.1)
+    subprocess.Popen(command.split(), env=_quiet_env(WAYLAND_DISPLAY=spec.wayland_socket),
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+
+
+def _start_under_hyprland(config: FleetConfig, spec: InstanceSpec, command: str, *, say=print) -> None:
+    """Your own session hosts the X server, on a hidden special workspace. Works, with one catch for long runs:
+    when the last physical monitor disconnects (some sleep that way), Hyprland folds special workspaces into
+    normal ones and tiles the windows -- and a rootful Xwayland resizes its root, and the game, to the tile."""
+    launched = config.hidden and os.environ.get("HYPRLAND_INSTANCE_SIGNATURE") and hyprland_exec(
+        command, display_rules(spec))
+    if not launched:
+        if config.hidden:
+            say("  (not under Hyprland, or it refused the rule: the X servers open as ordinary windows)")
+        env = {k: v for k, v in os.environ.items()}
+        subprocess.Popen(command.split(), env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def stop_display(spec: InstanceSpec) -> None:
-    for pid in server_pids(spec):
+    for pid in server_pids(spec) + weston_pids(spec):
         try:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
@@ -321,13 +515,17 @@ class Instance:
             self.launch_game()
 
     def launch_game(self) -> None:
-        game_dir = self.config.resolved_game_dir()
+        if self.config.client == "plutonium":
+            prepare_plutonium(self.config, self.spec, say=self.say)
+            sync_plutonium_profile(self.spec.plutonium, say=self.say)
+        command, cwd = game_command(self.config, self.spec)
+        if self.config.offline:
+            command = offline_wrapper() + command
         self.spec.dir.mkdir(parents=True, exist_ok=True)
         log = open(self.spec.dir / "game.log", "ab")
-        command = [self.config.launcher, str(game_dir / self.config.exe), *game_args(self.config, self.spec)]
         log.write(f"\n=== {time.ctime()} launching: {' '.join(command)}\n".encode())
         log.flush()
-        self.proc = subprocess.Popen(command, cwd=game_dir, env=game_env(self.config, self.spec),
+        self.proc = subprocess.Popen(command, cwd=cwd, env=game_env(self.config, self.spec),
                                      stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                      start_new_session=True)
         log.close()
@@ -395,17 +593,22 @@ class Instance:
         """The game's window on this instance's display, or raise WindowNotFound."""
         from zombiesai.demos.x11_capture import find_window
 
-        return find_window(WINDOW_TITLE, self.spec.display)
+        return find_window(self.config.window_title, self.spec.display)
 
     def capture(self, hud_regions=None):
         """A capture that follows the game window on this display across the game's own window churn."""
         from zombiesai.demos.capture import FollowWindow, ScreenCapture
         from zombiesai.demos.hud_crops import HUD_REGIONS
 
-        regions = hud_regions if hud_regions is not None else {k: HUD_REGIONS[k] for k in ("points_ammo", "round")}
+        from zombiesai.realgame.console import CONSOLE_REGION
+        from zombiesai.realgame.scoreboard import SCOREBOARD_REGION
+
+        regions = hud_regions if hud_regions is not None else {
+            **{k: HUD_REGIONS[k] for k in ("points_ammo", "round")}, "console": CONSOLE_REGION,
+            "scores": SCOREBOARD_REGION}
         # The crops' reference size is 1440p at half scale, i.e. 720p's own pixels.
         scale = min(1.0, 720.0 / self.spec.height)
-        return FollowWindow(lambda: ScreenCapture(window=WINDOW_TITLE, display=self.spec.display,
+        return FollowWindow(lambda: ScreenCapture(window=self.config.window_title, display=self.spec.display,
                                                   hud_regions=regions, hud_scale=scale))
 
     def sink(self):

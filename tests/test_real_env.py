@@ -132,13 +132,26 @@ def test_later_resets_type_the_start_command_and_escalate_to_a_relaunch():
     relaunched = []
     config = EnvConfig(start_timeout_s=1.0, launch_timeout_s=2.0, after_death_s=0.0)
     env, game, _, typed, _ = make_env([500] * 4, config=config, restart=lambda: (relaunched.append(1),
-                                                                                  game.points.__setitem__(slice(None), [500])))
+                                                                                  game.points.__setitem__(slice(None), [None, None, 500])))
     env.reset()
-    game.points = [None]  # the game never comes back by itself
+    game.points = [7]  # a stuck screen: the command never takes
     env._ended_by_death = True
     env.reset()
-    assert typed == [config.start_command] * config.reset_attempts
-    assert relaunched == [1] and env.resets == {"console": 3, "relaunch": 1}
+    # the quick restart first; then every try types the map, and so does the wait after the relaunch
+    # (Plutonium cannot start a map from its command line)
+    assert typed == [config.quick_start_command] + [config.start_command] * (config.reset_attempts + 1)
+    assert relaunched == [1] and env.resets == {"console": 5, "quick": 0, "relaunch": 1}
+
+
+def test_a_game_over_screen_still_showing_500_is_not_a_fresh_game():
+    config = EnvConfig(start_timeout_s=5.0, after_death_s=0.0)
+    env, game, _, typed, clock = make_env([500] * 4, config=config)
+    env.reset()
+    game.points = [500] * 20 + [None] * 5 + [500]  # the dead game's 500, then the map load, then the new game
+    env._ended_by_death = True
+    t0 = game.reads
+    env.reset()
+    assert typed == [config.quick_start_command] and game.reads - t0 >= 25 and env.resets["quick"] == 1
 
 
 def test_no_way_to_relaunch_means_the_reset_fails_loudly():
@@ -170,3 +183,66 @@ def test_the_hud_vanishing_mid_game_truncates():
             break
     assert truncated and not terminated and info["episode"]["reason"] == "hud_gone"
     assert HudReading().points_status == ABSENT
+
+
+def test_a_reset_taps_the_start_key_while_it_waits():
+    pressed = []
+    env, game, _, typed, clock = make_env([None] * 200 + [500], press=pressed.append)
+    env.reset()
+    enters = [k for k in pressed if k == "enter"]
+    assert enters and set(pressed) == {"enter", "tab"} and pressed[-1] == "tab"  # tab once, when it is up
+    assert len(enters) <= clock.t / env.config.start_key_every_s + 1
+
+
+def test_an_open_console_is_closed_and_the_step_is_bad():
+    pressed = []
+    shown = {"open": False}
+    env, game, dispatcher, _, _ = make_env([500], press=pressed.append, console_open=lambda: shown["open"])
+    env.reset()
+    pressed.clear()
+    idle = np.zeros(len(spec.ACTION_NVEC), dtype=np.int64)
+    idle[spec.YAW], idle[spec.PITCH] = spec.YAW_BINS_DEG.index(0.0), spec.PITCH_BINS_DEG.index(0.0)
+    _, _, _, _, info = env.step(idle)
+    assert not info["bad"] and pressed == []
+    shown["open"] = True
+    _, _, _, _, info = env.step(idle)
+    assert info["bad"] and pressed == ["grave"] and dispatcher.releases >= 1
+
+
+def test_the_pitch_springs_back_to_level():
+    env, _, _, _, _ = make_env([500])
+    env.reset()
+    action = np.zeros(len(spec.ACTION_NVEC), dtype=np.int64)
+    action[spec.YAW] = spec.YAW_BINS_DEG.index(0.0)
+    action[spec.PITCH] = spec.PITCH_BINS_DEG.index(-6.0)
+    sent = [env._look(action)[1] for _ in range(40)]
+    assert env.pitch == sum(sent) or abs(env.pitch - sum(sent)) < 1e-9
+    assert -85.0 <= env.pitch < -60.0  # held down, it goes down -- the spring only resists
+    held = env.pitch
+    action[spec.PITCH] = spec.PITCH_BINS_DEG.index(0.0)
+    for _ in range(75):  # five seconds of not touching it: e^(-5/2) of the way left
+        env._look(action)
+    assert abs(env.pitch) < 0.1 * abs(held)
+
+
+def test_a_fresh_game_s_scoreboard_is_cleared_and_its_return_is_a_down():
+    board = {"up": True}
+    pressed = []
+
+    def press(key):
+        pressed.append(key)
+        if key == "tab":
+            board["up"] = False
+
+    env, _, _, _, clock = make_env([500] * 4 + [620], press=press, downed=lambda: board["up"])
+    env.reset()
+    assert pressed.count("tab") == 1 and not board["up"]
+    board["up"] = True  # drawn a moment late, in the first seconds: cleared again, not a down
+    _, reward, terminated, _, info = env.step(IDLE)
+    assert not terminated and not board["up"] and pressed.count("tab") == 2
+    clock.t += env.config.down_grace_s
+    board["up"] = True  # co-op draws it when the player goes down
+    for k in range(env.config.down_steps):
+        _, reward, terminated, truncated, info = env.step(IDLE)
+    assert terminated and not truncated and info["episode"]["reason"] == "down"
+    assert reward < 0  # the death penalty, the same as solo's game over
