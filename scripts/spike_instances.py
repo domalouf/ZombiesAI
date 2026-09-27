@@ -15,7 +15,7 @@ one can end the parallel plan on its own:
 Stand each game somewhere with detail in view (the start room, not a wall) before running it; the mouse test
 reads horizontal image motion. Then, for counts per degree on an instance:
 
-    uv run python scripts/calibrate_mouse.py --display :60 --window "Call of Duty" --xtest --full-turn
+    uv run python scripts/calibrate_mouse.py --display :60 --window "Plutonium T4" --xtest --full-turn
 """
 
 import argparse
@@ -108,7 +108,7 @@ def main() -> None:
             time.sleep(0.03)
         time.sleep(0.35)
 
-        top = slice(0, 24)
+        top = slice(0, 2)  # the console: a one-line bar across the top (Plutonium), or a taller pane (Steam)
         closed = luma(grab_policy(captures[i])[0][0][None])[0][top]
         for down in (True, False):
             sink.key("grave", down)

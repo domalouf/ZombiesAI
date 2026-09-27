@@ -1,3 +1,4 @@
+import os
 import subprocess
 from pathlib import Path
 
@@ -7,7 +8,7 @@ from zombiesai.realgame import instances as inst
 from zombiesai.realgame.instances import FleetConfig, Instance, game_args, game_env, prepare_prefix, specs
 
 
-def fake_install(tmp_path: Path) -> FleetConfig:
+def fake_install(tmp_path: Path, client: str = "steam") -> FleetConfig:
     game = tmp_path / "game"
     game.mkdir()
     (game / "CoDWaW.exe").write_bytes(b"MZ")
@@ -17,8 +18,12 @@ def fake_install(tmp_path: Path) -> FleetConfig:
     template = tmp_path / "compatdata"
     (template / "pfx" / "drive_c").mkdir(parents=True)
     (template / "version").write_text("9.0-100")
+    pluto = tmp_path / "plutonium"
+    (pluto / "bin").mkdir(parents=True)
+    (pluto / "bin" / "plutonium-bootstrapper-win32.exe").write_bytes(b"MZ")
+    (pluto / "cdn_info.json").write_text('{"revision": 1}')
     return FleetConfig(n=3, display_base=70, root=str(tmp_path / "fleet"), game_dir=str(game), proton=str(proton),
-                       template_prefix=str(template))
+                       template_prefix=str(template), client=client, plutonium_dir=str(pluto))
 
 
 def test_each_instance_gets_its_own_display_prefix_and_sink(tmp_path):
@@ -33,7 +38,7 @@ def test_game_args_set_the_resolution_console_and_start_in_nacht(tmp_path):
     config = fake_install(tmp_path)
     args = game_args(config, specs(config)[0])
     pairs = {args[i + 1]: args[i + 2] for i in range(len(args) - 2) if args[i] == "+set"}
-    assert pairs["r_mode"] == "1280x720" and pairs["monkeytoy"] == "0" and pairs["r_fullscreen"] == "1"
+    assert pairs["r_mode"] == "2560x1440" and pairs["monkeytoy"] == "0" and pairs["r_fullscreen"] == "1"
     assert args[-2:] == ["+map", "nazi_zombie_prototype"]
 
 
@@ -143,3 +148,63 @@ def test_focuser_finds_the_window_again_after_losing_it(tmp_path):
     now[0] = 2.5
     assert focus() is True and sink.focused == [0x400001]
     assert focus() is True and sink.focused == [0x400001, 0x400001]
+
+
+def test_plutonium_starts_t4_offline_in_lan_mode_without_map(tmp_path):
+    config = fake_install(tmp_path, client="plutonium")
+    spec = specs(config)[1]
+    command, cwd = inst.game_command(config, spec)
+    assert command[0] == "umu-run" and command[1] == str((spec.plutonium / "bin" / "plutonium-bootstrapper-win32.exe").resolve())
+    assert command[2] == "t4sp" and command[3] == inst.windows_path(tmp_path / "game") and command[3].startswith("Z:\\")
+    assert "-lan" in command and command[command.index("+name") + 1] == "zombiesai1"
+    assert "+map" not in command  # thrown back to the profile dialog in LAN mode; the reset types it instead
+    assert cwd == spec.plutonium.resolve()
+    assert config.window_title == "Plutonium T4" and FleetConfig(client="steam").window_title == "Call of Duty"
+    env = game_env(config, spec, base={"HOME": "/h"})
+    assert "SteamAppId" not in env and env["UMU_RUNTIME_UPDATE"] == "0"
+
+
+def test_each_instance_gets_its_own_plutonium_recopied_when_the_revision_changes(tmp_path):
+    config = fake_install(tmp_path, client="plutonium")
+    spec = specs(config)[0]
+    said = []
+    inst.prepare_plutonium(config, spec, say=said.append)
+    (spec.plutonium / "storage").mkdir()
+    (spec.plutonium / "storage" / "console.log").write_text("mine")
+    inst.prepare_plutonium(config, spec, say=said.append)
+    assert (spec.plutonium / "storage" / "console.log").exists() and len(said) == 1
+    (Path(config.plutonium_dir) / "cdn_info.json").write_text('{"revision": 2}')
+    inst.prepare_plutonium(config, spec, say=said.append)
+    assert not (spec.plutonium / "storage").exists() and len(said) == 2
+
+
+def test_the_steam_profile_is_copied_into_plutonium_with_active_txt(tmp_path, monkeypatch):
+    steam_cfg = tmp_path / "steam" / "config.cfg"
+    steam_cfg.parent.mkdir()
+    steam_cfg.write_text('bind MOUSE2 "+speed_throw"\n')
+    monkeypatch.setattr("zombiesai.demos.game_settings.candidate_configs", lambda: [steam_cfg])
+    written = inst.sync_plutonium_profile(tmp_path / "pluto", say=lambda m: None)
+    assert written.read_text() == steam_cfg.read_text()
+    assert (written.parent.parent / "active.txt").read_text() == "$$$"
+
+
+def test_offline_runs_the_game_with_loopback_only_as_ourselves():
+    wrapper = inst.offline_wrapper()
+    assert wrapper[:4] == ["unshare", "--user", "--map-root-user", "--net"]
+    assert "ip link set lo up" in wrapper[6] and f"--map-user={os.getuid()}" in wrapper[6]
+    assert wrapper[-1] == "sh"  # $0 for sh -c; the game's command follows as "$@"
+
+
+def test_a_headless_weston_is_exactly_the_games_size(tmp_path, monkeypatch):
+    config = fake_install(tmp_path)
+    spec = specs(config)[2]
+    command = inst.weston_command(spec)
+    assert "--backend=headless" in command and "--shell=kiosk" in command
+    assert "--width=2560" in command and "--height=1440" in command and f"--socket={spec.wayland_socket}" in command
+    assert "--renderer=gl" in command  # linux-dmabuf, so Xwayland gets DRI3 and glamor
+    assert inst.xwayland_command(spec, "weston").endswith("-glamor gl -noreset")
+    assert inst.xwayland_command(spec, "hyprland").endswith("-shm -noreset")
+    monkeypatch.setattr(inst.shutil, "which", lambda name: None)
+    assert config.resolved_host() == "hyprland"
+    monkeypatch.setattr(inst.shutil, "which", lambda name: "/usr/bin/weston")
+    assert config.resolved_host() == "weston"

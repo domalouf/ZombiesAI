@@ -176,21 +176,52 @@ def type_text(sink, text: str, *, hold_s: float = 0.02, sleep=None) -> None:
         sleep(hold_s)
 
 
-def console_command(sink, command: str, *, console_key: str = "grave", settle_s: float = 0.3, sleep=None) -> None:
-    """Open WaW's console, type `command`, run it, close the console. Needs `monkeytoy 0` (instances.py passes
-    it at launch); without it the key does nothing and the reset falls through to relaunching the game."""
+def tap_key(sink, name: str, *, hold_s: float = 0.03, sleep=None) -> None:
+    """Press and release one key."""
     import time
 
     sleep = sleep or time.sleep
-    for down in (True, False):
-        sink.key(console_key, down)
-        sink.sync()
-    sleep(settle_s)
+    sink.key(name, True)
+    sink.sync()
+    sleep(hold_s)
+    sink.key(name, False)
+    sink.sync()
+
+
+def console_command(sink, command: str, *, console_key: str = "grave", settle_s: float = 0.3, is_open=None,
+                    sleep=None) -> bool:
+    """Open WaW's console, type `command`, run it, close the console. Needs `monkeytoy 0` (instances.py passes
+    it at launch); without it the key does nothing and the reset falls through to relaunching the game.
+
+    The console key is a toggle, so with `is_open` (a callable that looks at the screen, realgame/console.py)
+    the console is only toggled when it is in the wrong state -- and nothing is typed unless it is seen open,
+    because keys typed into the game are its bindings (`t` opens the chat). Without `is_open` it toggles
+    blind, open then closed. Returns whether the command was typed."""
+    import time
+
+    sleep = sleep or time.sleep
+
+    def toggle():
+        for down in (True, False):
+            sink.key(console_key, down)
+            sink.sync()
+        sleep(settle_s)
+
+    if is_open is None:
+        toggle()
+        type_text(sink, command + "\n", sleep=sleep)
+        sleep(settle_s)
+        toggle()
+        return True
+    if not is_open():
+        toggle()
+        if not is_open():
+            return False  # a loading screen or a menu that swallows the key: the caller will try again
     type_text(sink, command + "\n", sleep=sleep)
     sleep(settle_s)
-    for down in (True, False):
-        sink.key(console_key, down)
-        sink.sync()
+    if is_open():
+        toggle()
+    return True
 
 
 CHAR_KEYS: dict[str, tuple[str, bool]] = {c: (c, False) for c in "abcdefghijklmnopqrstuvwxyz0123456789"}

@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 import torch
@@ -149,3 +151,26 @@ def test_parallel_training_runs_end_to_end_on_the_sim(bc_checkpoint, tmp_path):
     assert rows[-1]["step"] >= 1200 and "return_mean" in rows[-1] and "round_reached_mean" in rows[-1]
     assert json.loads((tmp_path / "run" / "config.json").read_text())["env"] == "nacht-render"
     assert BCAgent(checkpoint).act({"pixels": frame(9)}).shape == (len(spec.ACTION_NVEC),)
+
+
+def test_a_continued_run_keeps_its_anchor_on_the_original_prior(bc_checkpoint, tmp_path):
+    config = RLConfig(init=str(bc_checkpoint), critic_warmup_updates=1, minibatch_size=32, update_epochs=2,
+                      device="cpu", target_kl=None)
+    first = Learner(config, torch.device("cpu"))
+    for seed in range(3):
+        first.update(synthetic_segments(first, seed=seed))
+    one = tmp_path / "one.pt"
+    first.checkpoint(one, step=100)
+    # a checkpoint from before the anchor was recorded: only its parent is known
+    blob = torch.load(one, weights_only=False)
+    del blob["rl"]["reference"]
+    torch.save(blob, one)
+
+    second = Learner(replace(config, init=str(one)), torch.device("cpu"))
+    assert second.reference == str(bc_checkpoint) and second.updates == 3
+    assert second.kl_coef == first.kl_coef < config.kl_coef
+    stats = second.update(synthetic_segments(second, seed=9))
+    assert not stats["warmup"] and stats["kl_ref"] > 0  # anchored to BC, which the policy has moved from
+    two = tmp_path / "two.pt"
+    second.checkpoint(two, step=200)
+    assert Learner(replace(config, init=str(two)), torch.device("cpu")).reference == str(bc_checkpoint)
