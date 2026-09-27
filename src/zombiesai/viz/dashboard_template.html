@@ -179,7 +179,7 @@
 </main>
 
 <script>
-const DATA = /*__DASHBOARD_DATA__*/null;
+let DATA = /*__DASHBOARD_DATA__*/null;
 
 const SURFACE = "#212a27";
 const STATUS_ICON = { good: "OK", warning: "!", serious: "!!", critical: "X", info: "-" };
@@ -240,7 +240,7 @@ function svg(tag, props = {}) {
 }
 
 /* -- state ----------------------------------------------------------------- */
-const runs = DATA.runs;
+let runs = DATA.runs;
 // One group per environment (plus one each for BC and the IDM). Runs are sorted newest-first, so the
 // group the reader is most likely to want is simply the first one.
 const groups = [];
@@ -248,6 +248,19 @@ for (const r of runs) if (!groups.some((g) => g.key === r.group)) groups.push({ 
 const state = { group: groups.length ? groups[0].key : null, visible: new Set(runs.map((r) => r.name)) };
 let charts = [];
 const inGroup = () => runs.filter((r) => r.group === state.group);
+
+/* New numbers from a live server (scripts/supervise.py). What the reader chose stays chosen: the group, and
+   which runs are hidden. A run that appears is shown. */
+function refreshData(next) {
+  const known = new Set(runs.map((r) => r.name));
+  DATA = next;
+  runs = DATA.runs;
+  groups.length = 0;
+  for (const r of runs) if (!groups.some((g) => g.key === r.group)) groups.push({ key: r.group, label: r.group_label });
+  if (!groups.some((g) => g.key === state.group)) state.group = groups.length ? groups[0].key : null;
+  for (const r of runs) if (!known.has(r.name)) state.visible.add(r.name);
+  render();
+}
 
 /* -- chart ------------------------------------------------------------------
    One line chart, drawn at the container's real pixel size and redrawn on resize, so the type stays

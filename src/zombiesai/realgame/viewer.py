@@ -200,41 +200,55 @@ def mpv_command(width: int, height: int, title: str) -> list[str]:
             "--osd-level=0", "--scale=bilinear", f"--title={title}", "-"]
 
 
+class DamageFeed:
+    """The root of one X server, and the damage that lands on it: `wait()` blocks until there is some (or the
+    timeout passes) and returns it as (y, height) rows. `grabber` reads the pixels."""
+
+    def __init__(self, display: str):
+        self.grabber = X11Grabber(display=display)  # the root: in a rootful Xwayland, that is the game
+        self.width, self.height = self.grabber.size
+        x11, xdamage = _load("X11", "libX11.so.6"), _load("Xdamage", "libXdamage.so.1")
+        void, cint, ulong = ctypes.c_void_p, ctypes.c_int, ctypes.c_ulong
+        self._pending = _bind(x11, "XPending", cint, [void])
+        self._next_event = _bind(x11, "XNextEvent", cint, [void, void])
+        connection = _bind(x11, "XConnectionNumber", cint, [void])
+        query = _bind(xdamage, "XDamageQueryExtension", cint, [void, ctypes.POINTER(cint), ctypes.POINTER(cint)])
+        create = _bind(xdamage, "XDamageCreate", ulong, [void, ulong, cint])
+
+        self._event_base, error_base = cint(), cint()
+        if not query(self.grabber.display, ctypes.byref(self._event_base), ctypes.byref(error_base)):
+            raise SystemExit(f"{display} has no DAMAGE extension")
+        create(self.grabber.display, self.grabber.root, 0)  # XDamageReportRawRectangles: each, as it lands
+        self._fd = connection(self.grabber.display)
+        self._event = ctypes.create_string_buffer(192)  # sizeof(XEvent)
+        self._notify = _DamageNotify.from_buffer(self._event)
+
+    def wait(self, timeout_s: float) -> list[tuple[int, int]]:
+        display = self.grabber.display
+        # Xlib may already hold events it read during the last grab's round trip; the socket would not say.
+        if not self._pending(display):
+            select.select([self._fd], [], [], timeout_s)
+        rects = []
+        while self._pending(display):
+            self._next_event(display, self._event)
+            if self._notify.type == self._event_base.value:
+                rects.append((self._notify.area.y, self._notify.area.height))
+        return rects
+
+
 def watch(display: str, title: str, fps: float = 30) -> None:
     """Pipe whole frames of `display`, at most `fps` a second, to an mpv window until either side goes away."""
-    grabber = X11Grabber(display=display)  # the root: in a rootful Xwayland, that is the game
-    width, height = grabber.size
-    x11, xdamage = _load("X11", "libX11.so.6"), _load("Xdamage", "libXdamage.so.1")
-    void, cint, ulong = ctypes.c_void_p, ctypes.c_int, ctypes.c_ulong
-    pending = _bind(x11, "XPending", cint, [void])
-    next_event = _bind(x11, "XNextEvent", cint, [void, void])
-    connection = _bind(x11, "XConnectionNumber", cint, [void])
-    query = _bind(xdamage, "XDamageQueryExtension", cint, [void, ctypes.POINTER(cint), ctypes.POINTER(cint)])
-    create = _bind(xdamage, "XDamageCreate", ulong, [void, ulong, cint])
-
-    event_base, error_base = cint(), cint()
-    if not query(grabber.display, ctypes.byref(event_base), ctypes.byref(error_base)):
-        raise SystemExit(f"{display} has no DAMAGE extension")
-    create(grabber.display, grabber.root, 0)  # XDamageReportRawRectangles: every rectangle, as it lands
-    fd = connection(grabber.display)
-    event = ctypes.create_string_buffer(192)  # sizeof(XEvent)
-    notify = _DamageNotify.from_buffer(event)
-    gate = FrameGate(height, min_interval_s=1 / fps if fps else 0.0)
-
-    player = subprocess.Popen(mpv_command(width, height, title), stdin=subprocess.PIPE, bufsize=0)
+    feed = DamageFeed(display)
+    gate = FrameGate(feed.height, min_interval_s=1 / fps if fps else 0.0)
+    player = subprocess.Popen(mpv_command(feed.width, feed.height, title), stdin=subprocess.PIPE, bufsize=0)
     try:
-        player.stdin.write(np.ascontiguousarray(grabber.grab_bgrx()).data)  # something to show before any damage
+        player.stdin.write(np.ascontiguousarray(feed.grabber.grab_bgrx()).data)  # something before any damage
         while player.poll() is None:
-            # Xlib may already hold events it read during the last grab's round trip; the socket would not say.
-            if not pending(grabber.display):
-                select.select([fd], [], [], gate.wait_s(time.monotonic()))
-            while pending(grabber.display):
-                next_event(grabber.display, event)
-                if notify.type == event_base.value:
-                    gate.damaged(notify.area.y, notify.area.height, time.monotonic())
+            for y, h in feed.wait(gate.wait_s(time.monotonic())):
+                gate.damaged(y, h, time.monotonic())
             now = time.monotonic()
             if gate.due(now):
-                player.stdin.write(np.ascontiguousarray(grabber.grab_bgrx()).data)
+                player.stdin.write(np.ascontiguousarray(feed.grabber.grab_bgrx()).data)
                 gate.shown(now)  # when the grab began: the write's own time must not stretch the interval
     except BrokenPipeError:  # the window was closed
         pass

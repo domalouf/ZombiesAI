@@ -1,0 +1,237 @@
+<script>
+/* Live, from scripts/supervise.py on this machine: the games every 2 s, the trainers every 5 s, the curves every
+   20 s (and only when a run changed). Nothing polls while the tab is hidden, so the game monitors -- which run
+   only while someone looks -- stop on their own. */
+const live = { games: null, selected: null, workspace: null, fps: null, busy: false, lost: false, cards: new Map(),
+               barKey: "", trainers: new Map(), runsKey: "" };
+
+async function api(path, body) {
+  const opts = body === undefined ? {} : {
+    method: "POST", body: JSON.stringify(body),
+    headers: { "Content-Type": "application/json", "X-Supervise": "1" },  // no other page can send this
+  };
+  const response = await fetch(path, opts);
+  if (!response.ok) throw new Error(`${path}: ${response.status}`);
+  return response.json();
+}
+
+function connection(ok) {
+  live.lost = !ok;
+  const node = document.getElementById("conn");
+  if (node) {
+    node.className = "conn" + (ok ? "" : " lost");
+    node.textContent = ok ? "live" : "server not answering";
+  }
+}
+
+/* -- games ----------------------------------------------------------------- */
+function gameState(s) {
+  if (!s.monitor) return ["info", "-", "checking"];
+  if (!s.game) return ["serious", "!!", "no game window"];
+  if (s.fps == null) return ["info", "-", "measuring"];
+  if (!s.fps) return ["warning", "!", "no frames"];
+  return ["good", "OK", "running"];
+}
+
+const stackText = (s) => s.stack === "gpu" ? "GPU frames (glamor)" : "CPU copy (-shm), ~11 fps at most";
+
+async function showViewers(displays, focus = false) {
+  live.busy = true;
+  renderBar(true);
+  try {
+    await api("/api/viewers", { displays, workspace: live.workspace, fps: live.fps, focus });
+  } catch (e) { connection(false); }
+  live.busy = false;
+  await pollGames();
+}
+
+const anyWatched = () => live.games.screens.some((s) => s.watched);
+
+function renderBar(force = false) {
+  const g = live.games;
+  const open = anyWatched();
+  const key = [open, live.busy, live.workspace, live.fps, g.thumbs, live.lost].join("|");
+  if (key === live.barKey && !force) return;
+  live.barKey = key;
+  const chosen = () => g.screens.filter((s) => live.selected.has(s.number)).map((s) => s.number);
+  const workspace = el("select", { "aria-label": "Workspace for the viewer windows", onchange: (e) => {
+    live.workspace = e.target.value;
+    if (anyWatched()) showViewers(chosen()); else renderBar(true);
+  } }, Array.from({ length: 10 }, (_, i) => {
+    const o = el("option", { value: String(i + 1), text: String(i + 1) });
+    if (String(i + 1) === live.workspace) o.selected = true;
+    return o;
+  }));
+  const fpsChip = (v) => el("button", { class: "chip seg", "aria-pressed": String(live.fps === v), onclick: () => {
+    live.fps = v;
+    if (anyWatched()) showViewers(chosen()); else renderBar(true);
+  } }, [document.createTextNode(`${v} fps`)]);
+  mount(document.getElementById("viewer-bar"), [
+    el("span", { class: "caption", text: "Viewer windows" }),
+    el("button", {
+      class: "chip primary", "aria-pressed": String(open), disabled: live.busy ? "" : null,
+      title: open ? "Close every viewer window" : "Open a viewer for each game marked Watch",
+      onclick: () => showViewers(open ? [] : chosen()),
+    }, [el("span", { class: "key" }), document.createTextNode(live.busy ? "Working..." : open ? "Shown" : "Hidden")]),
+    el("span", { class: "caption", text: "on workspace" }),
+    workspace,
+    fpsChip(15), fpsChip(30), fpsChip(60),
+    el("button", { class: "chip", onclick: () => api("/api/goto", { workspace: live.workspace }).catch(() => connection(false)) },
+      [document.createTextNode(`Go to workspace ${live.workspace}`)]),
+    el("span", { class: "spacer" }),
+    el("button", { class: "chip", "aria-pressed": String(g.thumbs), onclick: async () => {
+      await api("/api/thumbs", { on: !g.thumbs }).catch(() => connection(false));
+      await pollGames();
+    } }, [el("span", { class: "key" }), document.createTextNode("Thumbnails")]),
+    el("span", { id: "conn", class: "conn" + (live.lost ? " lost" : ""), text: live.lost ? "server not answering" : "live" }),
+  ]);
+}
+
+function gameCard(s) {
+  const img = el("img", { class: "thumb", alt: `Latest whole frame on display ${s.display}`, width: 320, height: 180 });
+  const off = el("div", { class: "thumb off", text: "Thumbnails off" });
+  const state = el("span", { class: "state" });
+  const watch = el("button", { class: "chip", title: "Include this game when the viewer windows are shown",
+    onclick: () => {
+      if (live.selected.has(s.number)) live.selected.delete(s.number); else live.selected.add(s.number);
+      const chosen = live.games.screens.filter((x) => live.selected.has(x.number)).map((x) => x.number);
+      if (anyWatched()) showViewers(chosen); else renderGames();
+    } }, [el("span", { class: "key" }), document.createTextNode("Watch")]);
+  const fps = el("span", { class: "value" });
+  const detail = el("div", { class: "detail" });
+  const node = el("article", { class: "card game" }, [
+    img, off,
+    el("div", { class: "game-head" }, [el("span", { class: "name", text: s.display }), state, watch]),
+    el("div", { class: "game-stats" }, [fps, el("span", { class: "label", text: "whole frames a second" }), detail]),
+  ]);
+  return { node, img, off, state, watch, fps, detail, thumbAt: null };
+}
+
+function renderGames() {
+  const g = live.games;
+  renderBar();
+  const grid = document.getElementById("games");
+  if (!g.screens.length) {
+    live.cards.clear();
+    mount(grid, [el("p", { class: "empty-note", text: "No game instance is running (no rootful Xwayland found). " +
+      "Start the fleet with scripts/instances.py up and they appear here." })]);
+    return;
+  }
+  const numbers = g.screens.map((s) => s.number).join(",");
+  if ([...live.cards.keys()].join(",") !== numbers) {
+    live.cards = new Map(g.screens.map((s) => [s.number, gameCard(s)]));
+    mount(grid, [...live.cards.values()].map((c) => c.node));
+  }
+  for (const s of g.screens) {
+    const c = live.cards.get(s.number);
+    const [level, icon, word] = gameState(s);
+    c.state.className = `state ${level}`;
+    mount(c.state, [el("span", { class: "icon", text: icon }), document.createTextNode(word)]);
+    c.watch.setAttribute("aria-pressed", String(live.selected.has(s.number)));
+    c.fps.textContent = s.fps == null ? "--" : fmtValue(s.fps);
+    c.detail.textContent = [`${s.width}×${s.height}`, stackText(s), s.game || "no game window",
+      s.watched ? "in a viewer window" : null].filter(Boolean).join(" · ");
+    c.img.hidden = !g.thumbs;
+    c.off.hidden = g.thumbs;
+    if (g.thumbs && s.thumb_at && s.thumb_at !== c.thumbAt) {
+      c.thumbAt = s.thumb_at;
+      c.img.src = `/thumb/${s.number}.png?t=${s.thumb_at}`;
+    }
+  }
+}
+
+async function pollGames() {
+  try {
+    live.games = await api("/api/games");
+    connection(true);
+  } catch (e) {
+    connection(false);
+    return;
+  }
+  const g = live.games;
+  if (live.workspace === null) { live.workspace = g.viewer.workspace; live.fps = g.viewer.fps; }
+  if (live.selected === null) {
+    const watched = g.screens.filter((s) => s.watched).map((s) => s.number);
+    live.selected = new Set(watched.length ? watched : g.screens.map((s) => s.number));
+  }
+  for (const s of g.screens) if (!live.seen?.has(s.number) && !anyWatched()) live.selected.add(s.number);
+  live.seen = new Set(g.screens.map((s) => s.number));
+  renderGames();
+}
+
+/* -- trainers -------------------------------------------------------------- */
+function trainerCard() {
+  const run = el("span", { class: "run" });
+  const facts = el("span", { class: "facts" });
+  const log = el("pre", { class: "log", tabindex: "0" });
+  const node = el("article", { class: "card trainer" }, [el("div", { class: "top" }, [run, facts]), log]);
+  return { node, run, facts, log };
+}
+
+async function pollTrainers() {
+  let trainers;
+  try {
+    trainers = (await api("/api/live")).trainers;
+  } catch (e) { connection(false); return; }
+  const holder = document.getElementById("trainers");
+  if (!trainers.length) {
+    live.trainers.clear();
+    mount(holder, [el("p", { class: "empty-note", text: "No trainer is running. A scripts/train_*.py started from " +
+      "any checkout or worktree shows up here with its output." })]);
+    return;
+  }
+  const pids = trainers.map((t) => t.pid).join(",");
+  if ([...live.trainers.keys()].join(",") !== pids) {
+    live.trainers = new Map(trainers.map((t) => [t.pid, trainerCard()]));
+    mount(holder, [...live.trainers.values()].map((c) => c.node));
+  }
+  for (const t of trainers) {
+    const c = live.trainers.get(t.pid);
+    c.run.textContent = t.run || "a run not under any runs/ yet";
+    mount(c.facts, [
+      document.createTextNode(`pid ${t.pid} · running ${fmtDuration(t.elapsed_s)} · ${t.tree} · `),
+      el("code", { text: `${t.script} ${t.args}` }),
+    ]);
+    const atBottom = c.log.scrollTop + c.log.clientHeight >= c.log.scrollHeight - 4;
+    const text = t.tail.length ? t.tail.join("\n") : (t.log ? "(nothing printed yet)" : "(its output is not going to a file)");
+    if (c.log.textContent !== text) {
+      c.log.textContent = text;
+      if (atBottom) c.log.scrollTop = c.log.scrollHeight;  // follow the log, unless the reader scrolled up
+    }
+  }
+}
+
+/* -- runs ------------------------------------------------------------------ */
+async function pollRuns() {
+  let next;
+  try {
+    next = await api("/api/runs");
+  } catch (e) { connection(false); return; }
+  const key = next.runs.map((r) => `${r.name}:${r.updated}:${r.status}:${r.rows}`).join("|");
+  if (key !== live.runsKey) {
+    live.runsKey = key;
+    refreshData(next);  // the page's own renderer; what the reader chose stays chosen
+  }
+}
+
+/* -- clock ----------------------------------------------------------------- */
+document.getElementById("footer").textContent =
+  "Live from scripts/supervise.py on this machine — reads runs/*/metrics.jsonl in every checkout, " +
+  "watches the games' X servers read-only, and makes no request to anywhere else.";
+live.runsKey = DATA.runs.map((r) => `${r.name}:${r.updated}:${r.status}:${r.rows}`).join("|");
+
+const every = (ms, fn) => {
+  let timer = null;
+  const tick = async () => {
+    if (!document.hidden) await fn();
+    timer = setTimeout(tick, ms);
+  };
+  tick();
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) { clearTimeout(timer); tick(); }
+  });
+};
+every(2000, pollGames);
+every(5000, pollTrainers);
+every(20000, pollRuns);
+</script>

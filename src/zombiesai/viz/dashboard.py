@@ -444,8 +444,25 @@ def write_dashboard_html(
     """The dashboard as one file: data, styles, fonts and script inlined, no request to anywhere."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(dashboard_html(payload, standalone, refresh, embed_fonts, head))
+    return path
+
+
+def dashboard_html(
+    payload: dict,
+    standalone: bool = True,
+    refresh: float = 0,
+    embed_fonts: bool = True,
+    head: str = "",
+    body_before: str = "",
+    script_after: str = "",
+) -> str:
+    """The page itself. `body_before` goes above the runs, `script_after` after the page's own script, which
+    leaves `refreshData(payload)` behind for it (the live server's additions, viz/supervise.py)."""
     data = json.dumps(payload, separators=(",", ":"), allow_nan=False).replace("</", "<\\/")
     html = TEMPLATE.read_text().replace("/*__DASHBOARD_DATA__*/null", data, 1)
+    html = html.replace('<div id="body"></div>', body_before + '<div id="body"></div>', 1)
+    html = html.replace("</script>", "</script>\n" + script_after, 1) if script_after else html
     html = _local_fonts(html, embed=embed_fonts)
     if standalone:
         title = re.search(r"<title>.*?</title>\n", html).group(0)
@@ -458,8 +475,7 @@ def write_dashboard_html(
             f'<meta name="viewport" content="width=device-width, initial-scale=1">\n{title}{meta}</head>\n<body>\n'
             f"{html.replace(title, '', 1)}\n</body>\n</html>\n"
         )
-    path.write_text(html)
-    return path
+    return html
 
 
 def write_dashboard_site(
