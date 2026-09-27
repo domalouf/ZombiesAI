@@ -60,6 +60,7 @@ uv run python scripts/film.py --seed 10033  # film a game in first-person pixels
 uv run python scripts/train_ppo.py cartpole     # PPO correctness check (solves in ~5 min on CPU)
 uv run python scripts/train_ppo.py lunarlander  # the harder check
 uv run python scripts/train_ppo.py nacht-state  # the real thing: PPO on NachtSim's state vector
+uv run python scripts/train_ppo.py nacht-state --start-rounds 1 5  # curriculum: train from rounds 1-5 (eval stays at 1)
 uv run python scripts/curve.py runs/<run>                      # one run's learning curve, in the terminal
 uv run python scripts/dashboard.py                            # every run, as a page: curves, health, gates
 uv run python scripts/dashboard.py --watch 30                 # ...rebuilt every 30s while a run trains

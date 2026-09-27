@@ -52,6 +52,10 @@ domain-randomized per episode, scaled by `hardness`.
   weights, with no cycling animation, teddy bear, or pickup timer.
 - **Grenades are crude.** They land at a fixed throw distance (shortened by
   walls) with linear damage falloff, no cooking, and no bounces.
+- **Curriculum starts are invented.** With `start_rounds`, a training episode
+  can begin at a later round holding the starting pistol, closed doors, and up
+  to 1,000 points per round cleared. A real game that reached that round would
+  usually have a better gun and open doors. Evaluation always starts at round 1.
 
 **Perception and scoring**
 - **The damage overlay is a model.** The red vignette is modelled as tracking

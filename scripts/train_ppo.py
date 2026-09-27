@@ -18,6 +18,13 @@ def main() -> None:
     parser.add_argument("--ent-coef", type=float)
     parser.add_argument("--gamma", type=float)
     parser.add_argument("--hardness", type=float, help="NachtSim sim_hardness (default 0.5)")
+    parser.add_argument(
+        "--start-rounds",
+        type=int,
+        nargs=2,
+        metavar=("LO", "HI"),
+        help="NachtSim curriculum: start each training episode at a uniform round in [LO, HI]",
+    )
     parser.add_argument("--run-name", help="default: ppo-<env>-s<seed>-<timestamp>")
     args = parser.parse_args()
 
@@ -32,8 +39,13 @@ def main() -> None:
         }.items()
         if v is not None
     }
+    sim = {}
     if args.hardness is not None:
-        overrides["sim"] = {"hardness": args.hardness}
+        sim["hardness"] = args.hardness
+    if args.start_rounds is not None:
+        sim["start_rounds"] = tuple(args.start_rounds)
+    if sim:
+        overrides["sim"] = sim
     cfg = PPOConfig.for_preset(args.env, seed=args.seed, **overrides)
     name = args.run_name or f"ppo-{args.env}-s{args.seed}-{time.strftime('%Y%m%d-%H%M%S')}"
     checkpoint = train(cfg, Path("runs") / name)
