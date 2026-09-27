@@ -1,8 +1,11 @@
 import json
+import re
 import subprocess
+import sys
 
 from zombiesai.realgame import viewer
-from zombiesai.realgame.viewer import Box, Screen, grid, running_screens, usable_area, viewer_command
+from zombiesai.realgame.viewer import (Box, FrameGate, Screen, grid, mpv_command, running_screens, usable_area,
+                                      viewer_command)
 
 
 def completed(stdout: str, code: int = 0):
@@ -54,12 +57,26 @@ def test_four_make_a_centred_two_by_two_grid_in_order_and_three_leave_the_last_c
     assert len(grid(5, area, 16 / 9)) == 5 and grid(1, area, 16 / 9)[0].w > boxes[0].w
 
 
-def test_the_viewer_grabs_its_display_at_its_size_and_scales_to_its_window():
-    command = viewer_command(Screen(":61", 2560, 1440), Box(0, 0, 1200, 675), fps=20)
-    assert "-video_size 2560x1440" in command and "-framerate 20" in command and "scale=1200:675" in command
-    assert command.endswith("-window_title zombiesai-view:61 -i :61")
-    assert '"' not in command  # it travels inside a Lua string literal
-    assert "scale=" not in viewer_command(Screen(":60", 1280, 720), Box(0, 0, 1280, 720))
+def test_the_viewer_runs_this_module_with_this_python_and_nothing_a_lua_string_cannot_hold():
+    command = viewer_command(Screen(":61", 2560, 1440))
+    assert command.split()[0] == sys.executable
+    assert command.endswith("-m zombiesai.realgame.viewer --watch :61 --title zombiesai-view:61")
+    assert '"' not in command and re.match(viewer._PROCESS, command)
+
+
+def test_a_frame_is_shown_once_its_bottom_strip_lands_and_a_partial_redraw_after_it_settles():
+    gate = FrameGate(1440, settle_s=0.25)
+    assert not gate.damaged(0, 409, now=0.0) and not gate.damaged(409, 409, now=0.02)
+    assert not gate.damaged(818, 409, now=0.04) and gate.damaged(1227, 213, now=0.06)
+    gate.shown()
+    assert not gate.due(1.0)  # nothing new since
+    assert not gate.damaged(100, 50, now=1.0) and not gate.due(1.2) and gate.due(1.25)
+
+
+def test_mpv_reads_raw_frames_of_the_screens_size_and_shows_them_untimed():
+    command = mpv_command(2560, 1440, "zombiesai-view:60")
+    assert "--untimed" in command and "--demuxer-rawvideo-w=2560" in command and "--demuxer-rawvideo-h=1440" in command
+    assert "--title=zombiesai-view:60" in command and command[-1] == "-"
 
 
 def test_show_replaces_the_old_viewers_places_each_on_the_workspace_then_goes_there():
@@ -72,9 +89,9 @@ def test_show_replaces_the_old_viewers_places_each_on_the_workspace_then_goes_th
 
     screens = [Screen(":60", 2560, 1440), Screen(":61", 2560, 1440)]
     assert viewer.show(screens, workspace="7", run=run, say=lambda *a: None) == 2
-    assert calls[0][0] == "pkill"
+    assert calls[0] == ["pkill", "-f", viewer._PROCESS]
     dispatched = [c[2] for c in calls if c[:2] == ["hyprctl", "dispatch"]]
     assert len(dispatched) == 3
-    assert "[workspace 7 silent; float; size " in dispatched[0] and dispatched[0].endswith('-i :60")')
-    assert dispatched[1].endswith('-i :61")')
+    assert "[workspace 7 silent; float; size " in dispatched[0] and "--watch :60 " in dispatched[0]
+    assert "--watch :61 " in dispatched[1]
     assert dispatched[2] == 'hl.dsp.focus({ workspace = "7" })'

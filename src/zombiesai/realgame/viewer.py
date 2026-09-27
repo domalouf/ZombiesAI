@@ -2,8 +2,16 @@
 
 Each instance draws into an X server of its own (realgame/instances.py), which under the headless Weston host
 nothing on the desktop ever shows. But an X server's root window can be read by any X client, so a viewer here
-is just `ffplay -f x11grab -i :60`: a read-only copy of the picture, opened as an ordinary window on your
-desktop. It sends nothing back -- no input, no focus -- so the games cannot tell they are watched.
+is a read-only copy of that picture, opened as an ordinary window on your desktop. It sends nothing back -- no
+input, no focus -- so the games cannot tell they are watched.
+
+**Frames arrive in strips.** Without DRI3 (the X servers run `-shm`, see XWAYLAND_FLAGS) DXVK's frames reach
+the X server as plain PutImage requests, and a 2560x1440 frame is more than one request may carry: it lands as
+four strips of 409 rows, ~65 ms from first to last -- which also caps the picture at ~11 fps, whatever reads it.
+A viewer that grabs on a clock (`ffplay -f x11grab`) catches most frames with some strips new and some old,
+torn into four bands. So a viewer here listens for XDamage instead and grabs only once the bottom strip has
+landed: the server handles one request at a time, so that grab sees the whole frame. The frames are piped to
+mpv, which shows each as it comes (`--untimed`) and scales it on the GPU.
 
 The instances are found from their X servers' own command lines (`Xwayland :60 -geometry 2560x1440 ...`; the
 desktop's rootless Xwayland has no `-geometry`), not from fleet.json, so this works from any checkout and for
@@ -12,16 +20,26 @@ a grid in display order. Floating rather than tiled: Omarchy's dwindle splits fo
 three quarters-of-a-half, in whatever order they happened to map. They live on after the script exits.
 """
 
+import argparse
+import ctypes
 import json
 import math
 import re
+import select
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 
+import numpy as np
+
+from zombiesai.demos.x11_capture import X11Grabber, _bind, _load
 from zombiesai.realgame.instances import hyprland_dispatch, hyprland_exec
 
-TITLE_PREFIX = "zombiesai-view"  # every viewer's window title starts with this; it is how they are found again
+TITLE_PREFIX = "zombiesai-view"  # every viewer's window title starts with this
 GAP = 10  # between the viewers and around them, like Omarchy's gaps_out
+# How the viewer processes are found again: `<python> -m zombiesai.realgame.viewer --watch :60 ...`.
+_PROCESS = r"^\S+ -m zombiesai\.realgame\.viewer --watch :"
 _SERVER = re.compile(r"\bXwayland (:\d+)\b.*\s-geometry (\d+)x(\d+)\b")
 
 
@@ -88,16 +106,12 @@ def grid(n: int, area: Box, aspect: float, gap: int = GAP) -> list[Box]:
     return [Box(x0 + (i % cols) * (w + gap), y0 + (i // cols) * (h + gap), w, h) for i in range(n)]
 
 
-def viewer_command(screen: Screen, box: Box, *, fps: int = 15) -> str:
-    """ffplay grabbing `screen` with as little latency as it allows, scaled once to its window's size: a 1440p
-    frame is ~14 MB, a lot to upload for a window a quarter of the monitor."""
-    scale = f"-vf scale={box.w}:{box.h}:flags=fast_bilinear " if box.w < screen.width else ""
-    return ("ffplay -loglevel quiet -an -sn -fflags nobuffer -flags low_delay -framedrop "
-            f"-f x11grab -draw_mouse 0 -framerate {fps} -video_size {screen.width}x{screen.height} "
-            f"{scale}-window_title {screen.title} -i {screen.display}")
+def viewer_command(screen: Screen) -> str:
+    """What Hyprland runs for one viewer: this module, with the venv's own Python, so no `uv` is needed."""
+    return f"{sys.executable} -m zombiesai.realgame.viewer --watch {screen.display} --title {screen.title}"
 
 
-def show(screens: list[Screen], *, workspace: str = "9", fps: int = 15, focus: bool = True, run=subprocess.run,
+def show(screens: list[Screen], *, workspace: str = "9", focus: bool = True, run=subprocess.run,
          say=print) -> int:
     """Lay out a viewer for every screen on `workspace`, then (if `focus`) switch there. Any viewers already
     open are closed first, so rerunning after more instances come up lays them all out afresh. Returns how many
@@ -109,7 +123,7 @@ def show(screens: list[Screen], *, workspace: str = "9", fps: int = 15, focus: b
     opened = 0
     for screen, box in zip(screens, boxes):
         rules = f"workspace {workspace} silent; float; size {box.w} {box.h}; move {box.x} {box.y}"
-        if hyprland_exec(viewer_command(screen, box, fps=fps), rules, run=run):
+        if hyprland_exec(viewer_command(screen), rules, run=run):
             opened += 1
         else:
             say(f"  {screen.display}: Hyprland refused to launch the viewer")
@@ -119,4 +133,104 @@ def show(screens: list[Screen], *, workspace: str = "9", fps: int = 15, focus: b
 
 
 def close(*, run=subprocess.run) -> None:
-    run(["pkill", "-f", f"ffplay .*-window_title {TITLE_PREFIX}:"], capture_output=True)
+    """Close every viewer. Their mpv windows follow: mpv exits when its input ends."""
+    run(["pkill", "-f", _PROCESS], capture_output=True)
+
+
+# ------------------------------------------------------------------------------------------------ one viewer
+
+
+class FrameGate:
+    """Decides when the picture is whole. A frame is complete once damage reaches the bottom row; anything that
+    never does (a menu redrawing one corner) is let through after `settle_s`, so no change is ever lost."""
+
+    def __init__(self, height: int, settle_s: float = 0.25):
+        self.height = height
+        self.settle_s = settle_s
+        self.since: float | None = None  # when the first damage not yet shown arrived
+
+    def damaged(self, y: int, h: int, now: float) -> bool:
+        if self.since is None:
+            self.since = now
+        return y + h >= self.height or self.due(now)
+
+    def due(self, now: float) -> bool:
+        return self.since is not None and now - self.since >= self.settle_s
+
+    def shown(self) -> None:
+        self.since = None
+
+
+class _XRectangle(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_short), ("y", ctypes.c_short), ("width", ctypes.c_ushort),
+                ("height", ctypes.c_ushort)]
+
+
+class _DamageNotify(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+                ("display", ctypes.c_void_p), ("drawable", ctypes.c_ulong), ("damage", ctypes.c_ulong),
+                ("level", ctypes.c_int), ("more", ctypes.c_int), ("timestamp", ctypes.c_ulong),
+                ("area", _XRectangle), ("geometry", _XRectangle)]
+
+
+def mpv_command(width: int, height: int, title: str) -> list[str]:
+    """mpv reading raw frames on stdin and showing each the moment it arrives. BGRX, the X server's own
+    layout, goes to the GPU as it is: RGB would cost a conversion on each side of the pipe. --no-config: your
+    own mpv.conf is for films, and a watch-later or resume setting has no business here."""
+    return ["mpv", "--no-config", "--really-quiet", "--profile=low-latency", "--untimed", "--cache=no",
+            "--demuxer=rawvideo", f"--demuxer-rawvideo-w={width}", f"--demuxer-rawvideo-h={height}",
+            "--demuxer-rawvideo-mp-format=bgr0", "--demuxer-rawvideo-fps=60", "--no-audio", "--osc=no",
+            "--osd-level=0", "--scale=bilinear", f"--title={title}", "-"]
+
+
+def watch(display: str, title: str) -> None:
+    """Pipe every whole frame of `display` to an mpv window until either side goes away."""
+    grabber = X11Grabber(display=display)  # the root: in a rootful Xwayland, that is the game
+    width, height = grabber.size
+    x11, xdamage = _load("X11", "libX11.so.6"), _load("Xdamage", "libXdamage.so.1")
+    void, cint, ulong = ctypes.c_void_p, ctypes.c_int, ctypes.c_ulong
+    pending = _bind(x11, "XPending", cint, [void])
+    next_event = _bind(x11, "XNextEvent", cint, [void, void])
+    connection = _bind(x11, "XConnectionNumber", cint, [void])
+    query = _bind(xdamage, "XDamageQueryExtension", cint, [void, ctypes.POINTER(cint), ctypes.POINTER(cint)])
+    create = _bind(xdamage, "XDamageCreate", ulong, [void, ulong, cint])
+
+    event_base, error_base = cint(), cint()
+    if not query(grabber.display, ctypes.byref(event_base), ctypes.byref(error_base)):
+        raise SystemExit(f"{display} has no DAMAGE extension")
+    create(grabber.display, grabber.root, 0)  # XDamageReportRawRectangles: every rectangle, as it lands
+    fd = connection(grabber.display)
+    event = ctypes.create_string_buffer(192)  # sizeof(XEvent)
+    notify = _DamageNotify.from_buffer(event)
+    gate = FrameGate(height)
+
+    player = subprocess.Popen(mpv_command(width, height, title), stdin=subprocess.PIPE, bufsize=0)
+    try:
+        player.stdin.write(np.ascontiguousarray(grabber.grab_bgrx()).data)  # something to show before any damage
+        while player.poll() is None:
+            select.select([fd], [], [], gate.settle_s)
+            ready = False
+            while pending(grabber.display):
+                next_event(grabber.display, event)
+                if notify.type == event_base.value:
+                    ready |= gate.damaged(notify.area.y, notify.area.height, time.monotonic())
+            if ready or gate.due(time.monotonic()):
+                player.stdin.write(np.ascontiguousarray(grabber.grab_bgrx()).data)
+                gate.shown()
+    except BrokenPipeError:  # the window was closed
+        pass
+    finally:
+        if player.poll() is None:
+            player.terminate()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="one viewer: stream an instance's X server to an mpv window")
+    parser.add_argument("--watch", required=True, metavar="DISPLAY", help="e.g. :60")
+    parser.add_argument("--title", default=None)
+    args = parser.parse_args()
+    watch(args.watch, args.title or f"{TITLE_PREFIX}{args.watch}")
+
+
+if __name__ == "__main__":
+    main()
