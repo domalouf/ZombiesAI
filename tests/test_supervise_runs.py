@@ -8,7 +8,27 @@ from pathlib import Path
 import pytest
 
 from zombiesai.viz import supervise
-from zombiesai.viz.supervise import Supervisor, descendants, launch_options, live_trainers, start_run
+from zombiesai.viz.supervise import (Supervisor, descendants, launch_options, live_trainers, recent_speeds,
+                                     setting_flags, start_run, trainer_settings)
+
+# A trainer's RLConfig as the dashboard reads it: parsed, never imported.
+FAKE_RL_CONFIG = '''\
+from dataclasses import dataclass, field
+
+
+@dataclass
+class RLConfig:
+    init: str = ""  # the BC checkpoint RL starts from
+    env: str = "real"
+    n_actors: int = 4
+    total_steps: int = 2_000_000
+    lr: float = 5e-5
+    target_kl: float | None = 0.03  # stop an update's epochs early past 1.5x this
+    seed: int = 0
+    bindings: str = "configs/waw_bindings.json"
+    hear: bool = True  # a checkpoint trained with audio hears its own instance's sink
+    sim: dict = field(default_factory=dict)
+'''
 
 # Stands in for scripts/train_rl.py: writes metrics while it runs and, on Ctrl-C (SIGINT), says so and writes its
 # checkpoint -- what the real trainer does.
@@ -41,6 +61,8 @@ def repo(tmp_path):
     (tmp_path / "runs" / "rl1" / "checkpoint.pt").write_bytes(b"")
     (tmp_path / "runs" / "bc_real2").mkdir()
     (tmp_path / "runs" / "bc_real2" / "bc.pt").write_bytes(b"")
+    (tmp_path / "src" / "zombiesai" / "rl").mkdir(parents=True)
+    (tmp_path / "src" / "zombiesai" / "rl" / "parallel_ppo.py").write_text(FAKE_RL_CONFIG)
     return tmp_path
 
 
@@ -135,3 +157,71 @@ def test_every_process_below_a_trainer_is_found_for_a_forced_stop():
         for p in descendants(shell.pid):
             subprocess.run(["kill", str(p)], capture_output=True)
         shell.wait(timeout=5)
+
+
+def test_the_settings_are_the_trainers_own_fields_with_their_defaults_and_comments(repo):
+    settings = {s["name"]: s for s in trainer_settings(repo)}
+    assert list(settings) == ["total_steps", "lr", "target_kl", "seed", "bindings", "hear"]  # not init/env/sim
+    assert settings["total_steps"] == {"name": "total_steps", "flag": "--total-steps", "kind": "int",
+                                       "default": 2_000_000, "hint": "", "group": "length"}
+    assert settings["lr"]["kind"] == "float" and settings["lr"]["group"] == "learning"
+    assert settings["target_kl"]["kind"] == "float" and settings["target_kl"]["hint"].startswith("stop an update")
+    assert settings["hear"]["kind"] == "bool" and settings["bindings"]["kind"] == "str"
+
+
+def test_only_changed_settings_become_flags_and_bad_values_are_refused(repo):
+    settings = trainer_settings(repo)
+    flags, problem = setting_flags(settings, {"total_steps": "500000", "lr": 5e-5, "hear": False, "seed": "3",
+                                              "bindings": "configs/waw_bindings.json"})
+    assert problem is None and flags == ["--total-steps", "500000", "--no-hear", "--seed", "3"]
+    assert setting_flags(settings, {"total_steps": "2e6"}) == ([], None)  # the default, however written
+    assert "not an int" in setting_flags(settings, {"seed": "1.5"})[1]
+    assert "not a float" in setting_flags(settings, {"lr": "fast"})[1]
+    assert "not a float" in setting_flags(settings, {"lr": "nan"})[1]
+    assert "not a setting" in setting_flags(settings, {"fleet_root": "/tmp"})[1]
+    assert "not a str" in setting_flags(settings, {"bindings": "a\nb"})[1]
+
+
+def test_the_estimate_uses_the_newest_runs_speed_per_game(repo):
+    for name, env, sps, games in (("rl1", "real-waw", 50, 4), ("sim1", "nacht-render", 400, 8)):
+        (repo / "runs" / name).mkdir(exist_ok=True)
+        (repo / "runs" / name / "config.json").write_text(json.dumps({"env": env, "n_actors": games}))
+        (repo / "runs" / name / "metrics.jsonl").write_text(json.dumps({"update": 1, "sps": sps}) + "\n")
+    speeds = recent_speeds(repo)
+    assert speeds["real"] == {"run": "rl1", "sps": 50, "games": 4, "per_game": 12.5}
+    assert speeds["sim"]["per_game"] == 50.0
+
+
+def test_a_run_starts_with_its_settings_as_flags_and_stops_itself_at_its_time_limit(repo, tmp_path_factory):
+    state = tmp_path_factory.mktemp("state")
+    supervisor = Supervisor(repo, state)
+    started = supervisor.start("main", "runs/rl1/checkpoint.pt", 2, "rl4", "", env="sim", sim_hardness=0.25,
+                               settings={"total_steps": 500000, "lr": 5e-5, "hear": False}, stop_after_min=0.05)
+    assert started.get("ok"), started
+    pid, log = started["pid"], Path(started["log"])
+    try:
+        assert started["command"].endswith("--out runs/rl4 --env sim --sim-hardness 0.25 --total-steps 500000 --no-hear")
+        assert abs(started["stop_at"] - (time.time() + 3)) < 2
+        [trainer] = [t for t in supervisor.live()["trainers"] if t["pid"] == pid]
+        assert trainer["stop_at"] == started["stop_at"]
+        # A dashboard that restarts keeps the limit: it is on disk.
+        assert json.loads((state / "deadlines.json").read_text())[str(pid)]["run"] == "rl4"
+        again = Supervisor(repo, state)
+        assert wait_for(lambda: again.enforce_deadlines() or "time limit reached" in log.read_text(), 10)
+        assert wait_for(lambda: not any(t["pid"] == pid for t in live_trainers({})))
+        text = log.read_text()
+        assert "interrupted: stopping the actors" in text and (repo / "runs" / "rl4" / "checkpoint.pt").exists()
+        again.enforce_deadlines()
+        assert json.loads((state / "deadlines.json").read_text()) == {}  # forgotten once the run has ended
+    finally:
+        subprocess.run(["kill", "-9", str(pid)], capture_output=True)
+
+
+def test_a_time_limit_must_be_sane_and_settings_must_belong_to_the_trainer(repo, tmp_path_factory):
+    supervisor = Supervisor(repo, tmp_path_factory.mktemp("state"))
+    common = dict(tree="main", init="runs/rl1/checkpoint.pt", actors=1, name="rl5", extra="", env="sim")
+    assert "time limit" in supervisor.start(**common, stop_after_min=-1)["error"]
+    assert "time limit" in supervisor.start(**common, stop_after_min=60 * 24 * 8)["error"]
+    assert "not a setting" in supervisor.start(**common, settings={"init": "x"})["error"]
+    assert "real or sim" in supervisor.start(**{**common, "env": "moon"})["error"]
+    assert not (repo / "runs" / "rl5").exists()

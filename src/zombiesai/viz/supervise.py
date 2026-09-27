@@ -23,7 +23,9 @@ commands only with an `X-Supervise` header, which no other page can send without
 """
 
 import argparse
+import ast
 import json
+import math
 import os
 import re
 import shlex
@@ -240,8 +242,15 @@ def monitor(display: str, out_dir: Path, *, thumb_every_s: float = 2.0) -> None:
 # ------------------------------------------------------------------------------------------------ starting runs
 
 TRAINER = Path("scripts") / "train_rl.py"
+RL_CONFIG = Path("src") / "zombiesai" / "rl" / "parallel_ppo.py"
 RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
 FORCE_AFTER_S = 30.0  # a graceful stop gets this long before the page offers to force one
+MAX_TIME_LIMIT_MIN = 7 * 24 * 60
+# RLConfig fields that are not settings in the form: the form's own fields set them, or train_rl.py has no flag.
+NOT_SETTINGS = {"init", "env", "n_actors", "fleet_root", "sim"}
+LEARNING = {"lr", "ent_coef", "kl_coef", "kl_decay", "kl_min", "target_kl", "clip_coef", "gamma", "gae_lambda",
+            "update_epochs", "minibatch_size", "batch_steps", "segment_steps", "vf_coef", "max_grad_norm",
+            "max_policy_lag", "critic_warmup_updates", "reward_scale"}
 
 
 def python_for(tree: Path, main: Path) -> Path:
@@ -255,13 +264,113 @@ def python_for(tree: Path, main: Path) -> Path:
 
 
 def checkpoints(tree: Path) -> list[dict]:
-    """What a run can start from: RL checkpoints (to continue) and BC policies (to fine-tune), newest first."""
+    """What a run can start from: RL checkpoints (to continue) and BC policies (to fine-tune), newest first. An RL
+    checkpoint carries its run's config.json, so the form can offer to continue with the same settings."""
     found = []
     for filename, kind in (("checkpoint.pt", "RL"), ("bc.pt", "BC")):
         for f in (tree / "runs").glob(f"*/{filename}"):
+            config = None
+            if kind == "RL":
+                try:
+                    config = json.loads((f.parent / "config.json").read_text())
+                except (OSError, ValueError):
+                    pass
             found.append({"path": str(f.relative_to(tree)), "run": f.parent.name, "kind": kind,
-                          "updated": f.stat().st_mtime})
+                          "updated": f.stat().st_mtime, "config": config})
     return sorted(found, key=lambda c: c["updated"], reverse=True)
+
+
+def trainer_settings(tree: Path) -> list[dict]:
+    """RLConfig's fields as the form offers them, read from the tree's own source with `ast` (no torch, no import
+    of anything), so a setting added to the trainer appears here without the dashboard changing. Each has the
+    flag train_rl.py makes of it, a kind, the code's default, the field's comment as a hint, and a group."""
+    try:
+        source = (tree / RL_CONFIG).read_text()
+        module = ast.parse(source)
+    except (OSError, SyntaxError):
+        return []
+    lines = source.splitlines()
+    config = next((n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "RLConfig"), None)
+    settings = []
+    for node in config.body if config else []:
+        if not (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None):
+            continue
+        name = node.target.id
+        if name in NOT_SETTINGS:
+            continue
+        try:
+            default = ast.literal_eval(node.value)
+        except ValueError:  # field(default_factory=...): not something a flag sets
+            continue
+        annotation = ast.unparse(node.annotation)
+        kind = {"bool": "bool", "int": "int", "str": "str"}.get(annotation, "float" if "float" in annotation else "str")
+        line = lines[node.lineno - 1]
+        settings.append({
+            "name": name, "flag": "--" + name.replace("_", "-"), "kind": kind, "default": default,
+            "hint": line.split("#", 1)[1].strip() if "#" in line else "",
+            "group": "length" if name == "total_steps" else "learning" if name in LEARNING else "run",
+        })
+    return settings
+
+
+def _coerce(kind: str, raw):
+    if kind == "bool":
+        if isinstance(raw, bool):
+            return raw
+        word = str(raw).strip().lower()
+        if word in ("true", "1", "yes", "on"):
+            return True
+        if word in ("false", "0", "no", "off"):
+            return False
+        raise ValueError
+    if kind in ("int", "float"):
+        value = float(raw)
+        if not math.isfinite(value) or (kind == "int" and not value.is_integer()):
+            raise ValueError
+        return int(value) if kind == "int" else value
+    value = str(raw)
+    if not value or any(c in value for c in "\0\n\r"):
+        raise ValueError
+    return value
+
+
+def setting_flags(settings: list[dict], values: dict) -> tuple[list[str], str | None]:
+    """train_rl.py flags for the values that differ from the code's defaults, each checked against its kind."""
+    known = {s["name"]: s for s in settings}
+    flags = []
+    for name, raw in values.items():
+        setting = known.get(name)
+        if setting is None:
+            return [], f"{name} is not a setting of this checkout's trainer"
+        try:
+            value = _coerce(setting["kind"], raw)
+        except (TypeError, ValueError):
+            return [], f"{name}: {raw!r} is not {'an' if setting['kind'] == 'int' else 'a'} {setting['kind']}"
+        if value == setting["default"]:
+            continue
+        if setting["kind"] == "bool":
+            flags.append(setting["flag"] if value else "--no-" + setting["flag"][2:])
+        else:
+            flags += [setting["flag"], str(value)]
+    return flags, None
+
+
+def recent_speeds(tree: Path) -> dict:
+    """How fast this tree's newest runs went, per game, for the form's estimate of how long a run takes: the last
+    logged steps per second of the newest real-game run and of the newest NachtSim run."""
+    speeds = {}
+    logs = sorted((tree / "runs").glob("*/metrics.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
+    for log in logs[:12]:
+        try:
+            config = json.loads((log.parent / "config.json").read_text())
+            last = json.loads(_tail(log, 1)[-1])
+        except (OSError, ValueError, IndexError):
+            continue
+        env = "real" if config.get("env") == "real-waw" else "sim" if config.get("env") == "nacht-render" else None
+        games, sps = config.get("n_actors"), last.get("sps")
+        if env and env not in speeds and isinstance(games, int) and games > 0 and isinstance(sps, (int, float)) and sps > 0:
+            speeds[env] = {"run": log.parent.name, "sps": sps, "games": games, "per_game": sps / games}
+    return speeds
 
 
 def next_run_name(tree: Path) -> str:
@@ -290,16 +399,19 @@ def launch_options(repo: Path, trainers: list[dict]) -> dict:
             continue
         busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
         options.append({"label": label, "checkpoints": checkpoints(tree)[:40], "next": next_run_name(tree),
-                        "fleet": fleet_of(tree), "busy": busy})
+                        "fleet": fleet_of(tree), "busy": busy, "settings": trainer_settings(tree),
+                        "speeds": recent_speeds(tree)})
     newest = max(options, key=lambda o: o["checkpoints"][0]["updated"] if o["checkpoints"] else 0, default=None)
     return {"trees": options, "default": newest["label"] if newest else None}
 
 
 def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, extra: str,
-              trainers: list[dict]) -> dict:
+              trainers: list[dict], *, settings: dict | None = None, env: str = "real",
+              sim_hardness: float | None = None) -> dict:
     """Start `scripts/train_rl.py` in a tree, as a session of its own (the dashboard can stop and start again
     without taking the run with it), writing runs/<name>/ and printing to runs/<name>.log. Refuses what would
-    fail or collide: a fleet with too few games up, a fleet another trainer is already playing, a name in use."""
+    fail or collide: a fleet with too few games up, a fleet another trainer is already playing, a name in use.
+    `settings` are RLConfig values by field name; only those that differ from the code's defaults become flags."""
     tree = dict(trees(repo)).get(tree_label)
     if tree is None or not (tree / TRAINER).exists():
         return {"error": f"no {TRAINER} in {tree_label!r}"}
@@ -317,7 +429,14 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
         return {"error": f"more options: {error}"}
     if any(a in ("--out", "--actors") or a.startswith(("--out=", "--actors=")) for a in extra_args):
         return {"error": "set the name and the number of games in their own fields"}
-    sim = "--env" in extra_args[:-1] and extra_args[extra_args.index("--env") + 1] == "sim"
+    if env not in ("real", "sim"):
+        return {"error": "the environment is real or sim"}
+    flags, problem = setting_flags(trainer_settings(tree), settings or {})
+    if problem:
+        return {"error": problem}
+    if env == "sim":
+        flags = ["--env", "sim"] + (["--sim-hardness", str(float(sim_hardness))] if sim_hardness is not None else []) + flags
+    sim = env == "sim" or ("--env" in extra_args[:-1] and extra_args[extra_args.index("--env") + 1] == "sim")
     if not sim:
         fleet = fleet_of(tree)
         if fleet is None:
@@ -330,7 +449,8 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
             return {"error": f"{busy[0]['run'] or 'a run'} (pid {busy[0]['pid']}) is already playing this fleet"}
 
     python = python_for(tree, dict(trees(repo))["main"])
-    argv = [str(python), "-u", str(TRAINER), init, "--actors", str(actors), "--out", f"runs/{name}", *extra_args]
+    argv = [str(python), "-u", str(TRAINER), init, "--actors", str(actors), "--out", f"runs/{name}", *flags,
+            *extra_args]
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tree / "src"), env.get("PYTHONPATH")]))
     log = tree / "runs" / f"{name}.log"
@@ -345,7 +465,8 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
         time.sleep(0.1)
     if proc.poll() is not None:
         return {"error": f"it exited straight away (code {proc.returncode})", "tail": _tail(log, 12), "proc": proc}
-    return {"ok": True, "pid": proc.pid, "run": name, "log": str(log), "proc": proc}
+    return {"ok": True, "pid": proc.pid, "run": name, "log": str(log), "proc": proc, "cwd": str(tree),
+            "command": shlex.join(argv[2:])}
 
 
 def descendants(pid: int, proc: Path = Path("/proc")) -> list[int]:
@@ -380,6 +501,12 @@ class Supervisor:
         self._payload, self._payload_at = None, 0.0
         self.stopping: dict[int, float] = {}  # trainer pid -> when a graceful stop was asked for
         self.started: list[subprocess.Popen] = []  # runs started here, reaped when they end
+        # Time limits, on disk so a dashboard that restarts still keeps them: pid -> stop_at, cwd, run, log.
+        self.deadlines_path = self.state_dir / "deadlines.json"
+        try:
+            self.deadlines: dict[str, dict] = json.loads(self.deadlines_path.read_text())
+        except (OSError, ValueError):
+            self.deadlines = {}
         threading.Thread(target=self._janitor, daemon=True).start()
 
     # -- runs
@@ -394,10 +521,15 @@ class Supervisor:
         trainers = live_trainers(self.payload()["run_paths"])
         alive = {t["pid"] for t in trainers}
         self.stopping = {pid: at for pid, at in self.stopping.items() if pid in alive}
+        runs = {r["name"]: r for r in self.payload()["runs"]}
         for t in trainers:
             at = self.stopping.get(t["pid"])
             t["stopping_s"] = None if at is None else round(time.time() - at, 1)
             t["can_force"] = at is not None and time.time() - at >= FORCE_AFTER_S
+            deadline = self.deadlines.get(str(t["pid"]))
+            t["stop_at"] = deadline["stop_at"] if deadline and deadline["cwd"] == t["cwd"] else None
+            run = runs.get(t["run"]) if t["run"] else None
+            t["progress"] = None if run is None else {k: run.get(k) for k in ("progress", "progress_text", "eta_s")}
         return {"trainers": trainers}
 
     # -- starting and stopping runs
@@ -405,12 +537,48 @@ class Supervisor:
         self._payload = None  # a run that just ended or started changes the names and checkpoints
         return launch_options(self.repo, self.live()["trainers"])
 
-    def start(self, tree: str, init: str, actors: int, name: str, extra: str) -> dict:
-        result = start_run(self.repo, tree, init, actors, name, extra, self.live()["trainers"])
+    def start(self, tree: str, init: str, actors: int, name: str, extra: str, *, settings: dict | None = None,
+              env: str = "real", sim_hardness: float | None = None, stop_after_min: float = 0.0) -> dict:
+        """Start a run; with `stop_after_min`, stop it gracefully (as Ctrl-C) that many minutes in, whichever of
+        that and its step budget comes first."""
+        if not 0 <= stop_after_min <= MAX_TIME_LIMIT_MIN:
+            return {"error": f"a time limit is between 0 (none) and {MAX_TIME_LIMIT_MIN} minutes"}
+        result = start_run(self.repo, tree, init, actors, name, extra, self.live()["trainers"], settings=settings,
+                           env=env, sim_hardness=sim_hardness)
         if "proc" in result:
             self.started.append(result.pop("proc"))
+        if result.get("ok") and stop_after_min > 0:
+            result["stop_at"] = time.time() + stop_after_min * 60
+            self.deadlines[str(result["pid"])] = {"stop_at": result["stop_at"], "cwd": result["cwd"],
+                                                  "run": name, "log": result["log"]}
+            self._save_deadlines()
         self._payload = None
         return result
+
+    def _save_deadlines(self) -> None:
+        _write_atomic(self.deadlines_path, json.dumps(self.deadlines).encode())
+
+    def enforce_deadlines(self) -> None:
+        """Stop, gracefully, every run whose time limit has passed; forget the limits of runs that have ended (or
+        whose pid now belongs to something else)."""
+        if not self.deadlines:
+            return
+        trainers = {t["pid"]: t for t in live_trainers({})}
+        changed = False
+        for key, deadline in list(self.deadlines.items()):
+            pid = int(key)
+            trainer = trainers.get(pid)
+            if trainer is None or trainer["cwd"] != deadline["cwd"]:
+                del self.deadlines[key]
+                changed = True
+            elif time.time() >= deadline["stop_at"] and pid not in self.stopping:
+                with open(deadline["log"], "a") as log:  # O_APPEND: safe beside the trainer's own writes
+                    log.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} time limit reached: the dashboard is "
+                              f"stopping it, as Ctrl-C would\n")
+                os.kill(pid, signal.SIGINT)
+                self.stopping[pid] = time.time()
+        if changed:
+            self._save_deadlines()
 
     def stop(self, pid: int, force: bool = False) -> dict:
         """Ask a trainer to stop as Ctrl-C would -- SIGINT to the learner alone, which stops its actors (every key
@@ -485,6 +653,10 @@ class Supervisor:
             if self.monitors and time.monotonic() - self.last_seen > self.idle_s:
                 self.stop_monitors()
             self.started = [p for p in self.started if p.poll() is None]  # reap runs that ended
+            try:
+                self.enforce_deadlines()
+            except OSError:
+                pass  # a log that went away, a pid that ended between looking and signalling: next time
 
     def set_thumbs(self, on: bool) -> None:
         flag = self.state_dir / "thumbs-off"
@@ -591,8 +763,17 @@ class Handler(BaseHTTPRequestHandler):
                 actors = int(body.get("actors", 0))
             except (TypeError, ValueError):
                 return self._json({"error": "games must be a number"}, HTTPStatus.BAD_REQUEST)
+            settings = body.get("settings") or {}
+            try:
+                stop_after_min = float(body.get("stop_after_min") or 0)
+                hardness = None if body.get("sim_hardness") in (None, "") else float(body["sim_hardness"])
+            except (TypeError, ValueError):
+                return self._json({"error": "the time limit and the sim hardness are numbers"}, HTTPStatus.BAD_REQUEST)
+            if not isinstance(settings, dict) or (hardness is not None and not 0 <= hardness <= 1):
+                return self._json({"error": "bad settings"}, HTTPStatus.BAD_REQUEST)
             result = s.start(str(body.get("tree", "")), str(body.get("init", "")), actors,
-                             str(body.get("name", "")).strip(), str(body.get("extra", "")))
+                             str(body.get("name", "")).strip(), str(body.get("extra", "")), settings=settings,
+                             env=str(body.get("env", "real")), sim_hardness=hardness, stop_after_min=stop_after_min)
             return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
         if self.path == "/api/stop":
             try:

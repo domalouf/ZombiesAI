@@ -85,6 +85,31 @@
   .launch-row .state { font-size: 13.5px; }
   .launch-msg { font-size: 13.5px; color: var(--chalk-dim); }
   .launch-msg.error { color: var(--serious); }
+  .launcher .caption { font-size: 13px; color: var(--chalk-dim); margin-right: 2px; }
+  .launcher .subhead { font: 700 12px/1.2 var(--ui); letter-spacing: 0.11em; text-transform: uppercase; color: var(--chalk-dim); margin-top: 4px; }
+  .launcher .estimate { margin: 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 100ch; }
+  .launcher details.more { border-top: 1px solid var(--line); padding-top: 10px; }
+  .launcher details.more summary { cursor: pointer; font: 600 14px var(--ui); color: var(--chalk); }
+  .launcher .settings { display: grid; gap: 12px; margin-top: 12px; }
+  .settings-group { border: 1px solid var(--line); border-radius: 3px; padding: 10px 12px 12px; margin: 0; }
+  .settings-group legend { font: 700 12px var(--ui); letter-spacing: 0.1em; text-transform: uppercase; color: var(--chalk-dim); padding: 0 6px; }
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 12px 16px; }
+  .setting { display: grid; gap: 3px; align-content: start; }
+  .setting .name { font-size: 13px; color: var(--chalk); display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .setting .name code { font-size: 11px; color: var(--chalk-faint); }
+  .setting input[type="number"], .setting input[type="text"] {
+    width: 100%; font: 500 14px/1.2 var(--ui); color: var(--chalk); background: var(--ground);
+    border: 1px solid var(--line); border-radius: 3px; padding: 6px 8px;
+  }
+  .setting input[type="checkbox"] { justify-self: start; width: 18px; height: 18px; accent-color: var(--good); }
+  .setting .hint { font-size: 12px; color: var(--chalk-faint); }
+  .setting .default { font: 500 11px var(--mono); color: var(--amber); }
+  .setting.changed input { border-color: var(--amber); }
+  .field .default { font: 500 11px var(--mono); color: var(--amber); }
+  .field.changed input { border-color: var(--amber); }
+  .field span code { font-size: 11px; color: var(--chalk-faint); margin-left: 8px; }
+  .preview { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .preview .command { white-space: pre-wrap; word-break: break-all; }
   .conn { font: 500 12px var(--mono); color: var(--chalk-faint); }
   .conn.lost { color: var(--critical); }
 </style>

@@ -216,8 +216,13 @@ async function pollTrainers() {
   for (const t of trainers) {
     const c = live.trainers.get(t.pid);
     c.run.textContent = t.run || "a run not under any runs/ yet";
+    const progress = t.progress && t.progress.progress != null
+      ? `${Math.round(t.progress.progress * 100)}% · ${t.progress.progress_text}` +
+        (t.progress.eta_s ? ` · about ${fmtDuration(t.progress.eta_s)} left` : "") + " · " : "";
+    const limit = t.stop_at ? `stops at ${new Date(t.stop_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} ` +
+      `(time limit, in ${fmtDuration(Math.max(0, t.stop_at - Date.now() / 1000))}) · ` : "";
     mount(c.facts, [
-      document.createTextNode(`pid ${t.pid} · running ${fmtDuration(t.elapsed_s)} · ${t.tree} · `),
+      document.createTextNode(`${progress}${limit}pid ${t.pid} · running ${fmtDuration(t.elapsed_s)} · ${t.tree} · `),
       el("code", { text: `${t.script} ${t.args}` }),
     ]);
     const stopping = t.stopping_s != null;
@@ -235,10 +240,115 @@ async function pollTrainers() {
 }
 
 /* -- starting a run ---------------------------------------------------------
-   Built once; polling only refreshes the choices and the readiness line, never what the reader has typed. */
-const launch = { options: null, built: null, busy: false };
+   Built once; polling only refreshes the choices, the estimate and the readiness line, never what the reader
+   has typed. Settings come from the chosen checkout's own RLConfig (label and hint here where the code's own
+   comment says less); they follow the checkpoint a run starts from, except the ones the reader has changed. */
+const SETTING_TEXT = {
+  total_steps: ["Steps", "environment steps to train for, across every game"],
+  segment_steps: ["Segment length", "steps an actor plays before it hands its data over"],
+  batch_steps: ["Steps per update", "data gathered across the games before each learning update"],
+  gamma: ["Discount (gamma)", "how far ahead rewards count"],
+  gae_lambda: ["GAE lambda", "bias against variance in the advantage estimate"],
+  lr: ["Learning rate", "how far each update moves the weights"],
+  update_epochs: ["Epochs per update", "passes over each batch"],
+  minibatch_size: ["Minibatch size", "steps per gradient step"],
+  clip_coef: ["Clip range", "how far one update may change an action's probability"],
+  ent_coef: ["Entropy bonus", "higher keeps the policy exploring"],
+  vf_coef: ["Value loss weight", "the critic's share of the loss"],
+  kl_coef: ["Pull toward the start", "KL penalty keeping it near the policy it started from"],
+  kl_decay: ["Pull decay", "the pull shrinks by this factor every update"],
+  kl_min: ["Least pull", "the pull never decays below this"],
+  target_kl: ["Target KL", "an update stops its epochs early past 1.5x this"],
+  critic_warmup_updates: ["Critic warm-up", "updates that train only the critic before the policy moves"],
+  max_grad_norm: ["Gradient clip", "largest gradient norm an update applies"],
+  max_policy_lag: ["Most policy lag", "updates an actor may fall behind before its data is dropped"],
+  reward_scale: ["Scale rewards", "normalise rewards by their running spread"],
+  device: ["Learner device", "auto, cuda or cpu"],
+  actor_device: ["Actor device", "where each game's policy runs"],
+  seed: ["Seed", "for the sampling and the shuffles"],
+  checkpoint_every: ["Checkpoint every", "updates between checkpoints; a stop always writes one too"],
+  counts_per_degree: ["Mouse counts per degree", "the fleet's calibration (scripts/spike_instances.py)"],
+  bindings: ["Key bindings", "the game's controls, as the actors press them"],
+  record_every: ["Record every", "each actor saves every k-th episode as a clip; 0 never"],
+  hear: ["Hear the game", "a policy trained with audio listens to its own game's sound"],
+  actor_restarts: ["Actor restarts", "per actor, before the run gives up on it"],
+};
+const settingLabel = (s) => (SETTING_TEXT[s.name] || [s.name.replace(/_/g, " ")])[0];
+const settingHint = (s) => s.hint || (SETTING_TEXT[s.name] || [])[1] || "";
+const TIME_LIMITS = [[0, "No time limit"], [15, "15 minutes"], [30, "30 minutes"], [60, "1 hour"], [120, "2 hours"],
+                     [240, "4 hours"], [480, "8 hours"], [720, "12 hours"], [1440, "24 hours"]];
+const STEP_PRESETS = [[100000, "100K"], [500000, "500K"], [1000000, "1M"], [2000000, "2M"], [5000000, "5M"]];
 
+const launch = { options: null, built: null, busy: false };
 const launchTree = () => launch.options.trees.find((t) => t.label === launch.built.tree.value);
+const chosenCheckpoint = () => (launchTree()?.checkpoints || []).find((c) => c.path === launch.built.init.value);
+
+function settingValue(s) {
+  const input = launch.built.inputs.get(s.name);
+  if (!input) return s.default;
+  if (s.kind === "bool") return input.checked;
+  if (s.kind === "int") return input.value.trim() === "" ? NaN : Number(input.value);
+  if (s.kind === "float") return input.value.trim() === "" ? NaN : Number(input.value);
+  return input.value;
+}
+const same = (a, b) => (typeof a === "number" && typeof b === "number") ? Math.abs(a - b) <= 1e-12 * Math.max(1, Math.abs(b)) : a === b;
+function changedSettings() {
+  const t = launchTree();
+  const out = {};
+  for (const s of t ? t.settings : []) {
+    const v = settingValue(s);
+    if (!same(v, s.default)) out[s.name] = v;
+  }
+  return out;
+}
+/* A float as Python's str() writes it, so the preview reads exactly as the command does: 3e-05, 1.0. */
+function pyFloat(v) {
+  if (v !== 0 && (Math.abs(v) < 1e-4 || Math.abs(v) >= 1e16)) {
+    return v.toExponential().replace(/e([+-])(\d)$/, "e$10$2");
+  }
+  return Number.isInteger(v) ? v.toFixed(1) : String(v);
+}
+const flagOf = (s, v) => s.kind === "bool" ? [v ? s.flag : "--no-" + s.flag.slice(2)]
+                                           : [s.flag, s.kind === "float" ? pyFloat(v) : String(v)];
+
+function commandPreview() {
+  const f = launch.built;
+  const t = launchTree();
+  const parts = ["train_rl.py", f.init.value, "--actors", f.actors.value, "--out", `runs/${f.name.value.trim()}`];
+  if (f.env.value === "sim") parts.push("--env", "sim", "--sim-hardness", f.hardness.value);
+  const changed = changedSettings();
+  for (const s of t ? t.settings : []) if (s.name in changed) parts.push(...flagOf(s, changed[s.name]));
+  if (f.extra.value.trim()) parts.push(f.extra.value.trim());
+  return parts.join(" ");
+}
+
+function estimate() {
+  const f = launch.built;
+  const t = launchTree();
+  const steps = f.steps ? Number(f.steps.value) : NaN;
+  const games = parseInt(f.actors.value, 10);
+  const speed = t && t.speeds[f.env.value];
+  const limitMin = Number(f.limit.value);
+  if (!(steps > 0)) return "";
+  const parts = [];
+  let est = null;
+  if (speed && games > 0) {
+    est = steps / (speed.per_game * games);
+    parts.push(`${fmtCompact(steps)} steps take about ${fmtDuration(est)} at ~${fmtValue(speed.per_game * games)} steps/s ` +
+               `(${speed.run} went ${fmtValue(speed.per_game)} a second per game)`);
+  } else {
+    parts.push(`${fmtCompact(steps)} steps; no earlier ${f.env.value === "sim" ? "NachtSim" : "real-game"} run here to estimate the time from`);
+  }
+  if (limitMin > 0) {
+    const ends = est == null ? limitMin * 60 : Math.min(est, limitMin * 60);
+    const when = new Date(Date.now() + ends * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    parts.push(est != null && est < limitMin * 60 ? `the steps run out before the ${fmtDuration(limitMin * 60)} limit, around ${when}`
+                                                  : `it stops gracefully after ${fmtDuration(limitMin * 60)}, around ${when}`);
+  } else if (est != null) {
+    parts.push(`done around ${new Date(Date.now() + est * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`);
+  }
+  return parts.join("; ") + ".";
+}
 
 function readiness() {
   const t = launchTree();
@@ -247,7 +357,13 @@ function readiness() {
   const actors = parseInt(f.actors.value, 10);
   if (!(actors >= 1 && actors <= 16)) return ["warning", "!", "Between 1 and 16 games.", false];
   if (!f.name.value.trim()) return ["warning", "!", "The run needs a name.", false];
-  if (/(^|\s)--env[ =]sim(\s|$)/.test(f.extra.value)) return ["good", "OK", "A NachtSim run: no games needed.", true];
+  for (const s of t.settings) {
+    const v = settingValue(s);
+    if ((s.kind === "int" && !Number.isInteger(v)) || (s.kind === "float" && !Number.isFinite(v)) || (s.kind === "str" && !v)) {
+      return ["warning", "!", `${settingLabel(s)} needs ${s.kind === "int" ? "a whole number" : s.kind === "float" ? "a number" : "a value"}.`, false];
+    }
+  }
+  if (f.env.value === "sim" || /(^|\s)--env[ =]sim(\s|$)/.test(f.extra.value)) return ["good", "OK", "A NachtSim run: no games needed.", true];
   if (!t.fleet) return ["serious", "!!", `${t.label} has no fleet yet: scripts/instances.py up --n ${actors}`, false];
   if (t.busy.length) return ["warning", "!", `${t.busy[0]} is already playing this fleet. Stop it first.`, false];
   if (t.fleet.running < actors) {
@@ -257,39 +373,151 @@ function readiness() {
   return ["good", "OK", `${t.fleet.running} of ${t.fleet.n} games running. Ready.`, true];
 }
 
-function updateReadiness() {
+function refreshLauncher() {
   const f = launch.built;
+  const t = launchTree();
   const [level, icon, text, ok] = readiness();
   f.state.className = `state ${level}`;
   mount(f.state, [el("span", { class: "icon", text: icon }), document.createTextNode(text)]);
   f.start.disabled = !ok || launch.busy;
+  f.estimate.textContent = estimate();
+  f.hardnessField.hidden = f.env.value !== "sim";
+  for (const b of f.envChips) b.setAttribute("aria-pressed", String(b.dataset.env === f.env.value));
+  for (const b of f.presets) b.setAttribute("aria-pressed", String(Boolean(f.steps) && Number(b.dataset.steps) === Number(f.steps.value)));
+  let changed = 0;
+  for (const s of t ? t.settings : []) {
+    const row = f.rows.get(s.name);
+    if (!row) continue;
+    const differs = !same(settingValue(s), s.default);
+    if (differs && s.name !== "total_steps") changed += 1;
+    row.classList.toggle("changed", differs);
+    row.querySelector(".default").textContent = differs ? `default ${s.kind === "bool" ? (s.default ? "on" : "off") : s.default}` : "";
+  }
+  f.summary.textContent = `More settings${changed ? ` · ${changed} changed from the code's defaults` : ""}`;
+  const cp = chosenCheckpoint();
+  f.fromRun.hidden = !(cp && cp.config);
+  f.fromRun.textContent = cp && cp.config ? `Use ${cp.run}'s settings` : "";
+  f.command.textContent = commandPreview();
+}
+
+function setSetting(s, value) {
+  const input = launch.built.inputs.get(s.name);
+  if (!input) return;
+  if (s.kind === "bool") input.checked = Boolean(value);
+  else input.value = String(value);
+}
+
+/* The settings a checkpoint suggests: its run's config for an RL checkpoint, the code's defaults otherwise. Only
+   settings the reader has not touched follow; `all` resets those too. */
+function applySettings(source, all = false) {
+  const t = launchTree();
+  for (const s of t ? t.settings : []) {
+    const input = launch.built.inputs.get(s.name);
+    if (!input || (input.dataset.touched && !all)) continue;
+    const value = source && s.name in source ? source[s.name] : s.default;
+    setSetting(s, value);
+    if (all) delete input.dataset.touched;
+  }
+  if (source && typeof source.n_actors === "number" && !launch.built.actors.dataset.touched) launch.built.actors.value = String(source.n_actors);
+}
+
+function settingInput(s) {
+  const f = launch.built;
+  const touch = (e) => { e.target.dataset.touched = "1"; refreshLauncher(); };
+  let input;
+  if (s.kind === "bool") input = el("input", { type: "checkbox", onchange: touch });
+  else if (s.kind === "int" || s.kind === "float") input = el("input", { type: "number", step: "any", oninput: touch });
+  else input = el("input", { type: "text", spellcheck: "false", oninput: touch });
+  f.inputs.set(s.name, input);
+  return input;
+}
+
+function settingRow(s) {
+  const input = settingInput(s);
+  const row = el("label", { class: "setting" + (s.kind === "bool" ? " toggle" : "") }, [
+    el("span", { class: "name" }, [document.createTextNode(settingLabel(s)), el("code", { text: s.flag })]),
+    input,
+    el("span", { class: "hint", text: settingHint(s) }),
+    el("span", { class: "default" }),
+  ]);
+  launch.built.rows.set(s.name, row);
+  return row;
+}
+
+function buildSettings() {
+  const f = launch.built;
+  const t = launchTree();
+  f.inputs = new Map();
+  f.rows = new Map();
+  const steps = t && t.settings.find((s) => s.name === "total_steps");
+  if (steps) {
+    f.steps = settingInput(steps);
+    f.rows.set("total_steps", f.stepsRow);
+    f.stepsRow.replaceChildren(el("span", { class: "name" }, [document.createTextNode("Steps"), el("code", { text: steps.flag })]),
+      f.steps, el("span", { class: "default" }));
+  }
+  const group = (key, title) => {
+    const items = (t ? t.settings : []).filter((s) => s.group === key);
+    return items.length ? el("fieldset", { class: "settings-group" }, [el("legend", { text: title }), el("div", { class: "settings-grid" }, items.map(settingRow))]) : null;
+  };
+  mount(f.settingsBody, [
+    group("learning", "Learning"),
+    group("run", "The run"),
+    el("div", { class: "launch-row" }, [
+      el("button", { class: "chip", type: "button", onclick: () => { applySettings(null, true); refreshLauncher(); } },
+        [document.createTextNode("Code defaults")]),
+      f.fromRun,
+    ]),
+  ]);
+  f.settingsKey = t ? t.label + ":" + t.settings.map((s) => s.name).join() : "";
 }
 
 function buildLauncher() {
   const f = {};
-  const field = (label, input, wide) =>
-    el("label", { class: "field" + (wide ? " wide" : "") }, [el("span", { text: label }), input]);
+  launch.built = f;
+  const field = (label, input, cls = "") => el("label", { class: "field " + cls }, [el("span", { text: label }), input]);
+  const refresh = () => refreshLauncher();
   f.tree = el("select", { onchange: () => { f.name.dataset.touched = ""; fillLauncher(true); } });
-  f.init = el("select");
-  f.actors = el("input", { type: "number", min: "1", max: "16", oninput: updateReadiness });
-  f.name = el("input", { type: "text", spellcheck: "false", oninput: () => { f.name.dataset.touched = "1"; updateReadiness(); } });
-  f.extra = el("input", { type: "text", spellcheck: "false", placeholder: "e.g. --total-steps 500000 --lr 3e-5",
-                          oninput: updateReadiness });
+  f.init = el("select", { onchange: () => { applySettings(chosenCheckpoint()?.config); refreshLauncher(); } });
+  f.actors = el("input", { type: "number", min: "1", max: "16", oninput: (e) => { e.target.dataset.touched = "1"; refresh(); } });
+  f.name = el("input", { type: "text", spellcheck: "false", oninput: () => { f.name.dataset.touched = "1"; refresh(); } });
+  f.env = el("input", { type: "hidden", value: "real" });
+  f.envChips = [["real", "Real games"], ["sim", "NachtSim rehearsal"]].map(([env, label]) =>
+    el("button", { class: "chip seg", type: "button", "data-env": env, onclick: () => { f.env.value = env; refresh(); } },
+      [document.createTextNode(label)]));
+  f.hardness = el("input", { type: "number", min: "0", max: "1", step: "0.05", value: "0.5", oninput: refresh });
+  f.hardnessField = field("Sim hardness (0 to 1)", f.hardness);
+  f.limit = el("select", { onchange: refresh }, TIME_LIMITS.map(([m, label]) => el("option", { value: String(m), text: label })));
+  f.stepsRow = el("label", { class: "field" });
+  f.presets = STEP_PRESETS.map(([n, label]) => el("button", { class: "chip seg", type: "button", "data-steps": String(n),
+    onclick: () => { f.steps.value = String(n); f.steps.dataset.touched = "1"; refresh(); } }, [document.createTextNode(label)]));
+  f.estimate = el("p", { class: "estimate" });
+  f.extra = el("input", { type: "text", spellcheck: "false", placeholder: "anything else train_rl.py takes", oninput: refresh });
+  f.summary = el("summary", { text: "More settings" });
+  f.settingsBody = el("div", { class: "settings" });
+  f.fromRun = el("button", { class: "chip", type: "button", onclick: () => { applySettings(chosenCheckpoint()?.config, true); refresh(); } });
+  f.command = el("code", { class: "command" });
   f.state = el("span", { class: "state" });
-  f.start = el("button", { class: "chip primary", onclick: startRun },
-               [el("span", { class: "key" }), document.createTextNode("Start run")]);
+  f.start = el("button", { class: "chip primary", onclick: startRun }, [el("span", { class: "key" }), document.createTextNode("Start run")]);
   f.msg = el("div", { class: "launch-msg", role: "status" });
   f.tail = el("pre", { class: "log", hidden: "" });
   mount(document.getElementById("launcher"), [
     el("div", { class: "title", text: "Start a run" }),
     el("div", { class: "fields" }, [
-      field("Checkout", f.tree), field("Start from", f.init, true), field("Games", f.actors), field("Name", f.name),
-      field("More options (optional)", f.extra, true),
+      field("Checkout", f.tree), field("Start from", f.init, "wide"), field("Name", f.name),
     ]),
+    el("div", { class: "launch-row" }, [el("span", { class: "caption", text: "Plays" }), ...f.envChips, f.env]),
+    el("div", { class: "fields" }, [field("Games", f.actors), f.hardnessField]),
+    el("div", { class: "subhead", text: "How long it runs" }),
+    el("div", { class: "fields" }, [f.stepsRow, field("Stop after", f.limit)]),
+    el("div", { class: "launch-row" }, [el("span", { class: "caption", text: "Steps" }), ...f.presets]),
+    f.estimate,
+    el("details", { class: "more" }, [f.summary, f.settingsBody]),
+    el("div", { class: "fields" }, [field("Extra command-line options (optional)", f.extra, "wide")]),
+    el("div", { class: "preview" }, [el("span", { class: "caption", text: "Runs" }), f.command]),
     el("div", { class: "launch-row" }, [f.start, f.state]),
     f.msg, f.tail,
   ]);
-  launch.built = f;
 }
 
 function fillLauncher(treeChanged = false) {
@@ -301,33 +529,39 @@ function fillLauncher(treeChanged = false) {
   }
   f.tree.value = o.trees.some((t) => t.label === want) ? want : o.default;
   const t = launchTree();
-  if (t) {
-    const keep = treeChanged ? null : f.init.value;
-    const key = t.checkpoints.map((c) => c.path).join();
-    if (f.init.dataset.key !== key) {
-      mount(f.init, t.checkpoints.map((c) => el("option", { value: c.path,
-        text: `${c.run} · ${c.kind === "RL" ? "RL checkpoint" : "BC policy"} · ${fmtAgo(Date.now() / 1000 - c.updated)}` })));
-      f.init.dataset.key = key;
-    }
-    if (keep && t.checkpoints.some((c) => c.path === keep)) f.init.value = keep;
-    if (!f.actors.value || treeChanged) f.actors.value = String(t.fleet ? t.fleet.n : 4);
-    if (!f.name.dataset.touched) f.name.value = t.next;
+  if (!t) return;
+  const key = t.label + ":" + t.settings.map((s) => s.name).join();
+  const rebuilt = f.settingsKey !== key;
+  if (rebuilt) buildSettings();
+  const keep = treeChanged ? null : f.init.value;
+  const cpKey = t.checkpoints.map((c) => c.path).join();
+  if (f.init.dataset.key !== cpKey) {
+    mount(f.init, t.checkpoints.map((c) => el("option", { value: c.path,
+      text: `${c.run} · ${c.kind === "RL" ? "RL checkpoint" : "BC policy"} · ${fmtAgo(Date.now() / 1000 - c.updated)}` })));
+    f.init.dataset.key = cpKey;
   }
-  updateReadiness();
+  if (keep && t.checkpoints.some((c) => c.path === keep)) f.init.value = keep;
+  if (rebuilt || treeChanged) applySettings(chosenCheckpoint()?.config);
+  if (!f.actors.value || (treeChanged && !f.actors.dataset.touched)) f.actors.value = String(t.fleet ? t.fleet.n : 4);
+  if (!f.name.dataset.touched) f.name.value = t.next;
+  refreshLauncher();
 }
 
 async function startRun() {
   const f = launch.built;
   launch.busy = true;
-  updateReadiness();
+  refreshLauncher();
   f.msg.className = "launch-msg";
   f.msg.textContent = "Starting…";
   f.tail.hidden = true;
-  const answer = await command("/api/start", { tree: f.tree.value, init: f.init.value, name: f.name.value.trim(),
-    actors: parseInt(f.actors.value, 10), extra: f.extra.value });
+  const answer = await command("/api/start", {
+    tree: f.tree.value, init: f.init.value, name: f.name.value.trim(), actors: parseInt(f.actors.value, 10),
+    env: f.env.value, sim_hardness: f.env.value === "sim" ? Number(f.hardness.value) : null,
+    settings: changedSettings(), stop_after_min: Number(f.limit.value), extra: f.extra.value });
   launch.busy = false;
   if (answer.ok) {
-    f.msg.textContent = `Started ${answer.run} (pid ${answer.pid}). Its output goes to ${answer.log}.`;
+    const limit = answer.stop_at ? ` It stops itself around ${new Date(answer.stop_at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.` : "";
+    f.msg.textContent = `Started ${answer.run} (pid ${answer.pid}).${limit} Its output goes to ${answer.log}.`;
     f.name.dataset.touched = "";
   } else {
     f.msg.className = "launch-msg error";
