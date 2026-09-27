@@ -625,10 +625,10 @@ function render() {
       "Lines are bucket means; the wash behind each one is the spread inside the bucket, so nothing is smoothed away."
     : "Nothing to show yet.");
   mount(document.getElementById("meta"), [
-    el("span", {}, [document.createTextNode("Built "), el("b", { text: DATA.generated })]),
+    el("span", {}, [document.createTextNode(DATA.live ? "Runs read " : "Built "), el("b", { text: DATA.generated })]),
     el("span", {}, [el("b", { text: String(runs.length) }), document.createTextNode(" runs")]),
     live.length ? el("span", {}, [el("b", { text: String(live.length) }),
-      document.createTextNode(DATA.intro ? " running when this was built" : " running now")]) : null,
+      document.createTextNode(DATA.intro && !DATA.live ? " running when this was built" : " running now")]) : null,
   ]);
 
   const body = document.getElementById("body");

@@ -484,18 +484,24 @@ def write_dashboard_site(
     intro: str,
     links: list[tuple[str, str]],
     description: str,
+    body_before: str = "",
+    script_after: str = "",
 ) -> Path:
     """The dashboard as a static directory (index.html + fonts/) that makes no external request.
 
-    Same shape as the replay page's site build, and publishable the same way: nothing here is served,
-    computed or fetched at view time -- it is the numbers as they stood when the page was built.
+    Same shape as the replay page's site build, and publishable the same way: nothing here is served or
+    computed at view time -- it is the numbers as they stood when the page was built, unless `script_after`
+    fetches newer ones from the same site (the live page, viz/live_site.py).
     """
     out_dir = Path(out_dir)
     head = f'<meta name="description" content="{escape(description)}">\n'
     public = public_payload(payload)
     public["intro"] = intro
     public["links"] = [[label, href] for label, href in links]
-    index = write_dashboard_html(public, out_dir / "index.html", embed_fonts=False, head=head)
+    index = out_dir / "index.html"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    index.write_text(dashboard_html(public, embed_fonts=False, head=head, body_before=body_before,
+                                    script_after=script_after))
     (out_dir / "fonts").mkdir(exist_ok=True)
     for f in FONTS.iterdir():
         if f.suffix in (".woff2", ".txt"):

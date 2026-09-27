@@ -12,7 +12,6 @@
 #   PI_DEST     rsync destination  (default: pi:HealthBoard/piStuff/website/zombies/)
 #   CHECKPOINT  trained policy     (default: runs/ppo-nacht-state-s1/checkpoint.pt)
 #   SEED        which game to show (default: 10030, one of its round-4 games)
-#   RUNS        training runs to chart (default: runs/)
 #
 set -euo pipefail
 
@@ -20,7 +19,6 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="${PI_DEST:-pi:HealthBoard/piStuff/website/zombies/}"
 checkpoint="${CHECKPOINT:-runs/ppo-nacht-state-s1/checkpoint.pt}"
 seed="${SEED:-10030}"
-runs="${RUNS:-runs}"
 
 log() { printf '==> %s\n' "$*"; }
 
@@ -32,12 +30,15 @@ uv run python scripts/build_site.py --checkpoint "$checkpoint" --seed "$seed" --
 
 # The dashboard reads only the JSON each trainer wrote, so this step needs no checkpoint and no GPU.
 # --site strips the local paths a config carries (clip filenames and the like) and ships the fonts as
-# files rather than data: URIs, which the site's CSP refuses.
-log "building the training dashboard (runs=$runs)"
-uv run python scripts/dashboard.py --runs "$runs" --site site/zombies/training
+# files rather than data: URIs, which the site's CSP refuses. --live makes it the live page: every checkout's
+# runs baked in, then the machine and the runs kept current from training/live/*.json, which
+# scripts/publish_live.py (deploy/zombiesai-live.service) pushes from the training PC every few seconds.
+log "building the live training dashboard"
+uv run python scripts/dashboard.py --site site/zombies/training --live
 
 log "publishing site/zombies/ -> $dest"
-# --delete so a rebuilt page doesn't leave stale files behind; trailing slashes matter.
-rsync -av --delete site/zombies/ "$dest"
+# --delete so a rebuilt page doesn't leave stale files behind; trailing slashes matter. The filter protects
+# training/live/ from it: those files are the training PC's, pushed there and not built here.
+rsync -av --delete --filter='P training/live/' site/zombies/ "$dest"
 
 log "done — https://domalouf.com/zombies/ and https://domalouf.com/zombies/training/"

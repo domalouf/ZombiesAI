@@ -6,8 +6,12 @@ import webbrowser
 from pathlib import Path
 
 from zombiesai.viz.dashboard import build_dashboard, write_dashboard, write_dashboard_site
+from zombiesai.viz.live_site import write_live_page
 
 REPO_URL = "https://github.com/domalouf/ZombiesAI"
+REPO_DIR = Path(__file__).resolve().parents[1]
+SITE_DESCRIPTION = ("Learning curves, optimiser health and reward-hacking gates for an RL agent learning Nacht der "
+                    "Untoten.")
 SITE_INTRO = (
     "How the reinforcement-learning agent's training is going. Every run its trainers have written — "
     "PPO on NachtSim, behavioural cloning from human play, and the inverse dynamics model that labels "
@@ -44,9 +48,16 @@ def main() -> None:
                         help="rebuild on an interval while training runs; the page reloads itself to match")
     parser.add_argument("--site", type=Path, metavar="DIR",
                         help="build the public page instead: DIR/index.html + fonts/, nothing local in it")
+    parser.add_argument("--live", action="store_true",
+                        help="with --site: the live page -- every checkout's runs, and the machine and Training now "
+                             "read from live/*.json, which scripts/publish_live.py keeps pushing")
     parser.add_argument("--no-open", action="store_true", help="don't open the dashboard in a browser")
     args = parser.parse_args()
 
+    if args.site and args.live:
+        index = write_live_page(REPO_DIR, args.site, description=SITE_DESCRIPTION)
+        print(f"live site page: {index.resolve()}  (reads live/machine.json and live/runs.json beside it)")
+        return
     if args.site:
         payload = build_dashboard(args.runs, buckets=args.buckets, stale_after=args.stale_after)
         index = write_dashboard_site(
@@ -54,8 +65,7 @@ def main() -> None:
             args.site,
             intro=SITE_INTRO,
             links=[("← domalouf.com", "/"), ("The agent playing", "/zombies/"), ("Code on GitHub", REPO_URL)],
-            description="Learning curves, optimiser health and reward-hacking gates for an RL agent "
-            "learning Nacht der Untoten.",
+            description=SITE_DESCRIPTION,
         )
         summarize(payload)
         print(f"site page: {index.resolve()}")

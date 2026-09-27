@@ -138,6 +138,48 @@ alongside the replay.
 uv run python scripts/dashboard.py --site site/zombies/training
 ```
 
+### Live on the site
+
+`--site ... --live` (what `deploy/deploy.sh` builds) makes that page live: the
+training PC pushes two files into the site's `zombies/training/live/` — the
+machine as `viz/system.py` samples it, and the runs training right now, every
+5 s (`machine.json`); every run's curves every minute (`runs.json`) — and the
+page polls them. It shows "Training now", the machine (CPU, GPU, temperatures,
+memory, disks, network, the busiest processes by name), and every run, and says
+**offline** when the PC stops reporting. The PC only ever connects out; nothing
+on it is opened to the network. Both files go through the same scrub as the
+site build, plus: no host name, no process ids, users or command lines.
+
+One-time setup, with the site on `lts`:
+
+```sh
+# 1. On the training PC: a key that can do one thing.
+ssh-keygen -t ed25519 -f ~/.ssh/zombies_live -N '' -C zombies-live
+cat >> ~/.ssh/config <<'EOF'
+Host zombies-live
+    HostName lts.lan
+    User <your user on lts>
+    IdentityFile ~/.ssh/zombies_live
+    IdentitiesOnly yes
+EOF
+
+# 2. On lts: the directory, and the key allowed to write into it and nowhere else
+#    (rrsync ships with rsync; -wo is write-only).
+mkdir -p <web root>/zombies/training/live
+echo "command=\"rrsync -wo <web root>/zombies/training/live\",restrict $(cat zombies_live.pub)" \
+  >> ~/.ssh/authorized_keys
+
+# 3. Back on the PC: try one push, then keep it running.
+uv run python scripts/publish_live.py --once --dest zombies-live:
+cp deploy/zombiesai-live.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now zombiesai-live
+deploy/deploy.sh    # the page itself; it leaves training/live/ alone
+```
+
+nginx serves the two files as it does any static file, and the page asks for
+them with `cache: "no-store"`. If a CDN sits in front, keep it from caching
+`/zombies/training/live/`.
+
 `watch.py` writes a self-contained replay to `runs/replays/`: a top-down map with
 play/pause, speed, scrubbing, what the agent could and couldn't see, its action
 each step, and a clickable match log. Add `#t=90` to the file's URL to open it at
