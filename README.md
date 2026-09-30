@@ -166,8 +166,8 @@ EOF
 
 # 2. On lts: the directory, and the key allowed to write into it and nowhere else
 #    (rrsync ships with rsync; -wo is write-only).
-mkdir -p <web root>/zombies/training/live
-echo "command=\"rrsync -wo <web root>/zombies/training/live\",restrict $(cat zombies_live.pub)" \
+mkdir -p ~/site/www/zombies/training/live   # the site's web root (MyWebsite: server/.env SITE_WEB_ROOT)
+echo "command=\"rrsync -wo $HOME/site/www/zombies/training/live\",restrict $(cat zombies_live.pub)" \
   >> ~/.ssh/authorized_keys
 
 # 3. Back on the PC: try one push, then keep it running.
