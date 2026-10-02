@@ -547,7 +547,9 @@ function heroCard() {
   ]);
 }
 
-function tile(label, value, sub) {
+/* Not plain tile(): the live and supervise pages append system_view.html, whose own tile() would replace this
+   one, since every page script shares one global scope. */
+function runTile(label, value, sub) {
   return el("div", { class: "card" }, [
     el("div", { class: "label", text: label }),
     el("div", { class: "value", text: value }),
@@ -560,11 +562,11 @@ function tiles() {
   const live = runs.filter((r) => r.status === "running");
   const fastest = runs.reduce((a, r) => Math.max(a, r.stats.sps || 0), 0);
   return el("div", { class: "tiles" }, [
-    tile("Runs", String(runs.length), `${live.length} running, ${runs.filter((r) => r.status === "done").length} finished`),
-    tile("Steps trained", fmtCompact(sum((r) => r.stats.steps)), "environment steps across every run"),
-    tile("Episodes played", fmtCompact(sum((r) => r.stats.episodes)), "games finished in simulation"),
-    tile("Training time", fmtDuration(sum((r) => r.elapsed_s)), "wall clock, summed"),
-    fastest ? tile("Fastest", fmtCompact(fastest) + "/s", "steps per second") : null,
+    runTile("Runs", String(runs.length), `${live.length} running, ${runs.filter((r) => r.status === "done").length} finished`),
+    runTile("Steps trained", fmtCompact(sum((r) => r.stats.steps)), "environment steps across every run"),
+    runTile("Episodes played", fmtCompact(sum((r) => r.stats.episodes)), "games finished in simulation"),
+    runTile("Training time", fmtDuration(sum((r) => r.elapsed_s)), "wall clock, summed"),
+    fastest ? runTile("Fastest", fmtCompact(fastest) + "/s", "steps per second") : null,
   ]);
 }
 

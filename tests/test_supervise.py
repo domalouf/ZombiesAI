@@ -1,10 +1,12 @@
 import json
 import os
+import re
 import subprocess
 import threading
 import urllib.error
 import urllib.request
 import zlib
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -122,3 +124,15 @@ def test_commands_need_the_header_and_the_right_host_and_a_sane_workspace(tmp_pa
         assert json.load(urllib.request.urlopen(base + "/api/ping")) == {"app": "zombiesai-supervise"}
     finally:
         server.shutdown()
+
+
+def test_the_pages_scripts_never_declare_one_name_twice(tmp_path):
+    # The dashboard's script and the supervisor's three share one global scope: a const declared twice kills the
+    # page, and a function declared twice silently replaces the first (system_view's tile() once replaced the
+    # dashboard's).
+    fake = type("Runs", (), {"runs": lambda self: build_payload(run_roots(tmp_path))})()
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", supervise.page(fake), re.S)
+    top = re.compile(r"^(?:async\s+function\*?|function\*?|class|const|let|var)\s+([A-Za-z_$][\w$]*)", re.M)
+    names = [name for script in scripts for name in top.findall(script)]
+    assert {"runTile", "tile", "refreshData", "renderSystem"} <= set(names)
+    assert [name for name, count in Counter(names).items() if count > 1] == []

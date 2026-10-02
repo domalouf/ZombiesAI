@@ -4,6 +4,7 @@ Deliberately stdlib-only. A training run's log is JSON on disk; reading it shoul
 numpy or gymnasium, so this can be pointed at a runs/ directory copied off the training box.
 """
 
+import ipaddress
 import json
 import math
 import re
@@ -473,13 +474,36 @@ def build_dashboard(root: Path, buckets: int = 160, stale_after: float = 600.0, 
     }
 
 
+# Config keys that name a machine on the network: a run trained on several PCs (rl/fleet.py) keeps the address
+# its learner listened on ("192.168.1.20:47860", "gamingpc.lan:47860"), which says where the user's PCs are.
+NETWORK_KEYS = frozenset({"listen"})
+# host:port, with the host empty (":47860"), a name, an IPv4 address or a bracketed IPv6 one. A port is two
+# digits or more, so a device such as "cuda:0" is not taken for one.
+HOST_PORT = re.compile(r"(?:\[[0-9A-Fa-f:.%\w]*\]|[\w.-]*):\d{2,5}")
+
+
+def _names_a_host(value: str) -> bool:
+    """A host:port, or an IPv4 or IPv6 address anywhere in the string: belt and braces for NETWORK_KEYS, should a
+    trainer grow another field that carries one."""
+    if HOST_PORT.fullmatch(value.strip()):
+        return True
+    for token in re.split(r"[\s,;()<>\"'=]+", value):
+        try:
+            ipaddress.ip_address(token.strip("[]").split("%")[0])
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def _scrub(value):
-    """Drop anything path-shaped. A trainer's config carries the paths of the clips it read, and those
-    are the user's own filesystem: fine on their machine, not fine on a public page."""
+    """Drop anything path-shaped, and anything that names a machine on the network. A trainer's config carries the
+    paths of the clips it read, and a fleet run's the address its learner listened on: the user's own filesystem
+    and network, fine on their machine, not fine on a public page."""
     if isinstance(value, str):
-        return None if "/" in value or "\\" in value else value
+        return None if "/" in value or "\\" in value or _names_a_host(value) else value
     if isinstance(value, dict):
-        return {k: v for k, v in ((k, _scrub(v)) for k, v in value.items()) if v is not None}
+        return {k: v for k, v in ((k, _scrub(v)) for k, v in value.items() if k not in NETWORK_KEYS) if v is not None}
     if isinstance(value, list):
         kept = [v for v in (_scrub(v) for v in value) if v is not None]
         return kept if len(kept) == len(value) else None
@@ -487,7 +511,7 @@ def _scrub(value):
 
 
 def public_payload(payload: dict, root_label: str = "runs/") -> dict:
-    """The same page with nothing local in it: no absolute paths, no clip filenames, no machine names."""
+    """The same page with nothing local in it: no absolute paths, no clip filenames, no machine names or addresses."""
     out = dict(payload, root=root_label)
     out["runs"] = [dict(run, config=_scrub(run["config"]), last_row=_scrub(run["last_row"]),
                         machines=run.get("machines") and dict(run["machines"], names={}))
