@@ -10,8 +10,8 @@ import torch
 from zombiesai import spec
 from zombiesai.demos import bc
 from zombiesai.rl import fleet as fleet_mod
-from zombiesai.rl.fleet import (ACTOR_BLOCK, FleetClient, FleetError, FleetServer, FleetWorker, WorkerOptions,
-                                decode_segment, encode_segment, provenance, settings_differences)
+from zombiesai.rl.fleet import (ACTOR_BLOCK, FleetClient, FleetError, FleetServer, FleetWorker, NameInUse,
+                                WorkerOptions, decode_segment, encode_segment, provenance, settings_differences)
 from zombiesai.rl.parallel_ppo import RLConfig, Segment, episode_line, publish, train
 
 TOKEN = "test-token"
@@ -199,6 +199,32 @@ def test_two_machines_with_one_name_are_not_merged(server):
     assert second.segment(0, encode_segment(segment())) == 200
 
 
+def test_a_restarted_worker_waits_for_its_old_self_instead_of_exiting(server, tmp_path):
+    """`fleet.py prep` restarts a PC's worker after an update; the new process says hello before the learner has
+    stopped hearing the old one. It must wait and ask again, not exit as for a refusal a person has to fix."""
+    old = client(server, "bazzite")
+    old.hello(1, server.settings)
+    server.workers["bazzite"].last_seen -= fleet_mod.STALE_S - 0.5  # quiet for nearly long enough
+    new = client(server, "bazzite")
+    with pytest.raises(NameInUse) as refused:
+        new.hello(1, server.settings)
+    assert 0 < refused.value.retry_after <= 1.0
+
+    said = []
+    worker = FleetWorker(new, WorkerOptions(actors=1, out_root=str(tmp_path), retry_s=0.1),
+                         settings=server.settings, say=said.append)
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,), daemon=True)
+    thread.start()  # no exception escapes: it waits, then asks again
+    deadline = time.time() + 10
+    while not any("asking again" in m for m in said) and time.time() < deadline:
+        time.sleep(0.05)
+    stop.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive() and any("already playing as bazzite" in m for m in said)
+    assert json.loads(worker.status_path.read_text())["state"] == "stopped"
+
+
 def test_a_machine_plays_only_the_actors_it_said_hello_with(server):
     c = client(server)
     for actors in (0, ACTOR_BLOCK + 1, "x", None, True, 2.0):
@@ -283,9 +309,13 @@ def test_a_run_trains_on_its_own_games_and_another_machines(bc_checkpoint, tmp_p
     assert rows[-1]["step"] >= 1200 and max(r["machines"] for r in rows) == 2
     snapshot = json.loads((tmp_path / "run" / "fleet.json").read_text())
     assert snapshot["workers"][0]["name"] == "rig2" and snapshot["workers"][0]["segments"] > 0
-    assert snapshot["workers"][0]["stats"]["steps"] > 0 and snapshot["learner"]["stats"]["steps"] > 0
+    # fleet.json holds the last update's window only, and either machine may have sent nothing into that batch;
+    # across the run's rows, both must have.
+    assert "stats" in snapshot["workers"][0] and "stats" in snapshot["learner"]
     per_machine = [r["per_machine"] for r in rows]
-    assert all(set(p) <= {"0", "1"} for p in per_machine) and any("1" in p for p in per_machine)
+    assert all(set(p) <= {"0", "1"} for p in per_machine)
+    for m in ("0", "1"):
+        assert sum((p.get(m) or {}).get("steps", 0) for p in per_machine) > 0, m
     assert "rig2" not in json.dumps(rows)  # metrics.jsonl's last row is published: numbers, not names
     joined = json.loads((tmp_path / "fleet" / "run" / "config.json").read_text())
     assert joined["first_actor"] == ACTOR_BLOCK and joined["seed"] == config.seed + ACTOR_BLOCK

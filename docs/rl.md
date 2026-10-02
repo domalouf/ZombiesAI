@@ -241,7 +241,7 @@ would otherwise send you over there to do:
 | reach | the checkout is there, with nothing uncommitted | a PC with uncommitted work is left alone |
 | commit | `git fetch`, check out the learner's commit, detached | no branch of theirs moves; it must be pushed |
 | sync | `uv sync` | |
-| settings | the learner's `config.cfg` installed in the fleet's root | the PC's own Steam profile is not touched |
+| settings | the learner's `config.cfg` installed in the fleet's root | the PC's own Steam profile is not touched; a `--client steam` fleet is warned, not installed (only Plutonium reads the file) |
 | games | `instances.py up`, restarted if their settings just changed | a game reads config.cfg at launch |
 | worker | `zombiesai-worker` restarted if the code or settings changed | |
 | check | `fleet_worker.py --describe`, judged as hello judges it | |
@@ -263,7 +263,12 @@ Then it waits for the next run. The games stay up between runs, as they do on th
   (`runs/instances/config.cfg`, which is what `prep` puts there), else the machine's own Steam profile. A
   different sensitivity makes every look bin turn by a different angle, and a different binding makes a key do
   something else, and neither shows up in any number. The refusal lists what differs. Resolution, fps and vsync
-  are set per instance on the command line, so they're not compared.
+  are set per instance on the command line, so they're not compared. (A `--client steam` fleet plays with the
+  config inside each instance's copied Steam prefix instead, and that is what it reports.)
+- **A name another live worker is using.** Workers are told apart by `--name` (the host name by default) and a
+  random id per process. A second process under a name the learner heard from in the last 60 s is refused, so two
+  PCs that share a host name are never merged into one machine; it waits and asks again, so a worker that was just
+  restarted takes its PC's place once the old one has gone quiet.
 
 **What it takes care of:**
 

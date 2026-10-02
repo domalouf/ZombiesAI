@@ -78,6 +78,16 @@ class FleetError(RuntimeError):
     """The learner refused us, for a reason a person has to fix (a different commit, different settings)."""
 
 
+class NameInUse(FleetError):
+    """The learner heard from another worker under this name moments ago. It may be this PC's own worker, just
+    restarted (`fleet.py prep` restarts it after an update) and not yet timed out, so this one waits and asks
+    again rather than exiting; if it is another machine, the refusal keeps repeating until one is renamed."""
+
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 # ------------------------------------------------------------------------------------------------ wire format
 
 
@@ -389,7 +399,8 @@ class FleetServer:
                 # one has stopped -- this is its PC's worker, restarted -- otherwise it is another machine.
                 if now - worker.last_seen < STALE_S:
                     return 409, {"error": f"another machine is already playing as {name} (from {worker.host}): "
-                                          "give one of them --name"}
+                                          "give one of them --name",
+                                 "retry_after": round(STALE_S - (now - worker.last_seen), 1)}
                 self.say(f"  fleet: {name} is back from {host}, a new worker taking over actors {worker.first_actor}+")
                 worker.instance, worker.alive = instance, 0
             worker.actors = actors
@@ -593,6 +604,8 @@ class FleetClient:
                                                 "settings": settings, **provenance()})
         if code == 401:
             raise FleetError(f"the learner refused the fleet token: set the same {TOKEN_ENV} on both machines")
+        if code == 409 and isinstance(body.get("retry_after"), (int, float)):
+            raise NameInUse(body.get("error") or "name in use", float(body["retry_after"]))
         if code != 200:
             raise FleetError(body.get("error") or f"hello: HTTP {code}")
         return body
@@ -698,6 +711,11 @@ class FleetWorker:
                         waiting_said = True
                     self._status("waiting")
                     stop.wait(self.options.retry_s)
+                    continue
+                except NameInUse as error:
+                    self.say(f"{error}; asking again in {error.retry_after + 1:.0f}s")
+                    self._status("refused", reason=str(error)[:300])
+                    stop.wait(min(max(error.retry_after + 1.0, 1.0), STALE_S + 1.0))
                     continue
                 except FleetError as error:
                     self._status("refused", reason=str(error)[:300])
