@@ -113,17 +113,38 @@ def decode_segment(data: bytes, actor: int):
 # ------------------------------------------------------------------------------------------------ agreement
 
 
-def play_settings() -> dict | None:
-    """What this machine's game plays with: the Steam profile's config.cfg that `instances.py` copies into every
-    instance, reduced to what changes an action's meaning. None without the game (a sim-only machine)."""
-    from zombiesai.demos.game_settings import dvar, parse_config, candidate_configs
+def play_settings(fleet_root: str | Path = "runs/instances") -> dict | None:
+    """What this machine's games play with -- the config.cfg `instances.py` copies into every instance: one
+    installed in the fleet's root by `scripts/fleet.py prep`, else the Steam profile's -- reduced to what changes
+    an action's meaning. None without the game (a sim-only machine)."""
+    from zombiesai.demos.game_settings import dvar, parse_config
+    from zombiesai.realgame.instances import game_config
 
-    found = candidate_configs()
-    if not found:
+    path = game_config(fleet_root)
+    if path is None:
         return None
-    dvars, binds = parse_config(found[0].read_text(errors="replace"))
+    dvars, binds = parse_config(path.read_text(errors="replace"))
     return {"dvars": {name: dvar(dvars, name) for name in PLAY_DVARS},
             "binds": {k.lower(): v for k, v in binds.items()}}
+
+
+def describe(fleet_root: str | Path = "runs/instances") -> dict:
+    """This machine as a learner would judge it, for `scripts/fleet.py`: its commit, the game settings its games
+    play with and where they come from, and how many of its games are running."""
+    from zombiesai.realgame.instances import fleet, game_config, load_fleet
+
+    path = game_config(fleet_root)
+    out = {**provenance(), "settings": play_settings(fleet_root),
+           "settings_from": None if path is None else ("installed" if path.parent == Path(fleet_root) else "steam"),
+           "config_sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path is not None else None,
+           "instances": None, "games_running": 0}
+    try:
+        instances = fleet(load_fleet(fleet_root), say=lambda m: None)
+    except FileNotFoundError:
+        return out
+    out["instances"] = len(instances)
+    out["games_running"] = sum(i.game_running() for i in instances)
+    return out
 
 
 def settings_differences(ours: dict, theirs: dict | None) -> list[str]:
@@ -172,6 +193,8 @@ class WorkerState:
     segments: int = 0
     episodes: int = 0
     refused: int = 0
+    sent: int = 0  # as the worker counts them: what it posted, and what never arrived (the link, or a full inbox)
+    lost: int = 0
     host: str = ""
     commit: str = ""
     settings: dict | None = field(default=None, repr=False)
@@ -226,13 +249,26 @@ class FleetServer:
     def remote_actors_alive(self) -> int:
         return sum(w.alive for w in self.alive())
 
-    def snapshot(self) -> dict:
+    def name_of(self, machine: int) -> str:
+        with self._lock:
+            for w in self.workers.values():
+                if w.first_actor // ACTOR_BLOCK == machine:
+                    return w.name
+        return f"machine {machine}"
+
+    def snapshot(self, per_machine: dict[str, dict] | None = None) -> dict:
+        """For runs/<run>/fleet.json, which stays on the learner: names are fine here, unlike metrics.jsonl.
+        `per_machine` is the learner's own view of each machine's last batches (parallel_ppo.MachineStats)."""
         now = time.time()
+        stats = per_machine or {}
         with self._lock:
             return {"t": round(now, 1), "address": f"{self.address[0]}:{self.address[1]}",
-                    "workers": [{"name": w.name, "first_actor": w.first_actor, "actors": w.actors, "alive": w.alive,
-                                 "seen_s_ago": round(now - w.last_seen, 1), "segments": w.segments,
-                                 "episodes": w.episodes, "refused": w.refused}
+                    "learner": {"machine": 0, "stats": stats.get("0")},
+                    "workers": [{"name": w.name, "machine": w.first_actor // ACTOR_BLOCK, "first_actor": w.first_actor,
+                                 "actors": w.actors, "alive": w.alive, "seen_s_ago": round(now - w.last_seen, 1),
+                                 "segments": w.segments, "episodes": w.episodes, "refused": w.refused,
+                                 "sent": w.sent, "lost_on_the_way": w.lost,
+                                 "stats": stats.get(str(w.first_actor // ACTOR_BLOCK))}
                                 for w in self.workers.values()]}
 
     # -- requests
@@ -245,7 +281,7 @@ class FleetServer:
                                   "check out the learner's commit on that machine"}
         if "unknown" not in (body.get("sha"), ours["sha"]) and body.get("sha") != ours["sha"]:
             return 409, {"error": f"that machine is on commit {str(body.get('sha'))[:12]}, the learner on "
-                                  f"{ours['sha'][:12]}: git pull (or check out the same commit) and uv sync"}
+                                  f"{ours['sha'][:12]}: `scripts/fleet.py prep` on the learner brings it over"}
         if self.config.env == "real":
             with self._lock:
                 if self.settings is None and body.get("settings") is not None:
@@ -255,8 +291,8 @@ class FleetServer:
             if reference is not None:
                 diffs = settings_differences(reference, body.get("settings"))
                 if diffs:
-                    return 409, {"error": "its game settings differ from the learner's -- copy the learner's "
-                                          "Steam config.cfg there: " + "; ".join(diffs[:8])
+                    return 409, {"error": "its game settings differ from the learner's -- `scripts/fleet.py prep` "
+                                          "on the learner installs its config.cfg there: " + "; ".join(diffs[:8])
                                           + (f" (and {len(diffs) - 8} more)" if len(diffs) > 8 else "")}
         with self._lock:
             worker = self.workers.get(name)
@@ -408,6 +444,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             worker.alive = int(body.get("alive", 0))
             worker.actors = int(body.get("actors", worker.actors))
+            worker.sent, worker.lost = int(body.get("sent", worker.sent)), int(body.get("dropped", worker.lost))
             self._reply(200, {"ok": True, "version": fleet._weights[0]})
         else:
             self._reply(404, {"error": f"no {path}"})
@@ -468,8 +505,8 @@ class FleetClient:
     def episode(self, payload: dict) -> int:
         return self._post_json("/episode", payload)[0]
 
-    def heartbeat(self, actors: int, alive: int) -> int:
-        return self._post_json("/heartbeat", {"actors": actors, "alive": alive})[0]
+    def heartbeat(self, actors: int, alive: int, sent: int = 0, dropped: int = 0) -> int:
+        return self._post_json("/heartbeat", {"actors": actors, "alive": alive, "sent": sent, "dropped": dropped})[0]
 
 
 @dataclass
@@ -627,7 +664,7 @@ class FleetWorker:
                              **{k: state[k] for k in ("sent", "dropped", "version", "episodes", "last_round",
                                                       "best_round")})
                 try:
-                    check(self.client.heartbeat(config.n_actors, alive), "heartbeat")
+                    check(self.client.heartbeat(config.n_actors, alive, state["sent"], state["dropped"]), "heartbeat")
                 except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
                     pass
                 session_over.wait(5.0)

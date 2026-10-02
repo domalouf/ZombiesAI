@@ -16,12 +16,13 @@ actors (every key released) and waits for the next run, so it can be left runnin
 """
 
 import argparse
+import json
 import os
 import socket
 import sys
 
 from zombiesai.rl.fleet import (DEFAULT_PORT, TOKEN_ENV, FleetClient, FleetError, FleetWorker, WorkerOptions,
-                                play_settings, token_from_env)
+                                describe, play_settings, token_from_env)
 
 
 def main() -> None:
@@ -38,7 +39,13 @@ def main() -> None:
     parser.add_argument("--lost", type=float, default=60.0,
                         help="seconds without the learner before this machine's games stop (default: 60)")
     parser.add_argument("--once", action="store_true", help="play one run, then exit")
+    parser.add_argument("--describe", action="store_true",
+                        help="print this machine's commit, game settings and running games as JSON, and exit "
+                             "(what scripts/fleet.py checks)")
     args = parser.parse_args()
+    if args.describe:
+        print(json.dumps(describe(args.fleet)))
+        return
     if not args.learner:
         parser.error("--learner (or ZOMBIES_FLEET_LEARNER): the PC running train_rl.py --listen")
     token = token_from_env()
@@ -50,7 +57,7 @@ def main() -> None:
         overrides["counts_per_degree"] = args.counts_per_degree
     if args.record_every is not None:
         overrides["record_every"] = args.record_every
-    settings = play_settings()
+    settings = play_settings(args.fleet)
     if settings is None:
         print("no World at War config.cfg here: a learner training on the real game will refuse this machine",
               file=sys.stderr)

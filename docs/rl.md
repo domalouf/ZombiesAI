@@ -219,19 +219,36 @@ stays the site, and the place the PCs report to (`publish_live.py`). Putting the
 for every frame, for nothing.
 
 ```sh
-# Once: a shared secret, the same on every machine (in the environment, never in the repo).
+# Once: a shared secret, the same on every machine (in the environment, never in the repo), SSH from the
+# learner to each PC with a key (`fleet.py` runs non-interactively), and the repo cloned at ~/Projects/ZombiesAI.
 python -c 'import secrets; print(secrets.token_hex(16))'      # -> ZOMBIES_FLEET_TOKEN
-# Once per worker: the learner's game settings. Copy the learner's Steam profile config.cfg over the worker's
-# (steamapps/compatdata/10090/pfx/.../Activision/CoDWaW/players/profiles/<name>/config.cfg).
 
-# The learner PC:
+# Before each run, on the learner PC: every other PC to this commit and this machine's game settings, games up.
+git push                                                       # the PCs fetch the commit from origin
+uv run python scripts/fleet.py prep rig2.lan                   # or rig2.lan=2 for 2 games there; $ZOMBIES_FLEET_HOSTS
 uv run python scripts/instances.py up --n 4
 ZOMBIES_FLEET_TOKEN=... uv run python scripts/train_rl.py runs/bc_real3/bc.pt --actors 4 --listen :47860 --out runs/rl5
 
-# Each other gaming PC, on the same commit (git pull && uv sync):
-uv run python scripts/instances.py up --n 4
+# Each other gaming PC (or leave deploy/zombiesai-worker.service running there):
 ZOMBIES_FLEET_TOKEN=... uv run python scripts/fleet_worker.py --learner <learner-host>.lan --actors 4
 ```
+
+**`scripts/fleet.py prep`** (`rl/fleet_admin.py`) does, on each PC over SSH and all PCs at once, what a refusal
+would otherwise send you over there to do:
+
+| step | what | |
+|---|---|---|
+| reach | the checkout is there, with nothing uncommitted | a PC with uncommitted work is left alone |
+| commit | `git fetch`, check out the learner's commit, detached | no branch of theirs moves; it must be pushed |
+| sync | `uv sync` | |
+| settings | the learner's `config.cfg` installed in the fleet's root | the PC's own Steam profile is not touched |
+| games | `instances.py up`, restarted if their settings just changed | a game reads config.cfg at launch |
+| worker | `zombiesai-worker` restarted if the code or settings changed | |
+| check | `fleet_worker.py --describe`, judged as hello judges it | |
+
+It refuses to start while the learner's own checkout has uncommitted changes: the PCs can only get the last
+commit, and hello compares commits, so they would train on different code under the same name.
+`scripts/fleet.py check` runs only the last step, and changes nothing.
 
 A worker can be left running (`deploy/zombiesai-worker.service`). It waits for a learner, joins whatever run
 the learner starts, and stops its actors (every key released) when it hasn't heard from the learner for 60 s.
@@ -240,12 +257,13 @@ Then it waits for the next run. The games stay up between runs, as they do on th
 **What the learner refuses**, at hello, before a single segment:
 
 - **A different commit or spec version.** The actor code, reward shaping and observation layout must be the
-  learner's. `git pull && uv sync` on the worker.
+  learner's. `scripts/fleet.py prep` fixes it.
 - **Different game settings.** Sensitivity, `m_yaw`/`m_pitch`, field of view and every key binding come from
-  each machine's own Steam `config.cfg` (`instances.py` copies it into each instance). A different sensitivity
-  makes every look bin turn by a different angle, and a different binding makes a key do something else, and
-  neither shows up in any number. The refusal lists what differs. Resolution, fps and vsync are set per instance
-  on the command line, so they're not compared.
+  the `config.cfg` `instances.py` copies into each instance: one installed in the fleet's root
+  (`runs/instances/config.cfg`, which is what `prep` puts there), else the machine's own Steam profile. A
+  different sensitivity makes every look bin turn by a different angle, and a different binding makes a key do
+  something else, and neither shows up in any number. The refusal lists what differs. Resolution, fps and vsync
+  are set per instance on the command line, so they're not compared.
 
 **What it takes care of:**
 
@@ -258,11 +276,21 @@ Then it waits for the next run. The games stay up between runs, as they do on th
   weights and the checkpoint are opened with `weights_only=True`; every request needs the token. It is plain
   HTTP, meant for a home LAN: for anything wider, put the machines on Tailscale or WireGuard.
 
-**What to watch.** `metrics.jsonl` gains `machines`, and `actors_alive` counts every machine's actors.
-`runs/<run>/fleet.json` lists each worker at every update: segments and episodes received, segments refused, and
-when it was last heard from. A worker whose segments arrive more than `max_policy_lag` versions late shows
-up as `dropped_segments`, as a slow local actor would. Traffic is ~415 KB/s per game before compression (128x72
-frames at 15 Hz): nothing for wired gigabit, worth checking on Wi-Fi.
+**What to watch: each machine on its own.** One PC's games can feed the batch worse data than the rest -- a
+slower GPU makes more late steps, a broken install plays worse -- and a run-wide average hides it. So every
+update, the learner also scores each machine separately (`MachineStats` in `rl/parallel_ppo.py`):
+
+- `metrics.jsonl` gains `machines` and `per_machine`, keyed by machine number (0 is the learner, 1 the first
+  worker to join, ...; numbers and not names, because the last row is published with the site's training page):
+  segments taken, `dropped_segments` (too stale for `max_policy_lag`), steps, `bad_step_frac`, `policy_lag_mean`,
+  and over each machine's last 50 games `round_reached_mean`, `return_mean` and `seconds_mean`.
+- `runs/<run>/fleet.json` has the same per machine, by name, plus what each worker says it sent and lost on
+  the way (the link, or the learner's inbox full), and when it was last heard from.
+- The log says it when a machine's late steps pass 10% of its steps, and again when they fall back under 5%:
+  "rig2: 18% of its steps late -- ... fewer --actors there?". `actors_alive` counts every machine's actors.
+
+Traffic is ~415 KB/s per game before compression (128x72 frames at 15 Hz): nothing for wired gigabit,
+worth checking on Wi-Fi.
 
 **On the site.** Each worker PC can report itself to lts the way the training PC does (`publish_live.py
 --worker <id>`; README.md, "Live on the site"): the Training Room shows a card per machine, with what its worker

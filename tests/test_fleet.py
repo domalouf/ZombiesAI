@@ -184,6 +184,10 @@ def test_a_run_trains_on_its_own_games_and_another_machines(bc_checkpoint, tmp_p
     assert rows[-1]["step"] >= 1200 and max(r["machines"] for r in rows) == 2
     snapshot = json.loads((tmp_path / "run" / "fleet.json").read_text())
     assert snapshot["workers"][0]["name"] == "rig2" and snapshot["workers"][0]["segments"] > 0
+    assert snapshot["workers"][0]["stats"]["steps"] > 0 and snapshot["learner"]["stats"]["steps"] > 0
+    per_machine = [r["per_machine"] for r in rows]
+    assert all(set(p) <= {"0", "1"} for p in per_machine) and any("1" in p for p in per_machine)
+    assert "rig2" not in json.dumps(rows)  # metrics.jsonl's last row is published: numbers, not names
     joined = json.loads((tmp_path / "fleet" / "run" / "config.json").read_text())
     assert joined["first_actor"] == ACTOR_BLOCK and joined["seed"] == config.seed + ACTOR_BLOCK
     assert any(m.startswith("left run run") for m in said), said

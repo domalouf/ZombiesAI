@@ -48,6 +48,7 @@ PLUTONIUM_DIR = Path.home() / ".local" / "share" / "plutonium"  # where plutoniu
 PLUTONIUM_BOOTSTRAPPER = Path("bin") / "plutonium-bootstrapper-win32.exe"
 # Plutonium keeps its profiles in its own storage, not the prefix. `$$$` is the profile it makes on first run.
 PLUTONIUM_PROFILE = Path("storage") / "t4" / "players" / "profiles" / "$$$"
+GAME_CONFIG = "config.cfg"  # in the fleet's root: the settings every game plays with, if installed there
 NACHT = "nazi_zombie_prototype"
 
 
@@ -251,19 +252,33 @@ def offline_wrapper() -> list[str]:
             "sh"]
 
 
-def sync_plutonium_profile(root: Path, *, say=print) -> Path | None:
-    """Copy your Steam profile's config.cfg over Plutonium's before a launch, so the instances play with the
-    bindings and sensitivity the demos were recorded with. Plutonium's own defaults differ where it matters:
-    right mouse is `+toggleads_throw` there, `+speed_throw` (hold) in the Steam game."""
+def game_config(fleet_root: str | Path) -> Path | None:
+    """The config.cfg the fleet's games play with: one installed in the fleet's root (the training PC's, which
+    `scripts/fleet.py prep` puts on every PC that plays for it -- rl/fleet.py), else your Steam profile's."""
     from zombiesai.demos.game_settings import candidate_configs
 
+    installed = Path(fleet_root) / GAME_CONFIG
+    if installed.is_file():
+        return installed
     found = candidate_configs()
-    if not found:
+    return found[0] if found else None
+
+
+def sync_plutonium_profile(root: Path, *, source: Path | None = None, say=print) -> Path | None:
+    """Copy a config.cfg -- `source`, or your Steam profile's -- over Plutonium's before a launch, so the
+    instances play with the bindings and sensitivity the demos were recorded with. Plutonium's own defaults
+    differ where it matters: right mouse is `+toggleads_throw` there, `+speed_throw` (hold) in the Steam game."""
+    from zombiesai.demos.game_settings import candidate_configs
+
+    if source is None:
+        found = candidate_configs()
+        source = found[0] if found else None
+    if source is None:
         say("  no Steam config.cfg to copy: Plutonium plays with its own bindings -- check them")
         return None
     profile = root / PLUTONIUM_PROFILE
     profile.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(found[0], profile / "config.cfg")
+    shutil.copyfile(source, profile / "config.cfg")
     # Without active.txt naming a profile the game opens on "Create Online Profile", and `+map` never runs.
     (profile.parent / "active.txt").write_text(profile.name)
     return profile / "config.cfg"
@@ -517,7 +532,7 @@ class Instance:
     def launch_game(self) -> None:
         if self.config.client == "plutonium":
             prepare_plutonium(self.config, self.spec, say=self.say)
-            sync_plutonium_profile(self.spec.plutonium, say=self.say)
+            sync_plutonium_profile(self.spec.plutonium, source=game_config(self.config.root), say=self.say)
         command, cwd = game_command(self.config, self.spec)
         if self.config.offline:
             command = offline_wrapper() + command

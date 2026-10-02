@@ -100,7 +100,9 @@ uv run python scripts/instances.py down
 
 More games than one PC can run: the other gaming PCs join the same run as **workers** (`scripts/fleet_worker.py`),
 sending their games to the learner over the LAN. The learner turns away any PC on a different commit or with
-different game settings. See [`docs/rl.md`](./docs/rl.md), "Several PCs".
+different game settings; `scripts/fleet.py prep` brings every PC to this one's commit and settings and starts
+its games, over SSH, and the learner scores each machine's games on their own so one bad PC stands out. See
+[`docs/rl.md`](./docs/rl.md), "Several PCs".
 
 On the machine that runs the game (Linux; see [`docs/linux.md`](./docs/linux.md)
 for why, and for the udev and libinput setup), the M0 spikes are two commands:

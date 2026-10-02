@@ -10,6 +10,7 @@ from zombiesai.demos.agent import BCAgent
 from zombiesai.rl.parallel_ppo import (
     FrameHistory,
     Learner,
+    MachineStats,
     RLConfig,
     RunningStd,
     Segment,
@@ -177,3 +178,27 @@ def test_a_continued_run_keeps_its_anchor_on_the_original_prior(bc_checkpoint, t
     two = tmp_path / "two.pt"
     second.checkpoint(two, step=200)
     assert Learner(replace(config, init=str(two)), torch.device("cpu")).reference == str(bc_checkpoint)
+
+
+def test_each_machine_is_judged_on_its_own_steps_and_games():
+    stats = MachineStats(block=100)
+    def seg(actor, n=300, bad=0):
+        flags = np.zeros(n, bool)
+        flags[:bad] = True
+        return Segment(actor=actor, version=0, context=0, frames=np.zeros((n + 1, 1, 1, 3), np.uint8),
+                       actions=np.zeros((n, len(spec.ACTION_NVEC)), np.int64), logp=np.zeros(n, np.float32),
+                       rewards=np.zeros(n, np.float32), bad=flags, terminated=False)
+    stats.segment(seg(0, bad=6), lag=0, accepted=True)
+    stats.segment(seg(101, bad=60), lag=1, accepted=True)
+    stats.segment(seg(102), lag=3, accepted=False)
+    stats.episode(103, {"round_reached": 4, "return": 2.0, "seconds": 90.0})
+    out = stats.flush()
+    assert set(out) == {"0", "1"}  # by number: the last metrics row is published, names are not
+    assert out["0"]["bad_step_frac"] == pytest.approx(0.02) and out["0"]["episodes"] == 0
+    assert out["1"]["bad_step_frac"] == pytest.approx(0.2) and out["1"]["dropped_segments"] == 1
+    assert out["1"]["policy_lag_mean"] == 1.0 and out["1"]["round_reached_mean"] == 4.0
+    assert stats.verdicts(out) == [(1, "late")] and stats.verdicts(out) == []  # said once
+    stats.segment(seg(100), lag=0, accepted=True)
+    again = stats.flush()
+    assert again["1"]["steps"] == 300 and again["1"]["round_reached_mean"] == 4.0  # games outlive the window
+    assert stats.verdicts(again) == [(1, "recovered")]

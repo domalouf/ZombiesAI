@@ -208,3 +208,17 @@ def test_a_headless_weston_is_exactly_the_games_size(tmp_path, monkeypatch):
     assert config.resolved_host() == "hyprland"
     monkeypatch.setattr(inst.shutil, "which", lambda name: "/usr/bin/weston")
     assert config.resolved_host() == "weston"
+
+
+def test_a_config_installed_in_the_fleet_root_wins_over_the_steam_profile(tmp_path, monkeypatch):
+    steam_cfg = tmp_path / "steam" / "config.cfg"
+    steam_cfg.parent.mkdir()
+    steam_cfg.write_text('seta sensitivity "9"\n')
+    monkeypatch.setattr("zombiesai.demos.game_settings.candidate_configs", lambda: [steam_cfg])
+    root = tmp_path / "fleet"
+    assert inst.game_config(root) == steam_cfg  # nothing installed: the PC's own
+    root.mkdir()
+    (root / "config.cfg").write_text('seta sensitivity "2"\n')
+    assert inst.game_config(root) == root / "config.cfg"
+    written = inst.sync_plutonium_profile(tmp_path / "pluto", source=inst.game_config(root), say=lambda m: None)
+    assert written.read_text() == 'seta sensitivity "2"\n' and steam_cfg.read_text() == 'seta sensitivity "9"\n'

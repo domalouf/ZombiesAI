@@ -657,6 +657,75 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
+class MachineStats:
+    """Each machine's share of the batches, so one PC feeding the learner worse data than the rest stands out
+    instead of being averaged away -- a slower GPU means more late steps, a different install other rounds.
+    rl/fleet.py numbers machine k's actors from k * block; this machine's are 0..n-1, machine 0. Keyed by that
+    number, never a name: the last metrics row is published with the site's training page."""
+
+    BAD_STEP_WARN = 0.10  # docs/rl.md: under 5% is normal since the BLAS fix; twice that is a machine in trouble
+    BAD_STEP_OK = 0.05
+    MIN_STEPS = 256  # fewer steps than a segment says nothing
+
+    def __init__(self, block: int, recent: int = 50):
+        self.block = block
+        self.window: dict[int, dict] = {}
+        self.recent: dict[int, deque] = {}
+        self._recent_len = recent
+        self.warned: set[int] = set()
+
+    def _w(self, actor: int) -> dict:
+        return self.window.setdefault(actor // self.block, {"segments": 0, "dropped": 0, "steps": 0, "bad": 0,
+                                                            "lag": 0, "episodes": 0})
+
+    def segment(self, seg: "Segment", lag: int, accepted: bool) -> None:
+        w = self._w(seg.actor)
+        if not accepted:
+            w["dropped"] += 1
+            return
+        w["segments"] += 1
+        w["steps"] += seg.n
+        w["bad"] += int(seg.bad.sum())
+        w["lag"] += lag
+
+    def episode(self, actor: int, payload: dict) -> None:
+        self._w(actor)["episodes"] += 1
+        self.recent.setdefault(actor // self.block, deque(maxlen=self._recent_len)).append(payload)
+
+    def flush(self) -> dict[str, dict]:
+        """Since the last flush: segments taken and dropped as too stale, steps, the share of them late, the
+        mean lag; over each machine's last `recent` games: rounds, return and survival time."""
+        out = {}
+        for m in sorted(set(self.window) | set(self.recent)):
+            w = self.window.get(m) or {"segments": 0, "dropped": 0, "steps": 0, "bad": 0, "lag": 0, "episodes": 0}
+            row = {"segments": w["segments"], "dropped_segments": w["dropped"], "steps": w["steps"],
+                   "episodes": w["episodes"],
+                   "bad_step_frac": round(w["bad"] / w["steps"], 4) if w["steps"] else None,
+                   "policy_lag_mean": round(w["lag"] / w["segments"], 3) if w["segments"] else None}
+            games = self.recent.get(m) or ()
+            for key in ("round_reached", "return", "seconds"):
+                vals = [g[key] for g in games if isinstance(g.get(key), (int, float))]
+                row[f"{key}_mean"] = round(float(np.mean(vals)), 3) if vals else None
+            out[str(m)] = row
+        self.window = {}
+        return out
+
+    def verdicts(self, stats: dict[str, dict]) -> list[tuple[int, str]]:
+        """(machine, "late" | "recovered") when a machine's late-step share crosses the line, once each way."""
+        out = []
+        for key, row in stats.items():
+            m, frac = int(key), row["bad_step_frac"]
+            if frac is None or row["steps"] < self.MIN_STEPS:
+                continue
+            if frac > self.BAD_STEP_WARN and m not in self.warned:
+                self.warned.add(m)
+                out.append((m, "late"))
+            elif frac < self.BAD_STEP_OK and m in self.warned:
+                self.warned.discard(m)
+                out.append((m, "recovered"))
+        return out
+
+
 def _next_item(out, inbox, timeout_s: float = 1.0):
     """The next thing an actor sent: this machine's actors first (they drop a segment rather than wait, so they
     must not queue behind a busy network), then a remote worker's, already decoded in this process."""
@@ -699,7 +768,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
         from zombiesai.rl.fleet import FleetServer, play_settings
 
         fleet = FleetServer(config.listen, fleet_token or "", config=config, run_dir=run_dir,
-                            settings=play_settings() if config.env == "real" else None, say=say).start()
+                            settings=play_settings(config.fleet_root) if config.env == "real" else None,
+                            say=say).start()
         fleet.set_weights(version, run_dir / "weights.pt")
         host, port = fleet.address
         say(f"listening for other machines' games on {host}:{port}")
@@ -723,6 +793,11 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     for i in range(config.n_actors):
         spawn(i)
     say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors here from {config.init}")
+    machines = None
+    if fleet is not None:
+        from zombiesai.rl.fleet import ACTOR_BLOCK
+
+        machines = MachineStats(ACTOR_BLOCK)
     log = open(run_dir / "metrics.jsonl", "a", buffering=1)
     # Every finished game, one line each: what the stream overlay and its page are built from (viz/stream.py).
     episode_log = open(run_dir / "episodes.jsonl", "a", buffering=1)
@@ -737,6 +812,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
             kind, i, payload = _next_item(out, fleet.inbox if fleet is not None else None)
             if kind == "segment":
                 lag = version - payload.version
+                if machines is not None:
+                    machines.segment(payload, lag, accepted=lag <= config.max_policy_lag)
                 if lag > config.max_policy_lag:
                     dropped += 1
                 else:
@@ -746,6 +823,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
             elif kind == "episode":
                 episodes += 1
                 recent.append(payload)
+                if machines is not None:
+                    machines.episode(i, payload)
                 episode_log.write(json.dumps({"t": round(time.time(), 1), "step": step, "version": version,
                                               **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}}) + "\n")
                 say(f"  actor {i} episode {payload.get('episode')}: round {payload.get('round_reached', '?')}, "
@@ -770,15 +849,23 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 version += 1
                 publish(run_dir / "weights.pt", learner.net, version)
                 alive = sum(p.is_alive() for p in procs.values())
+                per_machine = None
                 if fleet is not None:
+                    per_machine = machines.flush()
                     fleet.set_weights(version, run_dir / "weights.pt")
                     alive += fleet.remote_actors_alive()
-                    (run_dir / "fleet.json").write_text(json.dumps(fleet.snapshot(), indent=2))
+                    (run_dir / "fleet.json").write_text(json.dumps(fleet.snapshot(per_machine), indent=2))
+                    for m, verdict in machines.verdicts(per_machine):
+                        who = "this machine" if m == 0 else fleet.name_of(m)
+                        say(f"  {who}: {100 * per_machine[str(m)]['bad_step_frac']:.0f}% of its steps late"
+                            + (" -- its games are feeding the batch more steps nobody chose; fewer --actors there?"
+                               if verdict == "late" else ", back to normal"))
                 row = {"update": learner.updates, "step": step, "sps": int(step / max(time.time() - start, 1e-9)),
                        "episodes": episodes, "version": version, "dropped_segments": dropped,
                        "policy_lag_mean": float(np.mean(lags)) if lags else 0.0, "actors_alive": alive, **stats}
                 if fleet is not None:
                     row["machines"] = (1 if config.n_actors else 0) + len(fleet.alive())
+                    row["per_machine"] = per_machine
                 if recent:
                     for key in ("return", "length", "round_reached", "repair_share", "max_term_share", "seconds"):
                         vals = [e[key] for e in recent if isinstance(e.get(key), (int, float))]
