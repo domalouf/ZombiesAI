@@ -286,6 +286,10 @@ update, the learner also scores each machine separately (`MachineStats` in `rl/p
   and over each machine's last 50 games `round_reached_mean`, `return_mean` and `seconds_mean`.
 - `runs/<run>/fleet.json` has the same per machine, by name, plus what each worker says it sent and lost on
   the way (the link, or the learner's inbox full), and when it was last heard from.
+- The dashboard (`scripts/dashboard.py`, and the site's training page) draws them in an **Each machine** section
+  for any run trained on several PCs: late steps against the 10% line, round reached, each machine's share of the
+  training data, and segments too stale to use (pooled over 10 updates), one line per machine. Pick the run and
+  hide machines with the chips above the charts. The local page names each worker; the site's says "Machine 1".
 - The log says it when a machine's late steps pass 10% of its steps, and again when they fall back under 5%:
   "rig2: 18% of its steps late -- ... fewer --actors there?". `actors_alive` counts every machine's actors.
 
