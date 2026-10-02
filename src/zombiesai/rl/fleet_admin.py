@@ -8,7 +8,8 @@ each machine in turn, in the order a person would:
     commit    git fetch, and check out the learner's commit -- detached, so no branch of theirs moves
     sync      uv sync, for whatever that commit's lock file says
     settings  the learner's config.cfg installed in the fleet's root, which the games play with from then on
-              (realgame/instances.py: game_config) -- the PC's own Steam profile is left alone
+              (realgame/instances.py: game_config) -- the PC's own Steam profile is left alone. Only Plutonium
+              games read it: a fleet on the steam client is warned about and left as it is, for `check` to judge
     games     instances.py up; restarted if their settings just changed (a game reads config.cfg at launch)
     worker    zombiesai-worker restarted if it runs and the code or settings changed under it
     check     fleet_worker.py --describe, judged as the learner's hello judges it
@@ -41,6 +42,7 @@ class Step:
     name: str
     ok: bool
     detail: str = ""
+    warn: bool = False  # ok, but not done: a person should read why
 
 
 @dataclass
@@ -52,8 +54,8 @@ class Report:
     def ok(self) -> bool:
         return all(s.ok for s in self.steps)
 
-    def add(self, name: str, ok: bool, detail: str = "") -> bool:
-        self.steps.append(Step(name, ok, detail))
+    def add(self, name: str, ok: bool, detail: str = "", *, warn: bool = False) -> bool:
+        self.steps.append(Step(name, ok, detail, warn))
         return ok
 
 
@@ -186,6 +188,13 @@ def prep(target: Target, learner: Learner, remote: Remote, *, games: bool = True
     settings_changed = False
     if learner.config is None:
         report.add("settings", True, "the training PC has no config.cfg to hand out; its own Steam one stays")
+    elif _fleet_client(remote, fleet) == "steam":
+        # Steam's CoDWaW.exe reads the profile inside each instance's copy of the prefix, never the fleet root's
+        # config.cfg (instances.game_config), so installing one would change nothing those games play with.
+        # Not a failure by itself: if that profile already matches, the PC is fine, and `check` says which.
+        report.add("settings", True, "NOT installed: this PC's fleet runs the steam client, whose games read "
+                   "the profile in their own prefixes, not an installed config.cfg -- `instances.py up --client "
+                   "plutonium` there to use it, or edit that profile in its instances' prefixes by hand", warn=True)
     else:
         want = hashlib.sha256(learner.config).hexdigest()
         path = f"{fleet}/config.cfg"
@@ -227,6 +236,17 @@ def prep(target: Target, learner: Learner, remote: Remote, *, games: bool = True
     return report
 
 
+def _fleet_client(remote: Remote, fleet: str) -> str | None:
+    """The client the PC's fleet.json names, or None when it has none yet (`instances.py up` makes a Plutonium
+    one by default) or it cannot be read."""
+    result = remote(f"cat {shlex.quote(fleet + '/fleet.json')} 2>/dev/null || true", timeout=60)
+    try:
+        saved = json.loads(_text(result.stdout) or "{}")
+    except ValueError:
+        return None
+    return saved.get("client") if isinstance(saved, dict) else None
+
+
 def run_all(targets: list[Target], learner: Learner, *, mode: str = "prep", games: bool = True, run=subprocess.run,
             ssh: str = "ssh", say=print) -> list[Report]:
     """Every PC at once: a game launch takes minutes, and the PCs do not wait on each other."""
@@ -258,5 +278,5 @@ def parse_targets(specs: list[str], *, actors: int, repo: str, fleet: str) -> li
 def format_report(report: Report) -> str:
     lines = [f"{report.host}: {'ready' if report.ok else 'NOT READY'}"]
     for s in report.steps:
-        lines.append(f"  {'ok  ' if s.ok else 'FAIL'} {s.name:<8} {s.detail}")
+        lines.append(f"  {('WARN' if s.warn else 'ok  ') if s.ok else 'FAIL'} {s.name:<8} {s.detail}")
     return "\n".join(lines)

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import http.client
 import io
 import json
 import multiprocessing as mp
@@ -114,9 +115,10 @@ def decode_segment(data: bytes, actor: int):
 
 
 def play_settings(fleet_root: str | Path = "runs/instances") -> dict | None:
-    """What this machine's games play with -- the config.cfg `instances.py` copies into every instance: one
-    installed in the fleet's root by `scripts/fleet.py prep`, else the Steam profile's -- reduced to what changes
-    an action's meaning. None without the game (a sim-only machine)."""
+    """What this machine's games play with -- `instances.game_config`: for the Plutonium client the config.cfg
+    copied into every instance (one installed in the fleet's root by `scripts/fleet.py prep`, else the Steam
+    profile's), for the steam client the profile in the instances' prefixes -- reduced to what changes an
+    action's meaning. None without the game (a sim-only machine)."""
     from zombiesai.demos.game_settings import dvar, parse_config
     from zombiesai.realgame.instances import game_config
 
@@ -135,13 +137,16 @@ def describe(fleet_root: str | Path = "runs/instances") -> dict:
 
     path = game_config(fleet_root)
     out = {**provenance(), "settings": play_settings(fleet_root),
-           "settings_from": None if path is None else ("installed" if path.parent == Path(fleet_root) else "steam"),
+           "settings_from": None if path is None else ("installed" if path.parent == Path(fleet_root)
+                                                       else "prefix" if Path(fleet_root) in path.parents else "steam"),
            "config_sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path is not None else None,
-           "instances": None, "games_running": 0}
+           "client": None, "instances": None, "games_running": 0}
     try:
-        instances = fleet(load_fleet(fleet_root), say=lambda m: None)
+        config = load_fleet(fleet_root)
     except FileNotFoundError:
         return out
+    instances = fleet(config, say=lambda m: None)
+    out["client"] = config.client
     out["instances"] = len(instances)
     out["games_running"] = sum(i.game_running() for i in instances)
     return out
@@ -495,7 +500,11 @@ class FleetClient:
         """(HTTP status, version, torch blob): 200 with the blob when the learner has newer weights than `have`,
         304 when it does not, 204 before its first publish."""
         code, data, headers = self._request("GET", f"/weights?have={have}")
-        return code, int(headers.get("X-Version", "-1") if headers else -1), data if code == 200 else b""
+        try:
+            version = int(headers.get("X-Version", "-1")) if headers else -1
+        except ValueError:  # not our learner's answer
+            version = -1
+        return code, version, data if code == 200 else b""
 
     def segment(self, local_actor: int, payload: bytes) -> int:
         code, _, _ = self._request("POST", "/segment", payload, {"X-Actor": str(local_actor),
@@ -522,6 +531,29 @@ class WorkerOptions:
 
 class _Gone(Exception):
     """The learner went away (or forgot us): end this session."""
+
+
+# What a request to the learner can raise when it cannot be reached, or something else answers on its port.
+_NETWORK_ERRORS = (urllib.error.URLError, ConnectionError, TimeoutError, OSError, http.client.HTTPException)
+
+
+def response_verdict(code: int, what: str, success: tuple[int, ...] = (200,)) -> tuple[bool, str | None]:
+    """What one answer to the worker says about its session: (whether it is contact -- the learner is there and
+    still takes this machine -- and why the session is over, or None).
+
+    Only a success is contact. Anything else that answers -- a 404 from some other service on the port, a 400, a
+    503 -- proves nothing about the learner, so it leaves the `lost_s` watchdog running: a learner that refuses
+    every request must stop this machine's games as surely as one that is gone. 409 is the learner not knowing
+    this machine any more (a new run: say hello again), 401 the token no longer matching (it restarted with
+    another one), and both end the session at once."""
+    if code in success:
+        return True, None
+    if code == 409:
+        return False, f"the learner no longer knows this machine ({what}): a new run"
+    if code == 401:
+        return False, (f"the learner no longer takes this machine's fleet token ({what}): did it restart with "
+                       f"another {TOKEN_ENV}?")
+    return False, None
 
 
 class FleetWorker:
@@ -553,7 +585,7 @@ class FleetWorker:
             while not stop.is_set():
                 try:
                     hello = self.client.hello(self.options.actors, self.settings)
-                except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as error:
+                except _NETWORK_ERRORS as error:
                     if not waiting_said:
                         self.say(f"waiting for the learner at {self.client.base} ({getattr(error, 'reason', error)})")
                         waiting_said = True
@@ -567,7 +599,7 @@ class FleetWorker:
                 waiting_said = False
                 try:
                     self.session(hello, stop)
-                except (urllib.error.URLError, ConnectionError, TimeoutError) as error:
+                except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException) as error:
                     self.say(f"could not join the run: {error}")
                 if once:
                     return
@@ -616,17 +648,21 @@ class FleetWorker:
         outbox: queue_mod.Queue = queue_mod.Queue(maxsize=max(4, 2 * config.n_actors))
         state = {"last_ok": time.time(), "version": -1, "sent": 0, "dropped": 0, "gone": None, "episodes": 0,
                  "last_round": None, "best_round": None}
+        counting = threading.Lock()  # "sent" and "dropped" move on the sender thread and on this one
         session_over = threading.Event()
 
-        def ok() -> None:
-            state["last_ok"] = time.time()
+        def count(key: str, n: int = 1) -> None:
+            if n:
+                with counting:
+                    state[key] += n
 
-        def check(code: int, what: str) -> None:
-            if code == 409:
-                state["gone"] = f"the learner no longer knows this machine ({what}): a new run"
+        def check(code: int, what: str, success: tuple[int, ...] = (200,)) -> None:
+            contact, gone = response_verdict(code, what, success)
+            if contact:
+                state["last_ok"] = time.time()
+            elif gone is not None:
+                state["gone"] = state["gone"] or gone
                 session_over.set()
-            elif code < 500:
-                ok()
 
         def send_segments() -> None:
             while not session_over.is_set():
@@ -636,24 +672,21 @@ class FleetWorker:
                     continue
                 try:
                     code = self.client.segment(index, encode_segment(seg))
-                except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
-                    state["dropped"] += 1
+                except _NETWORK_ERRORS:
+                    count("dropped")
                     continue
                 check(code, "segment")
-                if code == 200:
-                    state["sent"] += 1
-                else:
-                    state["dropped"] += 1
+                count("sent" if code == 200 else "dropped")
 
         def pull_weights() -> None:
             while not session_over.is_set():
                 try:
                     code, version, blob = self.client.weights(state["version"])
-                    check(code, "weights")
-                    if code == 200:
+                    check(code, "weights", success=(200, 204, 304))
+                    if code == 200 and version >= 0:
                         _atomic_write(run_dir / "weights.pt", blob)
                         state["version"] = version
-                except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+                except _NETWORK_ERRORS:
                     pass
                 session_over.wait(self.options.poll_s)
 
@@ -665,7 +698,7 @@ class FleetWorker:
                                                       "best_round")})
                 try:
                     check(self.client.heartbeat(config.n_actors, alive, state["sent"], state["dropped"]), "heartbeat")
-                except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+                except _NETWORK_ERRORS:
                     pass
                 session_over.wait(5.0)
 
@@ -691,7 +724,7 @@ class FleetWorker:
                 except queue_mod.Empty:
                     kind = None
                 if kind == "segment":
-                    _offer_latest(outbox, (i, payload))
+                    count("dropped", _offer_latest(outbox, (i, payload)))
                 elif kind == "episode":
                     state["episodes"] += 1
                     reached = payload.get("round_reached")
@@ -700,7 +733,7 @@ class FleetWorker:
                         state["best_round"] = max(reached, state["best_round"] or reached)
                     try:
                         check(self.client.episode({**payload, "actor": i}), "episode")
-                    except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
+                    except _NETWORK_ERRORS:
                         pass
                     self.say(f"  actor {i} episode {payload.get('episode')}: round {payload.get('round_reached', '?')}")
                 elif kind == "error":
@@ -737,16 +770,19 @@ class FleetWorker:
                      + (f" ({state['gone']})" if state["gone"] else ""))
 
 
-def _offer_latest(q: queue_mod.Queue, item) -> None:
+def _offer_latest(q: queue_mod.Queue, item) -> int:
     """Queue a segment for sending; when the link is behind, the oldest waiting segment goes -- it is the one
-    most likely to be past the learner's lag limit by the time it arrives."""
+    most likely to be past the learner's lag limit by the time it arrives. Returns how many went, for the
+    worker's `dropped`: a segment thrown away here is as lost to training as one the link lost."""
+    evicted = 0
     while True:
         try:
             q.put_nowait(item)
-            return
+            return evicted
         except queue_mod.Full:
             try:
                 q.get_nowait()
+                evicted += 1
             except queue_mod.Empty:
                 pass
 

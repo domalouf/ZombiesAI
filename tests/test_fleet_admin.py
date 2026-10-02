@@ -21,8 +21,8 @@ class FakePC:
     """A PC over ssh: answers each remote script by what it asks for, and remembers what it was told."""
 
     def __init__(self, head=OLD, dirty=False, config=None, fetch_ok=True, has_commit=True, worker_active=True,
-                 games=4, describe=None):
-        self.head, self.dirty, self.config = head, dirty, config
+                 games=4, describe=None, client=None):
+        self.head, self.dirty, self.config, self.client = head, dirty, config, client
         self.fetch_ok, self.has_commit, self.worker_active, self.games = fetch_ok, has_commit, worker_active, games
         self.describe = describe
         self.scripts: list[str] = []
@@ -43,6 +43,8 @@ class FakePC:
                 self.head = SHA
         elif "sha256sum" in script:
             out = f"{hashlib.sha256(self.config).hexdigest()}  runs/instances/config.cfg\n" if self.config else ""
+        elif "cat " in script and "fleet.json" in script and "cat >" not in script:
+            out = json.dumps({"n": 4, "client": self.client}) if self.client else ""
         elif "cat >" in script:
             self.config = input
         elif "systemctl" in script:
@@ -118,3 +120,21 @@ def test_hosts_take_their_own_game_counts():
     assert [(t.host, t.actors) for t in targets] == [("rig2.lan", 4), ("me@rig3", 2)]
     with pytest.raises(ValueError):
         parse_targets(["=3"], actors=4, repo="~", fleet="f")
+
+
+def test_a_steam_client_fleet_is_warned_about_not_given_a_config_nothing_reads():
+    pc = FakePC(head=SHA, config=b"theirs", client="steam")
+    report = run_prep(pc)
+    settings = next(s for s in report.steps if s.name == "settings")
+    assert settings.ok and settings.warn and "steam client" in settings.detail
+    assert pc.config == b"theirs" and not pc.ran("cat >") and not pc.ran("instances.py restart")
+    # What its games do play with is for check to judge: here, not the learner's settings.
+    assert not report.ok and report.steps[-1].name == "check" and "settings differ" in report.steps[-1].detail
+    assert "WARN settings" in fleet_admin.format_report(report)
+
+
+def test_a_plutonium_client_fleet_still_gets_the_learners_config():
+    pc = FakePC(head=SHA, config=b"theirs", client="plutonium")
+    report = run_prep(pc)
+    assert report.ok and pc.config == CONFIG and pc.ran("instances.py restart")
+    assert not any(s.warn for s in report.steps)

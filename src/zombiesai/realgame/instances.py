@@ -254,14 +254,47 @@ def offline_wrapper() -> list[str]:
 
 def game_config(fleet_root: str | Path) -> Path | None:
     """The config.cfg the fleet's games play with: one installed in the fleet's root (the training PC's, which
-    `scripts/fleet.py prep` puts on every PC that plays for it -- rl/fleet.py), else your Steam profile's."""
+    `scripts/fleet.py prep` puts on every PC that plays for it -- rl/fleet.py), else your Steam profile's.
+
+    Only Plutonium reads an installed one: `launch_game` copies it into each instance's Plutonium profile.
+    Steam's CoDWaW.exe reads the profile inside the instance's own copy of the Steam prefix, which nothing here
+    writes to, so for a fleet saved with `client="steam"` this is that profile, whatever is installed. Without
+    a fleet.json (`instances.py up` has not run yet) the fleet will be Plutonium's, the default."""
     from zombiesai.demos.game_settings import candidate_configs
 
-    installed = Path(fleet_root) / GAME_CONFIG
+    root = Path(fleet_root)
+    try:
+        config = load_fleet(root)
+    except FileNotFoundError:
+        config = None
+    if config is not None and config.client == "steam":
+        return prefix_config(config)
+    installed = root / GAME_CONFIG
     if installed.is_file():
         return installed
     found = candidate_configs()
     return found[0] if found else None
+
+
+# Where the game keeps its profiles inside a Proton prefix (as demos/game_settings.candidate_configs looks).
+PREFIX_PROFILES = Path("pfx/drive_c/users/steamuser/AppData/Local/Activision/CoDWaW/players/profiles")
+
+
+def prefix_config(config: FleetConfig) -> Path | None:
+    """The config.cfg a steam-client game reads: the newest profile in the first instance's copy of the prefix
+    (every copy is made from the same template, once), or, before there is one, in the template it will be
+    copied from. None if neither has a profile."""
+    prefixes = [spec.prefix for spec in specs(config)[:1]]
+    try:
+        prefixes.append(config.resolved_template())
+    except FileNotFoundError:
+        pass
+    for prefix in prefixes:
+        found = sorted((prefix / PREFIX_PROFILES).glob("*/config.cfg"), key=lambda p: p.stat().st_mtime,
+                       reverse=True)
+        if found:
+            return found[0]
+    return None
 
 
 def sync_plutonium_profile(root: Path, *, source: Path | None = None, say=print) -> Path | None:

@@ -7,7 +7,8 @@ Run on the training PC, before train_rl.py --listen:
     uv run python scripts/fleet.py check                         # read-only: would the learner take them?
 
 For each PC: check out this machine's commit (it must be pushed; a PC with uncommitted changes is left alone),
-uv sync, install this machine's config.cfg for its games (its Steam profile is not touched), start its games --
+uv sync, install this machine's config.cfg for its games (its Steam profile is not touched; Plutonium games only:
+a PC whose fleet runs the steam client is warned about and judged by `check`), start its games --
 restarting them if their settings changed -- restart its zombiesai-worker if the code or settings changed, then
 check it as the learner's hello will. Hosts are anything ssh takes; $ZOMBIES_FLEET_HOSTS holds the usual list.
 """
