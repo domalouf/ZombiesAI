@@ -33,8 +33,10 @@ The shape of it:
 
 Everything is logged to `metrics.jsonl` in the names `viz/dashboard.py` already charts for PPO (return,
 round reached, entropy, KL, clip fraction, explained variance, the reward-hacking shares), plus `kl_ref`, the
-distance from the BC policy. `checkpoint.pt` is a BC-format checkpoint with an `rl` section, so everything that
-plays a BC policy -- `play_real.py`, `eval_bc.py`, `watch.py` -- plays the fine-tuned one unchanged.
+distance from the BC policy. Every finished game is also a line of `episodes.jsonl` -- its round, how long it
+lived, how many shots it fired and landed -- which the stream overlay is built from (viz/stream.py).
+`checkpoint.pt` is a BC-format checkpoint with an `rl` section, so everything that plays a BC policy --
+`play_real.py`, `eval_bc.py`, `watch.py` -- plays the fine-tuned one unchanged.
 """
 
 import copy
@@ -54,6 +56,11 @@ from torch import nn
 
 from zombiesai import spec
 from zombiesai.rl.distributions import FactoredCategorical
+
+
+# What episodes.jsonl keeps of an actor's episode summary: the numbers, not the per-term breakdowns.
+EPISODE_FIELDS = ("actor", "episode", "reason", "return", "length", "seconds", "round_reached", "shots", "hits",
+                  "points_gained", "bad_steps", "repair_share", "max_term_share")
 
 
 @dataclass
@@ -254,15 +261,28 @@ class SimActorEnv:
         obs, info = self.env.reset(seed=self.seed * 100_003 + self.episodes)
         self.episodes += 1
         self._ret, self._len = 0.0, 0
+        self._shots = self._hits = 0
+        self._rs, self._seen = None, (0, 0)
         return {"pixels": obs["pixels"]}, info
+
+    def _count_shots(self) -> None:
+        """The sim keeps shots per round (RoundStats, replaced at each round start); this sums them per game."""
+        rs = self.env.rs
+        if rs is not self._rs:
+            self._rs, self._seen = rs, (0, 0)
+        self._shots += rs.shots - self._seen[0]
+        self._hits += rs.shot_hits - self._seen[1]
+        self._seen = (rs.shots, rs.shot_hits)
 
     def step(self, action):
         obs, reward, terminated, truncated, info = self.env.step(np.asarray(action))
         self._ret += reward
         self._len += 1
+        self._count_shots()
         out = {"bad": False}
         if terminated or truncated:
-            out["episode"] = {"return": self._ret, "length": self._len,
+            out["episode"] = {"return": self._ret, "length": self._len, "shots": self._shots, "hits": self._hits,
+                              "seconds": info.get("episode_time_s"),
                               **{k: info[k] for k in ("round_reached", "repair_share", "max_term_share") if k in info}}
         return {"pixels": obs["pixels"]}, float(reward), bool(terminated), bool(truncated), out
 
@@ -668,6 +688,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
         spawn(i)
     say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors from {config.init}")
     log = open(run_dir / "metrics.jsonl", "a", buffering=1)
+    # Every finished game, one line each: what the stream overlay and its page are built from (viz/stream.py).
+    episode_log = open(run_dir / "episodes.jsonl", "a", buffering=1)
     recent: deque[dict] = deque(maxlen=100)
     batch: list[Segment] = []
     batch_n = step = episodes = dropped = 0
@@ -691,6 +713,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
             elif kind == "episode":
                 episodes += 1
                 recent.append(payload)
+                episode_log.write(json.dumps({"t": round(time.time(), 1), "step": step, "version": version,
+                                              **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}}) + "\n")
                 say(f"  actor {i} episode {payload.get('episode')}: round {payload.get('round_reached', '?')}, "
                     f"return {payload.get('return', float('nan')):.1f}, {payload.get('length', 0)} steps"
                     + (f" ({payload['reason']})" if payload.get("reason") else ""))
@@ -717,7 +741,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
                        "policy_lag_mean": float(np.mean(lags)) if lags else 0.0,
                        "actors_alive": sum(p.is_alive() for p in procs.values()), **stats}
                 if recent:
-                    for key in ("return", "length", "round_reached", "repair_share", "max_term_share"):
+                    for key in ("return", "length", "round_reached", "repair_share", "max_term_share", "seconds"):
                         vals = [e[key] for e in recent if isinstance(e.get(key), (int, float))]
                         if vals:
                             row[f"{key}_mean"] = float(np.mean(vals))
@@ -740,6 +764,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
             if p.is_alive():
                 p.terminate()
         log.close()
+        episode_log.close()
         learner.checkpoint(checkpoint, step, {"episodes": episodes})
     return checkpoint
 

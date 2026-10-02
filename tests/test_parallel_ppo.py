@@ -150,6 +150,9 @@ def test_parallel_training_runs_end_to_end_on_the_sim(bc_checkpoint, tmp_path):
     assert len(rows) >= 3 and rows[0]["warmup"] and not rows[-1]["warmup"]
     assert rows[-1]["step"] >= 1200 and "return_mean" in rows[-1] and "round_reached_mean" in rows[-1]
     assert json.loads((tmp_path / "run" / "config.json").read_text())["env"] == "nacht-render"
+    games = [json.loads(line) for line in (tmp_path / "run" / "episodes.jsonl").read_text().splitlines()]
+    assert games and {"round_reached", "seconds", "shots", "hits", "step", "actor"} <= set(games[0])
+    assert all(0 <= g["hits"] <= g["shots"] and g["seconds"] > 0 for g in games)
     assert BCAgent(checkpoint).act({"pixels": frame(9)}).shape == (len(spec.ACTION_NVEC),)
 
 

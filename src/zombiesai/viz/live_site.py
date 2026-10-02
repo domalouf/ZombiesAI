@@ -1,14 +1,16 @@
 """The Training Room on domalouf.com, live: this PC pushes what the page shows, and nothing reaches in.
 
-Two files, written to a staging directory and rsynced (over one reused SSH connection) to the site's
+Three files, written to a staging directory and rsynced (over one reused SSH connection) to the site's
 zombies/training/live/:
 
     machine.json  every 5 s   the machine as viz/system.py samples it, and the runs training right now
     runs.json     every 60 s  every run's curves: the payload the static training page is built from
+    stream.json   every 5 s   the stream overlay's numbers and its page's details (viz/stream.py)
 
 The page itself (scripts/dashboard.py --site ... --live) is the static training page with the machine and
-"Training now" added, polling those two files. Both are public, so both go through the same scrub as the site
-build: no paths, no command lines, no host name, no process ids -- a process is its name and its load.
+"Training now" added, polling the first two; the stream's page and overlay (zombies/live/) poll the third. All
+are public, so all go through the same scrub as the site build: no paths, no command lines, no host name, no
+process ids -- a process is its name and its load, and a run is its name.
 """
 
 import json
@@ -19,10 +21,11 @@ import time
 from pathlib import Path
 
 from zombiesai.viz.dashboard import public_payload, write_dashboard_site
+from zombiesai.viz.stream import StreamFeed
 from zombiesai.viz.supervise import build_payload, live_trainers, run_roots
 from zombiesai.viz.system import SystemSampler
 
-SITE_LINKS = [("← domalouf.com", "/"), ("The agent playing", "/zombies/"),
+SITE_LINKS = [("← domalouf.com", "/"), ("The agent playing", "/zombies/"), ("Live stream", "/zombies/live/"),
               ("Code on GitHub", "https://github.com/domalouf/ZombiesAI")]
 LIVE_INTRO = (
     "How the reinforcement-learning agent's training is going, live from the gaming PC it trains on: the machine "
@@ -124,11 +127,14 @@ def _write(path: Path, value) -> None:
 
 
 class LivePublisher:
-    """Writes machine.json and runs.json to `out_dir` and, with a `dest`, rsyncs them there."""
+    """Writes machine.json, runs.json and stream.json to `out_dir` and, with a `dest`, rsyncs them there.
+    `stream_run` pins the run the stream's numbers come from (by its public name); otherwise it follows training."""
 
     def __init__(self, repo: Path, out_dir: Path, dest: str | None, *, sampler: SystemSampler,
-                 runs_every_s: float = 60.0, ssh: str = "ssh", run=subprocess.run, say=print):
+                 runs_every_s: float = 60.0, stream_run: str | None = None, ssh: str = "ssh", run=subprocess.run,
+                 say=print):
         self.repo, self.out_dir, self.dest, self.sampler = repo, out_dir, dest, sampler
+        self.stream = StreamFeed(stream_run)
         self.runs_every_s, self.run, self.say = runs_every_s, run, say
         self.out_dir.mkdir(parents=True, exist_ok=True)
         control = Path(os.environ.get("XDG_RUNTIME_DIR") or "/tmp") / "zombiesai-live-%C"
@@ -145,7 +151,9 @@ class LivePublisher:
         if self.runs is None or now - self.runs_at >= self.runs_every_s:
             payload = build_payload(run_roots(self.repo))
             self.run_paths = payload["run_paths"]
-            self.runs, self.runs_at = public_runs(payload, live_trainers(self.run_paths)), now
+            writing = live_trainers(self.run_paths)
+            self.runs, self.runs_at = public_runs(payload, writing), now
+            self.stream.choose(self.run_paths, writing)
             _write(self.out_dir / "runs.json", self.runs)
         # Reading /proc is cheap; reading every run's metrics is not, so the names come from the last runs.json.
         trainers = live_trainers(self.run_paths)
@@ -154,6 +162,7 @@ class LivePublisher:
         machine["runs_at"] = self.runs_at
         machine["training"] = training_now(trainers, self.runs)
         _write(self.out_dir / "machine.json", machine)
+        _write(self.out_dir / "stream.json", self.stream.payload(self.runs, trainers, now))
         if self.dest:
             self.push()
 
