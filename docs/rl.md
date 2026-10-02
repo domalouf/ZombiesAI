@@ -200,6 +200,70 @@ To continue, pass the last run's `checkpoint.pt` as the first argument with a ne
 (so no second critic warm-up), the KL weight and the KL anchor carry over -- the anchor is always the BC
 policy the chain started from (`rl/parallel_ppo.py: root_prior`), never the checkpoint being continued.
 
+## Several PCs
+
+One run can take games from every gaming PC in the house. The machine with the GPU you want to train on runs the
+**learner** (and its own games, as before); every other gaming PC runs a **worker** that plays its games for it
+(`rl/fleet.py`, `scripts/fleet_worker.py`). The actors on a worker are the same processes `train()` starts --
+they still ship segments through a local queue and follow a local `weights.pt` -- and the worker forwards the
+one and pulls the other over the LAN. So lag, bad steps and "never stall a live game" work as described above.
+
+```
+ learner PC (RTX 5070)                                   other gaming PC
+ 4 games ── actors 0..3 ──► learner ◄── POST /segment ── forwarder ◄── actors 100..103 ── 4 games
+                            weights.pt ── GET /weights ──► puller ──► weights.pt
+```
+
+The lts laptop is neither. It has no GPU worth training on, and it doesn't need to be on the training path: it
+stays the site, and the place the PCs report to (`publish_live.py`). Putting the learner there would add a hop
+for every frame, for nothing.
+
+```sh
+# Once: a shared secret, the same on every machine (in the environment, never in the repo).
+python -c 'import secrets; print(secrets.token_hex(16))'      # -> ZOMBIES_FLEET_TOKEN
+# Once per worker: the learner's game settings. Copy the learner's Steam profile config.cfg over the worker's
+# (steamapps/compatdata/10090/pfx/.../Activision/CoDWaW/players/profiles/<name>/config.cfg).
+
+# The learner PC:
+uv run python scripts/instances.py up --n 4
+ZOMBIES_FLEET_TOKEN=... uv run python scripts/train_rl.py runs/bc_real3/bc.pt --actors 4 --listen :47860 --out runs/rl5
+
+# Each other gaming PC, on the same commit (git pull && uv sync):
+uv run python scripts/instances.py up --n 4
+ZOMBIES_FLEET_TOKEN=... uv run python scripts/fleet_worker.py --learner <learner-host>.lan --actors 4
+```
+
+A worker can be left running (`deploy/zombiesai-worker.service`). It waits for a learner, joins whatever run
+the learner starts, and stops its actors (every key released) when it hasn't heard from the learner for 60 s.
+Then it waits for the next run. The games stay up between runs, as they do on the learner.
+
+**What the learner refuses**, at hello, before a single segment:
+
+- **A different commit or spec version.** The actor code, reward shaping and observation layout must be the
+  learner's. `git pull && uv sync` on the worker.
+- **Different game settings.** Sensitivity, `m_yaw`/`m_pitch`, field of view and every key binding come from
+  each machine's own Steam `config.cfg` (`instances.py` copies it into each instance). A different sensitivity
+  makes every look bin turn by a different angle, and a different binding makes a key do something else, and
+  neither shows up in any number. The refusal lists what differs. Resolution, fps and vsync are set per instance
+  on the command line, so they're not compared.
+
+**What it takes care of:**
+
+- **Actor numbers.** Worker k's actors are `100k`, `100k+1`, ...: `episodes.jsonl`, the stream's numbers and the
+  reward scaler's per-actor returns keep the machines apart. Its RNG seed moves by the same offset.
+- **The starting checkpoint.** The worker downloads it from the learner (checked by SHA-256), along with the run's
+  settings, so nothing has to be copied around by hand. `--counts-per-degree` and `--record-every` on the worker
+  override the learner's for that machine. Clips are written on the machine that played them.
+- **What it accepts over the network.** Segments are `.npz` read with `allow_pickle=False` and shape-checked;
+  weights and the checkpoint are opened with `weights_only=True`; every request needs the token. It is plain
+  HTTP, meant for a home LAN: for anything wider, put the machines on Tailscale or WireGuard.
+
+**What to watch.** `metrics.jsonl` gains `machines`, and `actors_alive` counts every machine's actors.
+`runs/<run>/fleet.json` lists each worker at every update: segments and episodes received, segments refused, and
+when it was last heard from. A worker whose segments arrive more than `max_policy_lag` versions late shows
+up as `dropped_segments`, as a slow local actor would. Traffic is ~415 KB/s per game before compression (128x72
+frames at 15 Hz): nothing for wired gigabit, worth checking on Wi-Fi.
+
 ## Rehearse on the sim first
 
 The same actors and learner run on NachtSim's rendered view with `--env sim`, as fast as the CPU allows (about

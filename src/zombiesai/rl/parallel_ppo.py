@@ -100,6 +100,8 @@ class RLConfig:
     # sim env
     sim: dict = field(default_factory=dict)
     actor_restarts: int = 20  # per actor, before the run gives up on it
+    # Other PCs' games (rl/fleet.py): "host:port" to accept their workers on, "" for this machine's games only
+    listen: str = ""
 
     @property
     def env_name(self) -> str:
@@ -655,9 +657,34 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
-    """Run the learner here and `n_actors` actor processes, until `total_steps` decisions or Ctrl-C."""
+def _next_item(out, inbox, timeout_s: float = 1.0):
+    """The next thing an actor sent: this machine's actors first (they drop a segment rather than wait, so they
+    must not queue behind a busy network), then a remote worker's, already decoded in this process."""
+    if inbox is None:
+        try:
+            return out.get(timeout=timeout_s)
+        except queue_mod.Empty:
+            return None, None, None
+    try:
+        return out.get_nowait()
+    except queue_mod.Empty:
+        pass
+    try:
+        return inbox.get_nowait()
+    except queue_mod.Empty:
+        pass
+    try:
+        return out.get(timeout=0.2)
+    except queue_mod.Empty:
+        return None, None, None
+
+
+def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str | None = None) -> Path:
+    """Run the learner here and `n_actors` actor processes, until `total_steps` decisions or Ctrl-C. With
+    `config.listen`, other PCs' workers (rl/fleet.py) play for it too, authenticated by `fleet_token`."""
     run_dir = Path(run_dir)
+    if not config.listen and config.n_actors < 1:
+        raise ValueError("no actors: give this machine some, or listen for other machines' (--listen)")
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "config.json").write_text(json.dumps(
         {**asdict(config), "env": config.env_name, "algorithm": "ppo-finetune", "spec_version": spec.SPEC_VERSION},
@@ -667,6 +694,15 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
     learner = Learner(config, resolve_device(config.device))
     version = 0
     publish(run_dir / "weights.pt", learner.net, version)
+    fleet = None
+    if config.listen:
+        from zombiesai.rl.fleet import FleetServer, play_settings
+
+        fleet = FleetServer(config.listen, fleet_token or "", config=config, run_dir=run_dir,
+                            settings=play_settings() if config.env == "real" else None, say=say).start()
+        fleet.set_weights(version, run_dir / "weights.pt")
+        host, port = fleet.address
+        say(f"listening for other machines' games on {host}:{port}")
     # One thread of work per actor. Actors inherit this environment when spawned, before they import numpy:
     # otherwise OpenBLAS starts a thread per core in every actor (the frame resize is a matrix product), and
     # four actors' pools fighting over 12 threads made 95% of real-game steps late.
@@ -686,7 +722,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
 
     for i in range(config.n_actors):
         spawn(i)
-    say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors from {config.init}")
+    say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors here from {config.init}")
     log = open(run_dir / "metrics.jsonl", "a", buffering=1)
     # Every finished game, one line each: what the stream overlay and its page are built from (viz/stream.py).
     episode_log = open(run_dir / "episodes.jsonl", "a", buffering=1)
@@ -698,10 +734,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
     checkpoint = run_dir / "checkpoint.pt"
     try:
         while step < config.total_steps:
-            try:
-                kind, i, payload = out.get(timeout=1.0)
-            except queue_mod.Empty:
-                kind = None
+            kind, i, payload = _next_item(out, fleet.inbox if fleet is not None else None)
             if kind == "segment":
                 lag = version - payload.version
                 if lag > config.max_policy_lag:
@@ -729,17 +762,23 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
                     restarts[j] += 1
                     say(f"  actor {j} is down; restarting it ({restarts[j]}/{config.actor_restarts})")
                     spawn(j)
-            if not procs:
+            if not procs and fleet is None:
                 raise RuntimeError("every actor is down")
             if batch_n >= config.batch_steps:
                 stats = learner.update(batch)
                 step += batch_n
                 version += 1
                 publish(run_dir / "weights.pt", learner.net, version)
+                alive = sum(p.is_alive() for p in procs.values())
+                if fleet is not None:
+                    fleet.set_weights(version, run_dir / "weights.pt")
+                    alive += fleet.remote_actors_alive()
+                    (run_dir / "fleet.json").write_text(json.dumps(fleet.snapshot(), indent=2))
                 row = {"update": learner.updates, "step": step, "sps": int(step / max(time.time() - start, 1e-9)),
                        "episodes": episodes, "version": version, "dropped_segments": dropped,
-                       "policy_lag_mean": float(np.mean(lags)) if lags else 0.0,
-                       "actors_alive": sum(p.is_alive() for p in procs.values()), **stats}
+                       "policy_lag_mean": float(np.mean(lags)) if lags else 0.0, "actors_alive": alive, **stats}
+                if fleet is not None:
+                    row["machines"] = (1 if config.n_actors else 0) + len(fleet.alive())
                 if recent:
                     for key in ("return", "length", "round_reached", "repair_share", "max_term_share", "seconds"):
                         vals = [e[key] for e in recent if isinstance(e.get(key), (int, float))]
@@ -754,6 +793,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
         say("interrupted: stopping the actors")
     finally:
         stop.set()
+        if fleet is not None:
+            fleet.close()  # the workers stop their games when they lose us
         deadline = time.time() + 20
         while any(p.is_alive() for p in procs.values()) and time.time() < deadline:
             try:  # keep draining so no actor blocks on a full queue while it shuts down
