@@ -264,6 +264,10 @@ when it was last heard from. A worker whose segments arrive more than `max_polic
 up as `dropped_segments`, as a slow local actor would. Traffic is ~415 KB/s per game before compression (128x72
 frames at 15 Hz): nothing for wired gigabit, worth checking on Wi-Fi.
 
+**On the site.** Each worker PC can report itself to lts the way the training PC does (`publish_live.py
+--worker <id>`; README.md, "Live on the site"): the Training Room shows a card per machine, with what its worker
+is doing, read from the `runs/fleet/status.json` the worker rewrites every few seconds.
+
 ## Rehearse on the sim first
 
 The same actors and learner run on NachtSim's rendered view with `--env sim`, as fast as the CPU allows (about

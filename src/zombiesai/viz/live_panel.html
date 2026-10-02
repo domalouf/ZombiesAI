@@ -13,6 +13,17 @@
   .now-run .head { display: flex; align-items: baseline; gap: 10px; }
   .now-run .head .value { font: 600 30px/1 var(--ui); }
   .now-run .head .label { font-size: 13px; color: var(--chalk-dim); }
+  /* The machines (with worker PCs, rl/fleet.py): one card each, and the chosen one in full below. */
+  .fleet { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr)); gap: 14px; margin-bottom: 16px; }
+  .machine-card { display: grid; gap: 8px; align-content: start; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+  .machine-card:hover { border-color: var(--chalk-faint); }
+  .machine-card[aria-pressed="true"] { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+  .machine-card .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+  .machine-card .name { font: 700 16px/1.2 var(--ui); }
+  .machine-card .role { font-size: 12.5px; color: var(--chalk-dim); }
+  .machine-card .top .flag { margin-left: auto; font: 700 12px var(--mono); }
+  .machine-card .facts { font-size: 13px; color: var(--chalk-dim); }
+  .system-which { margin: 0 0 6px; font: 700 15px/1.2 var(--ui); }
 </style>
 
 <p class="live-status" id="live-status" role="status">Connecting to the PC…</p>
@@ -24,6 +35,8 @@
 
 <section aria-labelledby="system-title">
   <h2 id="system-title">The machine</h2>
+  <div class="fleet" id="fleet" hidden></div>
+  <p class="system-which" id="system-which" hidden></p>
   <p class="specs" id="system-specs"></p>
   <div id="system"><p class="empty-note">Waiting for the PC to report…</p></div>
 </section>

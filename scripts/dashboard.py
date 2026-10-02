@@ -1,6 +1,7 @@
 """Build a dashboard of every training run under runs/: learning curves, health, and the plan's gates."""
 
 import argparse
+import os
 import time
 import webbrowser
 from pathlib import Path
@@ -51,12 +52,20 @@ def main() -> None:
     parser.add_argument("--live", action="store_true",
                         help="with --site: the live page -- every checkout's runs, and the machine and Training now "
                              "read from live/*.json, which scripts/publish_live.py keeps pushing")
+    parser.add_argument("--machines", default=os.environ.get("LIVE_MACHINES", ""),
+                        help="with --live: the ids of the other PCs that play for the learner (scripts/publish_live.py "
+                             "--worker ID on each), spaces or commas between; the page shows each one ($LIVE_MACHINES)")
     parser.add_argument("--no-open", action="store_true", help="don't open the dashboard in a browser")
     args = parser.parse_args()
 
     if args.site and args.live:
-        index = write_live_page(REPO_DIR, args.site, description=SITE_DESCRIPTION)
-        print(f"live site page: {index.resolve()}  (reads live/machine.json and live/runs.json beside it)")
+        machines = [m for m in args.machines.replace(",", " ").split() if m]
+        try:
+            index = write_live_page(REPO_DIR, args.site, description=SITE_DESCRIPTION, machines=machines)
+        except ValueError as error:
+            parser.error(str(error))
+        also = "".join(f", live/machine-{m}.json" for m in machines)
+        print(f"live site page: {index.resolve()}  (reads live/machine.json{also} and live/runs.json beside it)")
         return
     if args.site:
         payload = build_dashboard(args.runs, buckets=args.buckets, stale_after=args.stale_after)

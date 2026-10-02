@@ -6,6 +6,12 @@
 #   journalctl --user -u zombiesai-live -f        # "pushing to zombies-live:", or why it is not
 #
 # ZOMBIES_LIVE_DEST is the ssh alias README.md's "Live on the site" sets up, with its restricted key.
+#
+# On a gaming PC that plays for the learner (scripts/fleet_worker.py), the same unit pushes only that machine:
+# put its id and label in ~/.config/zombiesai/live.env (the file is optional, and the training PC needs none):
+#
+#   ZOMBIES_LIVE_WORKER=rig2
+#   ZOMBIES_LIVE_LABEL=Gaming PC 2
 
 [Unit]
 Description=ZombiesAI: keep domalouf.com/zombies/training/ live
@@ -13,6 +19,7 @@ After=network-online.target
 
 [Service]
 Environment=ZOMBIES_LIVE_DEST=zombies-live:
+EnvironmentFile=-%h/.config/zombiesai/live.env
 WorkingDirectory=%h/Projects/ZombiesAI
 ExecStart=/usr/bin/uv run --no-sync python -u scripts/publish_live.py
 Restart=always

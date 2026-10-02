@@ -55,6 +55,7 @@ from zombiesai import spec
 DEFAULT_PORT = 47860
 TOKEN_ENV = "ZOMBIES_FLEET_TOKEN"
 MAX_BODY = 256 << 20  # a 256-step segment is ~7 MB raw; this is far past any real one
+STATUS_FILE = "status.json"  # in the worker's out_root
 ACTOR_BLOCK = 100  # worker k's actors are numbered from k * ACTOR_BLOCK; the learner's own stay at 0..n-1
 # The settings that decide what an action does in the game. Resolution, fps, vsync and the rest are set per
 # instance on the command line (FleetConfig.dvars), so they cannot differ between machines and are not compared.
@@ -494,27 +495,50 @@ class FleetWorker:
         self.client, self.options, self.say = client, options, say
         self.settings = settings
 
+    @property
+    def status_path(self) -> Path:
+        """What this worker is doing, rewritten every few seconds: publish_live.py puts it on the site."""
+        return Path(self.options.out_root) / STATUS_FILE
+
+    def _status(self, state: str, **fields) -> None:
+        try:
+            self.status_path.parent.mkdir(parents=True, exist_ok=True)
+            _atomic_write(self.status_path, json.dumps({"at": round(time.time(), 1), "state": state,
+                                                        "actors": self.options.actors, **fields}).encode())
+        except OSError:
+            pass  # the status is for people watching; never a reason to stop playing
+
     def run(self, stop: threading.Event | None = None, *, once: bool = False) -> None:
         """Serve every run the learner starts, until `stop` (or after one run, with `once`)."""
         stop = stop or threading.Event()
-        waiting_said = False
-        while not stop.is_set():
-            try:
-                hello = self.client.hello(self.options.actors, self.settings)
-            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as error:
-                if not waiting_said:
-                    self.say(f"waiting for the learner at {self.client.base} ({getattr(error, 'reason', error)})")
-                    waiting_said = True
+        waiting_said = refused = False
+        try:
+            while not stop.is_set():
+                try:
+                    hello = self.client.hello(self.options.actors, self.settings)
+                except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as error:
+                    if not waiting_said:
+                        self.say(f"waiting for the learner at {self.client.base} ({getattr(error, 'reason', error)})")
+                        waiting_said = True
+                    self._status("waiting")
+                    stop.wait(self.options.retry_s)
+                    continue
+                except FleetError as error:
+                    self._status("refused", reason=str(error)[:300])
+                    refused = True
+                    raise
+                waiting_said = False
+                try:
+                    self.session(hello, stop)
+                except (urllib.error.URLError, ConnectionError, TimeoutError) as error:
+                    self.say(f"could not join the run: {error}")
+                if once:
+                    return
+                self._status("waiting")
                 stop.wait(self.options.retry_s)
-                continue
-            waiting_said = False
-            try:
-                self.session(hello, stop)
-            except (urllib.error.URLError, ConnectionError, TimeoutError) as error:
-                self.say(f"could not join the run: {error}")
-            if once:
-                return
-            stop.wait(self.options.retry_s)
+        finally:
+            if not refused:  # a refusal stays on the page: it is the one state a person has to act on
+                self._status("stopped")
 
     def session(self, hello: dict, stop: threading.Event) -> None:
         from zombiesai.rl.parallel_ppo import RLConfig, actor_main
@@ -553,7 +577,8 @@ class FleetWorker:
         procs: dict[int, mp.Process] = {}
         restarts = {i: 0 for i in range(config.n_actors)}
         outbox: queue_mod.Queue = queue_mod.Queue(maxsize=max(4, 2 * config.n_actors))
-        state = {"last_ok": time.time(), "version": -1, "sent": 0, "dropped": 0, "gone": None}
+        state = {"last_ok": time.time(), "version": -1, "sent": 0, "dropped": 0, "gone": None, "episodes": 0,
+                 "last_round": None, "best_round": None}
         session_over = threading.Event()
 
         def ok() -> None:
@@ -597,9 +622,12 @@ class FleetWorker:
 
         def heartbeat() -> None:
             while not session_over.is_set():
+                alive = sum(p.is_alive() for p in list(procs.values()))
+                self._status("playing", run=name, alive=alive,
+                             **{k: state[k] for k in ("sent", "dropped", "version", "episodes", "last_round",
+                                                      "best_round")})
                 try:
-                    check(self.client.heartbeat(config.n_actors, sum(p.is_alive() for p in list(procs.values()))),
-                          "heartbeat")
+                    check(self.client.heartbeat(config.n_actors, alive), "heartbeat")
                 except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):
                     pass
                 session_over.wait(5.0)
@@ -628,6 +656,11 @@ class FleetWorker:
                 if kind == "segment":
                     _offer_latest(outbox, (i, payload))
                 elif kind == "episode":
+                    state["episodes"] += 1
+                    reached = payload.get("round_reached")
+                    if isinstance(reached, (int, float)):
+                        state["last_round"] = reached
+                        state["best_round"] = max(reached, state["best_round"] or reached)
                     try:
                         check(self.client.episode({**payload, "actor": i}), "episode")
                     except (urllib.error.URLError, ConnectionError, TimeoutError, OSError):

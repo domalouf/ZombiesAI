@@ -185,6 +185,26 @@ nginx serves the two files as it does any static file, and the page asks for
 them with `cache: "no-store"`. If a CDN sits in front, keep it from caching
 `/zombies/training/live/`.
 
+**The other gaming PCs** (the ones playing for the learner, `scripts/fleet_worker.py`)
+show up on the same page, one card each beside the training PC: live or offline,
+CPU, GPU and RAM, and what its worker is doing (waiting for a run, or playing N
+games for which run, segments sent, best round). Click a card for that machine in
+full. Each PC pushes only its own `live/machine-<id>.json`, never `runs.json` or
+`stream.json`; nothing is relayed through the learner, so a PC shows up between
+runs too. The id is the file name on the site (a-z, 0-9, `-`); the label is what
+the page calls it, and the host name is never published.
+
+```sh
+# On each such PC: steps 1-3 above, with a key of its own (one more line in lts's
+# authorized_keys, the same rrsync -wo directory), then say which machine it is:
+mkdir -p ~/.config/zombiesai
+printf 'ZOMBIES_LIVE_WORKER=rig2\nZOMBIES_LIVE_LABEL=Gaming PC 2\n' > ~/.config/zombiesai/live.env
+systemctl --user restart zombiesai-live
+
+# On the training PC: rebuild the page with the PCs' ids (a static site cannot list a directory).
+LIVE_MACHINES="rig2" deploy/deploy.sh
+```
+
 ### The Twitch stream
 
 `domalouf.com/zombies/live/` is the stream's page: the Twitch player, the

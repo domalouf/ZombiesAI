@@ -1,6 +1,7 @@
 import json
 import socket
 import threading
+import time
 
 import numpy as np
 import pytest
@@ -186,3 +187,21 @@ def test_a_run_trains_on_its_own_games_and_another_machines(bc_checkpoint, tmp_p
     joined = json.loads((tmp_path / "fleet" / "run" / "config.json").read_text())
     assert joined["first_actor"] == ACTOR_BLOCK and joined["seed"] == config.seed + ACTOR_BLOCK
     assert any(m.startswith("left run run") for m in said), said
+    assert json.loads((tmp_path / "fleet" / "status.json").read_text())["state"] == "stopped"
+
+
+def test_a_worker_with_no_learner_says_it_is_waiting(tmp_path):
+    """What the Training Room shows for a gaming PC between runs (publish_live.py --worker reads this file)."""
+    worker = FleetWorker(FleetClient(f"127.0.0.1:{free_port()}", TOKEN, "rig2", timeout_s=2),
+                         WorkerOptions(actors=2, out_root=str(tmp_path), retry_s=0.1), say=lambda m: None)
+    stop = threading.Event()
+    thread = threading.Thread(target=worker.run, args=(stop,), daemon=True)
+    thread.start()
+    deadline = time.time() + 20
+    while not worker.status_path.exists() and time.time() < deadline:
+        time.sleep(0.05)
+    status = json.loads(worker.status_path.read_text())
+    assert status["state"] == "waiting" and status["actors"] == 2 and status["at"] > time.time() - 10
+    stop.set()
+    thread.join(timeout=10)
+    assert json.loads(worker.status_path.read_text())["state"] == "stopped"
