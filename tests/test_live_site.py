@@ -1,5 +1,7 @@
 import json
+import re
 import subprocess
+from collections import Counter
 
 import pytest
 
@@ -127,3 +129,26 @@ def test_the_live_page_knows_which_machines_to_read(tmp_path, monkeypatch):
     assert "window.LIVE_MACHINES = [];" in alone
     with pytest.raises(ValueError):
         live_site.write_live_page(tmp_path, tmp_path / "bad", "d", machines=['x"];alert(1)//'])
+
+
+TOP_LEVEL = re.compile(r"^(?:async\s+function\*?|function\*?|class|const|let|var)\s+([A-Za-z_$][\w$]*)", re.M)
+
+
+def top_level_names(html: str) -> list[str]:
+    """The names declared at column 0 of every inline script: on one page they all share a single global scope."""
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    assert scripts
+    return [name for script in scripts for name in TOP_LEVEL.findall(script)]
+
+
+def test_the_live_pages_scripts_never_declare_one_name_twice(tmp_path, monkeypatch):
+    # The dashboard, the machine view and the live additions are three scripts in one global scope: a const or
+    # let declared twice is a SyntaxError that kills the page, and a function declared twice silently replaces
+    # the first (the live page's machine cards once replaced the dashboard's per-machine charts).
+    monkeypatch.setattr(live_site, "build_payload", lambda roots: {"runs": [run("rl8")], "run_paths": {}})
+    monkeypatch.setattr(live_site, "run_roots", lambda repo: [])
+    monkeypatch.setattr(live_site, "live_trainers", lambda paths: [])
+    html = live_site.write_live_page(tmp_path, tmp_path / "site", "d", machines=["rig2"]).read_text()
+    names = top_level_names(html)
+    assert {"machineCard", "liveMachineCard", "runTile", "tile", "refreshData", "renderSystem"} <= set(names)
+    assert [name for name, count in Counter(names).items() if count > 1] == []

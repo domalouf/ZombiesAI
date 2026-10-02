@@ -325,7 +325,10 @@ RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
 FORCE_AFTER_S = 30.0  # a graceful stop gets this long before the page offers to force one
 MAX_TIME_LIMIT_MIN = 7 * 24 * 60
 # RLConfig fields that are not settings in the form: the form's own fields set them, or train_rl.py has no flag.
-NOT_SETTINGS = {"init", "env", "n_actors", "fleet_root", "sim"}
+# listen has a flag, but train_rl.py exits at once with it unless ZOMBIES_FLEET_TOKEN is set, which a run started
+# from here has only if the dashboard itself was started with it: a run on several PCs is started by hand, as its
+# workers on the other PCs are (docs/rl.md, "Several PCs").
+NOT_SETTINGS = {"init", "env", "n_actors", "fleet_root", "sim", "listen"}
 LEARNING = {"lr", "ent_coef", "kl_coef", "kl_decay", "kl_min", "target_kl", "clip_coef", "gamma", "gae_lambda",
             "update_epochs", "minibatch_size", "batch_steps", "segment_steps", "vf_coef", "max_grad_norm",
             "max_policy_lag", "critic_warmup_updates", "reward_scale"}
@@ -443,6 +446,12 @@ def recent_speeds(tree: Path) -> dict:
             config = json.loads((log.parent / "config.json").read_text())
             last = json.loads(_tail(log, 1)[-1])
         except (OSError, ValueError, IndexError):
+            continue
+        if config.get("listen"):
+            # Trained on several PCs (rl/fleet.py): its sps counts every machine's steps, not n_actors' alone, and
+            # actors_alive is only the count at its last update while the sps is the whole run's average, with
+            # machines joining and leaving in between. The runs started here use this PC alone, so only those
+            # say how fast one would go.
             continue
         env = "real" if config.get("env") == "real-waw" else "sim" if config.get("env") == "nacht-render" else None
         games, sps = config.get("n_actors"), last.get("sps")

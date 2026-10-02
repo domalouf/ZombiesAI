@@ -236,6 +236,25 @@ def test_public_payload_drops_anything_path_shaped(tmp_path):
     assert public["root"] == "runs/"  # never the absolute path the build happened to run from
 
 
+@pytest.mark.parametrize("listen", ["192.168.1.20:47860", "gamingpc.lan:47860"])
+def test_public_payload_drops_the_address_a_fleet_learner_listened_on(tmp_path, listen):
+    config = {"env": "real-waw", "device": "cuda:0", "n_actors": 4, "listen": listen, "lr": 0.0003,
+              "note": "learner at 10.0.0.5 for now"}
+    rows = ppo_rows(5)
+    rows[-1]["peer"] = "[fe80::1]:47860"  # should a trainer ever log one, the last row is published too
+    write_run(tmp_path / "runs", "rl5", rows, config)
+    payload = build_dashboard(tmp_path / "runs")
+    assert payload["runs"][0]["config"]["listen"] == listen  # the local page keeps it: it is the user's own
+    public = public_payload(payload)
+    kept, text = public["runs"][0]["config"], json.dumps(public)
+    assert "listen" not in kept and "note" not in kept and "peer" not in public["runs"][0]["last_row"]
+    assert kept["device"] == "cuda:0" and kept["n_actors"] == 4 and kept["env"] == "real-waw"
+    host = listen.split(":")[0]
+    assert host not in text and "47860" not in text and "10.0.0.5" not in text and "fe80" not in text
+    index = write_dashboard_site(payload, tmp_path / "site", "intro", [], "d").read_text()
+    assert host not in index and "47860" not in index and "10.0.0.5" not in index
+
+
 def test_site_build_is_a_static_directory_with_no_external_request(tmp_path):
     write_run(tmp_path / "runs", "ppo-nacht-state-s1", ppo_rows(30, env_metrics=True), {"env": "nacht-state"})
     out = tmp_path / "site"

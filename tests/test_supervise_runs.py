@@ -27,6 +27,7 @@ class RLConfig:
     seed: int = 0
     bindings: str = "configs/waw_bindings.json"
     hear: bool = True  # a checkpoint trained with audio hears its own instance's sink
+    listen: str = ""  # host:port other PCs' workers send their games to
     sim: dict = field(default_factory=dict)
 '''
 
@@ -161,7 +162,9 @@ def test_every_process_below_a_trainer_is_found_for_a_forced_stop():
 
 def test_the_settings_are_the_trainers_own_fields_with_their_defaults_and_comments(repo):
     settings = {s["name"]: s for s in trainer_settings(repo)}
-    assert list(settings) == ["total_steps", "lr", "target_kl", "seed", "bindings", "hear"]  # not init/env/sim
+    # not init/env/sim, and not listen: a run started here has no fleet token, and train_rl.py would refuse it
+    assert list(settings) == ["total_steps", "lr", "target_kl", "seed", "bindings", "hear"]
+    assert "not a setting" in setting_flags(list(settings.values()), {"listen": ":47860"})[1]
     assert settings["total_steps"] == {"name": "total_steps", "flag": "--total-steps", "kind": "int",
                                        "default": 2_000_000, "hint": "", "group": "length"}
     assert settings["lr"]["kind"] == "float" and settings["lr"]["group"] == "learning"
@@ -190,6 +193,22 @@ def test_the_estimate_uses_the_newest_runs_speed_per_game(repo):
     speeds = recent_speeds(repo)
     assert speeds["real"] == {"run": "rl1", "sps": 50, "games": 4, "per_game": 12.5}
     assert speeds["sim"]["per_game"] == 50.0
+
+
+def test_the_estimate_skips_a_run_trained_on_several_pcs(repo):
+    # rl2 is newer, but its 200 steps/s came from this PC's 4 games and another PC's 12: not 50 a game here.
+    for name, config, row in (("rl1", {"env": "real-waw", "n_actors": 4}, {"sps": 50}),
+                              ("rl2", {"env": "real-waw", "n_actors": 4, "listen": "192.168.1.20:47860"},
+                               {"sps": 200, "actors_alive": 16}),
+                              ("rl3", {"env": "real-waw", "n_actors": 0, "listen": ":47860"},
+                               {"sps": 150, "actors_alive": 12})):
+        (repo / "runs" / name).mkdir(exist_ok=True)
+        (repo / "runs" / name / "config.json").write_text(json.dumps(config))
+        (repo / "runs" / name / "metrics.jsonl").write_text(json.dumps({"update": 1, **row}) + "\n")
+    now = time.time()
+    for age, name in enumerate(("rl3", "rl2", "rl1")):
+        os.utime(repo / "runs" / name / "metrics.jsonl", (now - 10 * age, now - 10 * age))
+    assert recent_speeds(repo)["real"] == {"run": "rl1", "sps": 50, "games": 4, "per_game": 12.5}
 
 
 def test_a_run_starts_with_its_settings_as_flags_and_stops_itself_at_its_time_limit(repo, tmp_path_factory):
