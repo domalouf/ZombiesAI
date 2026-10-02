@@ -1,5 +1,9 @@
 import json
+import re
 import subprocess
+from collections import Counter
+
+import pytest
 
 from zombiesai.viz import live_site
 from zombiesai.viz.live_site import LivePublisher, downsample, public_runs, public_system, training_now
@@ -71,6 +75,7 @@ def test_a_tick_writes_both_files_and_pushes_them_saying_only_when_that_changes(
         pub.tick(now=t)
     machine = json.loads((tmp_path / "out" / "machine.json").read_text())
     assert machine["at"] == 170.0 and machine["runs_at"] == 170.0 and machine["training"] == []
+    assert machine["label"] == "Training PC" and machine["role"] == "learner"
     assert json.loads((tmp_path / "out" / "runs.json").read_text())["runs"][0]["name"] == "rl8"
     stream = json.loads((tmp_path / "out" / "stream.json").read_text())
     assert stream["at"] == 170.0 and stream["run"] is None and stream["stats"]["games"] == 0  # no run has played
@@ -78,3 +83,72 @@ def test_a_tick_writes_both_files_and_pushes_them_saying_only_when_that_changes(
     assert "ControlMaster=auto" in calls[0][calls[0].index("-e") + 1]
     assert [s.split("  ", 1)[1] for s in said] == ["pushing to lts:", "push failing: rsync: connection refused",
                                                    "pushing to lts:"]
+
+
+def test_a_worker_says_only_what_it_is_doing_and_goes_quiet_when_it_stops(tmp_path):
+    status = tmp_path / "status.json"
+    assert live_site.worker_status(status, now=100.0) == {"state": "not running"}  # never written
+    status.write_text(json.dumps({"at": 95.0, "state": "playing", "run": "/home/dgm/runs/fleet/rl5", "actors": 4,
+                                  "alive": 3, "sent": 12, "reason": "commit abc on DomPC-mk3"}))
+    out = live_site.worker_status(status, now=100.0)
+    assert out == {"state": "playing", "run": "rl5", "actors": 4, "alive": 3, "sent": 12}
+    assert live_site.worker_status(status, now=95.0 + live_site.WORKER_STALE_S + 1) == {"state": "not running"}
+    status.write_text(json.dumps({"at": 99.0, "state": "<script>"}))
+    assert live_site.worker_status(status, now=100.0)["state"] == "not running"
+
+
+def test_a_worker_pc_pushes_its_own_file_and_never_the_learners(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_site, "build_payload", lambda roots: pytest.fail("a worker has no runs to publish"))
+    status = tmp_path / "status.json"
+    status.write_text(json.dumps({"at": 100.0, "state": "waiting", "actors": 4}))
+    calls = []
+
+    def fake_rsync(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stderr="")
+
+    pub = LivePublisher(tmp_path, tmp_path / "out", "lts:", sampler=FakeSampler(), run=fake_rsync, say=lambda m: None,
+                        worker="rig2", label="Gaming PC 2", worker_status=status)
+    pub.tick(now=101.0)
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["machine-rig2.json"]
+    machine = json.loads((tmp_path / "out" / "machine-rig2.json").read_text())
+    assert machine["label"] == "Gaming PC 2" and machine["role"] == "worker" and machine["at"] == 101.0
+    assert machine["fleet"] == {"state": "waiting", "actors": 4} and "DomPC" not in json.dumps(machine)
+    assert "--include=machine-rig2.json" in calls[0] and "--include=*.json" not in calls[0]
+    with pytest.raises(ValueError):
+        LivePublisher(tmp_path, tmp_path / "x", None, sampler=FakeSampler(), worker="../machine")
+
+
+def test_the_live_page_knows_which_machines_to_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(live_site, "build_payload", lambda roots: {"runs": [run("rl8")], "run_paths": {}})
+    monkeypatch.setattr(live_site, "run_roots", lambda repo: [])
+    monkeypatch.setattr(live_site, "live_trainers", lambda paths: [])
+    html = live_site.write_live_page(tmp_path, tmp_path / "site", "d", machines=["rig2", "rig3"]).read_text()
+    assert 'window.LIVE_MACHINES = ["rig2", "rig3"];' in html and "machine-${id}.json" in html
+    alone = live_site.write_live_page(tmp_path, tmp_path / "solo", "d").read_text()
+    assert "window.LIVE_MACHINES = [];" in alone
+    with pytest.raises(ValueError):
+        live_site.write_live_page(tmp_path, tmp_path / "bad", "d", machines=['x"];alert(1)//'])
+
+
+TOP_LEVEL = re.compile(r"^(?:async\s+function\*?|function\*?|class|const|let|var)\s+([A-Za-z_$][\w$]*)", re.M)
+
+
+def top_level_names(html: str) -> list[str]:
+    """The names declared at column 0 of every inline script: on one page they all share a single global scope."""
+    scripts = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
+    assert scripts
+    return [name for script in scripts for name in TOP_LEVEL.findall(script)]
+
+
+def test_the_live_pages_scripts_never_declare_one_name_twice(tmp_path, monkeypatch):
+    # The dashboard, the machine view and the live additions are three scripts in one global scope: a const or
+    # let declared twice is a SyntaxError that kills the page, and a function declared twice silently replaces
+    # the first (the live page's machine cards once replaced the dashboard's per-machine charts).
+    monkeypatch.setattr(live_site, "build_payload", lambda roots: {"runs": [run("rl8")], "run_paths": {}})
+    monkeypatch.setattr(live_site, "run_roots", lambda repo: [])
+    monkeypatch.setattr(live_site, "live_trainers", lambda paths: [])
+    html = live_site.write_live_page(tmp_path, tmp_path / "site", "d", machines=["rig2"]).read_text()
+    names = top_level_names(html)
+    assert {"machineCard", "liveMachineCard", "runTile", "tile", "refreshData", "renderSystem"} <= set(names)
+    assert [name for name, count in Counter(names).items() if count > 1] == []

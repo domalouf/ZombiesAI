@@ -1,10 +1,15 @@
 <script>
 /* Live on the site: the gaming PC pushes live/machine.json every 5 s and live/runs.json every minute
    (scripts/publish_live.py); this page reads them from its own site and nowhere else. When the PC stops
-   pushing -- asleep, off, not publishing -- the page says so and keeps the last numbers it had. */
+   pushing -- asleep, off, not publishing -- the page says so and keeps the last numbers it had.
+   The other gaming PCs, which play for it (rl/fleet.py), push live/machine-<id>.json each; the ids are baked
+   into the page when it is built (window.LIVE_MACHINES), since a static site cannot be asked what is there. */
 sysview.opts.full = false;  // a public process list is names and load: no ids, users or command lines
-const pub = { at: null, runsAt: null, failed: false };
+const pub = { at: null, runsAt: null, failed: false, selected: 0 };
 const OFFLINE_AFTER_S = 30;
+const MACHINES = [{ id: null, file: "machine.json", data: null }].concat(
+  (window.LIVE_MACHINES || []).map((id) => ({ id, file: `machine-${id}.json`, data: null })));
+const FLEET = MACHINES.length > 1;
 
 async function liveJSON(name) {
   const response = await fetch(`live/${name}`, { cache: "no-store" });
@@ -26,7 +31,82 @@ function liveStatus() {
     verdict = { level: "good", text: "OK live" };
     text = `Updated ${Math.round(age)}s ago, straight from the PC it trains on.`;
   }
+  if (FLEET) {
+    const reporting = MACHINES.filter((m) => liveMachineUp(m)).length;
+    text += ` ${reporting} of ${MACHINES.length} machines reporting.`;
+  }
   mount(node, [flag(verdict), document.createTextNode(text)]);
+}
+
+/* -- the machines ------------------------------------------------------------
+   Every name here is live-prefixed: this script shares one global scope with the dashboard's, which has its own
+   machineCard and machineLabel for the "Each machine" charts, and a function declared twice is silently replaced. */
+const liveMachineAge = (m) => m.data && m.data.at != null ? Math.max(0, Date.now() / 1000 - m.data.at) : null;
+const liveMachineUp = (m) => { const age = liveMachineAge(m); return age != null && age <= OFFLINE_AFTER_S; };
+const liveMachineName = (m) => (m.data && m.data.label) || m.id || "The training PC";
+
+function liveMachineDoing(m) {
+  const d = m.data;
+  if (!d) return "Not reporting yet.";
+  if (!liveMachineUp(m)) return `Last reported ${fmtDuration(liveMachineAge(m))} ago.`;
+  if (d.role !== "worker") {
+    const runs = (d.training || []).map((t) => t.run).filter(Boolean);
+    return runs.length ? `Training ${runs.join(", ")}.` : "Not training right now.";
+  }
+  const f = d.fleet || {};
+  if (f.state === "playing") {
+    return [`Playing ${f.alive ?? "?"} of ${f.actors ?? "?"} games for ${f.run}`,
+            f.sent != null ? `${fmtValue(f.sent)} segments sent` : null,
+            f.best_round != null ? `best round ${f.best_round}` : null].filter(Boolean).join(" · ") + ".";
+  }
+  return {
+    waiting: "Waiting for a training run.",
+    refused: "Turned away by the learner: a different commit or different game settings.",
+    stopped: "Its worker is stopped.",
+  }[f.state] || "Its worker is not running.";
+}
+
+function liveMachineCard(m, i) {
+  const now = m.data && m.data.now;
+  const cpu = now && now.cpu, mem = now && now.memory, gpu = now && now.gpus && now.gpus[0];
+  const live = liveMachineUp(m);
+  return el("button", {
+    type: "button", class: "card machine-card", "aria-pressed": String(i === pub.selected), "data-index": i,
+    onclick: () => { pub.selected = i; renderFleet(); renderSelected(); },
+  }, [
+    el("div", { class: "top" }, [
+      el("span", { class: "name", text: liveMachineName(m) }),
+      el("span", { class: "role", text: m.id ? "plays games for it" : "trains the model" }),
+      flag(m.data ? (live ? { level: "good", text: "OK live" } : { level: "warning", text: "! offline" }) : null),
+    ]),
+    cpu ? meterRow("CPU", cpu.pct, fmtPct(cpu.pct), fmtC(cpu.temp)) : null,
+    gpu ? meterRow("GPU", gpu.util, fmtPct(gpu.util), fmtC(gpu.temp)) : null,
+    mem ? meterRow("RAM", mem.pct, fmtPct(mem.pct)) : null,
+    el("div", { class: "facts", text: liveMachineDoing(m) }),
+  ]);
+}
+
+function renderFleet() {
+  if (!FLEET) return;
+  const holder = document.getElementById("fleet");
+  // Rebuilt every poll: keep a keyboard reader's place on the card they were on.
+  const focused = holder.contains(document.activeElement) ? document.activeElement.dataset.index : null;
+  mount(holder, MACHINES.map(liveMachineCard));
+  if (focused != null) holder.querySelector(`[data-index="${focused}"]`)?.focus();
+}
+
+function renderSelected() {
+  const m = MACHINES[pub.selected];
+  if (FLEET) document.getElementById("system-which").textContent = liveMachineName(m);
+  if (!m.data || !m.data.now) {
+    mount(document.getElementById("system"), [el("p", { class: "empty-note", text: `Waiting for ${liveMachineName(m)} to report…` })]);
+    mount(document.getElementById("system-specs"), []);
+    sysview.built = false;
+    return;
+  }
+  if (!sysview.built) buildSystem();
+  sysview.history = m.data.history;  // the whole half hour each time: at 10 s a point it is small
+  renderSystem(m.data);
 }
 
 function nowRunCard(t) {
@@ -65,31 +145,37 @@ async function pollLiveRuns() {
   } catch (e) { /* the machine's file says when there is a newer one; next time */ }
 }
 
-async function pollLive() {
-  let m;
+async function pollMachine(machine) {
   try {
-    m = await liveJSON("machine.json");
-  } catch (e) {
-    liveStatus();
-    return;
+    machine.data = await liveJSON(machine.file);
+  } catch (e) { /* not there, or not yet: it keeps the last numbers it had */ }
+}
+
+async function pollLive() {
+  await Promise.all(MACHINES.map(pollMachine));
+  const m = MACHINES[0].data;
+  if (m) {
+    pub.at = m.at;
+    renderTrainingNow(m.training);
+    if (m.runs_at && m.runs_at !== pub.runsAt) {
+      pub.runsAt = m.runs_at;
+      await pollLiveRuns();
+    }
   }
-  pub.at = m.at;
-  sysview.history = m.history;  // the whole half hour each time: at 10 s a point it is small
-  if (m.now) {
-    if (!sysview.built) buildSystem();
-    renderSystem(m);
-  }
-  renderTrainingNow(m.training);
-  if (m.runs_at && m.runs_at !== pub.runsAt) {
-    pub.runsAt = m.runs_at;
-    await pollLiveRuns();
-  }
+  renderFleet();
+  if (MACHINES.some((x) => x.data) || FLEET) renderSelected();
   liveStatus();
 }
 
+if (FLEET) {
+  document.getElementById("system-title").textContent = "The machines";
+  document.getElementById("fleet").hidden = false;
+  document.getElementById("system-which").hidden = false;
+}
 document.getElementById("footer").textContent =
-  "Live from the gaming PC it trains on: it pushes these numbers to this site every few seconds " +
-  "(scripts/publish_live.py), and nothing on the site reaches back in.";
+  (FLEET ? "Live from the gaming PCs it trains and plays on: each pushes its numbers"
+         : "Live from the gaming PC it trains on: it pushes these numbers") +
+  " to this site every few seconds (scripts/publish_live.py), and nothing on the site reaches back in.";
 (function every5s() {
   const tick = async () => {
     if (!document.hidden) await pollLive();

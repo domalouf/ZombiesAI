@@ -41,7 +41,9 @@ lived, how many shots it fired and landed -- which the stream overlay is built f
 
 import copy
 import json
+import math
 import multiprocessing as mp
+import numbers
 import os
 import queue as queue_mod
 import time
@@ -100,6 +102,8 @@ class RLConfig:
     # sim env
     sim: dict = field(default_factory=dict)
     actor_restarts: int = 20  # per actor, before the run gives up on it
+    # Other PCs' games (rl/fleet.py): "host:port" to accept their workers on, "" for this machine's games only
+    listen: str = ""
 
     @property
     def env_name(self) -> str:
@@ -511,6 +515,12 @@ class Learner:
         self.critic_opt = torch.optim.Adam(self.net.critic.parameters(), lr=config.lr * 10, eps=1e-5)
         self.offsets = self.bc_config.offsets
         self.uses_audio = self.bc_config.use_audio
+        # One step's audio feature, as the actors build it (_actor_loop) and the network takes it; None if deaf.
+        self.audio_shape = None
+        if self.uses_audio:
+            from zombiesai.demos.hearing import AudioFeatureConfig, feature_config
+
+            self.audio_shape = (feature_config(self.meta.get("audio_features")) or AudioFeatureConfig()).shape
         self.scaler = RunningStd(config.gamma)
         self.updates = int(previous.get("updates", 0))
         self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
@@ -655,9 +665,103 @@ def resolve_device(name: str) -> torch.device:
     return torch.device(name)
 
 
-def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
-    """Run the learner here and `n_actors` actor processes, until `total_steps` decisions or Ctrl-C."""
+class MachineStats:
+    """Each machine's share of the batches, so one PC feeding the learner worse data than the rest stands out
+    instead of being averaged away -- a slower GPU means more late steps, a different install other rounds.
+    rl/fleet.py numbers machine k's actors from k * block; this machine's are 0..n-1, machine 0. Keyed by that
+    number, never a name: the last metrics row is published with the site's training page."""
+
+    BAD_STEP_WARN = 0.10  # docs/rl.md: under 5% is normal since the BLAS fix; twice that is a machine in trouble
+    BAD_STEP_OK = 0.05
+    MIN_STEPS = 256  # fewer steps than a segment says nothing
+
+    def __init__(self, block: int, recent: int = 50):
+        self.block = block
+        self.window: dict[int, dict] = {}
+        self.recent: dict[int, deque] = {}
+        self._recent_len = recent
+        self.warned: set[int] = set()
+
+    def _w(self, actor: int) -> dict:
+        return self.window.setdefault(actor // self.block, {"segments": 0, "dropped": 0, "steps": 0, "bad": 0,
+                                                            "lag": 0, "episodes": 0})
+
+    def segment(self, seg: "Segment", lag: int, accepted: bool) -> None:
+        w = self._w(seg.actor)
+        if not accepted:
+            w["dropped"] += 1
+            return
+        w["segments"] += 1
+        w["steps"] += seg.n
+        w["bad"] += int(seg.bad.sum())
+        w["lag"] += lag
+
+    def episode(self, actor: int, payload: dict) -> None:
+        self._w(actor)["episodes"] += 1
+        self.recent.setdefault(actor // self.block, deque(maxlen=self._recent_len)).append(payload)
+
+    def flush(self) -> dict[str, dict]:
+        """Since the last flush: segments taken and dropped as too stale, steps, the share of them late, the
+        mean lag; over each machine's last `recent` games: rounds, return and survival time."""
+        out = {}
+        for m in sorted(set(self.window) | set(self.recent)):
+            w = self.window.get(m) or {"segments": 0, "dropped": 0, "steps": 0, "bad": 0, "lag": 0, "episodes": 0}
+            row = {"segments": w["segments"], "dropped_segments": w["dropped"], "steps": w["steps"],
+                   "episodes": w["episodes"],
+                   "bad_step_frac": round(w["bad"] / w["steps"], 4) if w["steps"] else None,
+                   "policy_lag_mean": round(w["lag"] / w["segments"], 3) if w["segments"] else None}
+            games = self.recent.get(m) or ()
+            for key in ("round_reached", "return", "seconds"):
+                vals = [g[key] for g in games if isinstance(g.get(key), (int, float))]
+                row[f"{key}_mean"] = round(float(np.mean(vals)), 3) if vals else None
+            out[str(m)] = row
+        self.window = {}
+        return out
+
+    def verdicts(self, stats: dict[str, dict]) -> list[tuple[int, str]]:
+        """(machine, "late" | "recovered") when a machine's late-step share crosses the line, once each way."""
+        out = []
+        for key, row in stats.items():
+            m, frac = int(key), row["bad_step_frac"]
+            if frac is None or row["steps"] < self.MIN_STEPS:
+                continue
+            if frac > self.BAD_STEP_WARN and m not in self.warned:
+                self.warned.add(m)
+                out.append((m, "late"))
+            elif frac < self.BAD_STEP_OK and m in self.warned:
+                self.warned.discard(m)
+                out.append((m, "recovered"))
+        return out
+
+
+def _next_item(out, inbox, timeout_s: float = 1.0):
+    """The next thing an actor sent: this machine's actors first (they drop a segment rather than wait, so they
+    must not queue behind a busy network), then a remote worker's, already decoded in this process."""
+    if inbox is None:
+        try:
+            return out.get(timeout=timeout_s)
+        except queue_mod.Empty:
+            return None, None, None
+    try:
+        return out.get_nowait()
+    except queue_mod.Empty:
+        pass
+    try:
+        return inbox.get_nowait()
+    except queue_mod.Empty:
+        pass
+    try:
+        return out.get(timeout=0.2)
+    except queue_mod.Empty:
+        return None, None, None
+
+
+def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str | None = None) -> Path:
+    """Run the learner here and `n_actors` actor processes, until `total_steps` decisions or Ctrl-C. With
+    `config.listen`, other PCs' workers (rl/fleet.py) play for it too, authenticated by `fleet_token`."""
     run_dir = Path(run_dir)
+    if not config.listen and config.n_actors < 1:
+        raise ValueError("no actors: give this machine some, or listen for other machines' (--listen)")
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / "config.json").write_text(json.dumps(
         {**asdict(config), "env": config.env_name, "algorithm": "ppo-finetune", "spec_version": spec.SPEC_VERSION},
@@ -667,6 +771,18 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
     learner = Learner(config, resolve_device(config.device))
     version = 0
     publish(run_dir / "weights.pt", learner.net, version)
+    fleet = None
+    if config.listen:
+        from zombiesai.rl.fleet import FleetServer, play_settings
+
+        # Every segment must reach as far back as this policy's oldest frame and hear as it does
+        # (FrameHistory.depth and the actor's audio); the server refuses one that does not fit.
+        fleet = FleetServer(config.listen, fleet_token or "", config=config, run_dir=run_dir,
+                            settings=play_settings(config.fleet_root) if config.env == "real" else None,
+                            context=max(learner.offsets), audio_shape=learner.audio_shape, say=say).start()
+        fleet.set_weights(version, run_dir / "weights.pt")
+        host, port = fleet.address
+        say(f"listening for other machines' games on {host}:{port}")
     # One thread of work per actor. Actors inherit this environment when spawned, before they import numpy:
     # otherwise OpenBLAS starts a thread per core in every actor (the frame resize is a matrix product), and
     # four actors' pools fighting over 12 threads made 95% of real-game steps late.
@@ -686,7 +802,12 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
 
     for i in range(config.n_actors):
         spawn(i)
-    say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors from {config.init}")
+    say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors here from {config.init}")
+    machines = None
+    if fleet is not None:
+        from zombiesai.rl.fleet import ACTOR_BLOCK
+
+        machines = MachineStats(ACTOR_BLOCK)
     log = open(run_dir / "metrics.jsonl", "a", buffering=1)
     # Every finished game, one line each: what the stream overlay and its page are built from (viz/stream.py).
     episode_log = open(run_dir / "episodes.jsonl", "a", buffering=1)
@@ -698,12 +819,11 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
     checkpoint = run_dir / "checkpoint.pt"
     try:
         while step < config.total_steps:
-            try:
-                kind, i, payload = out.get(timeout=1.0)
-            except queue_mod.Empty:
-                kind = None
+            kind, i, payload = _next_item(out, fleet.inbox if fleet is not None else None)
             if kind == "segment":
                 lag = version - payload.version
+                if machines is not None:
+                    machines.segment(payload, lag, accepted=lag <= config.max_policy_lag)
                 if lag > config.max_policy_lag:
                     dropped += 1
                 else:
@@ -713,11 +833,12 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
             elif kind == "episode":
                 episodes += 1
                 recent.append(payload)
+                if machines is not None:
+                    machines.episode(i, payload)
                 episode_log.write(json.dumps({"t": round(time.time(), 1), "step": step, "version": version,
-                                              **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}}) + "\n")
-                say(f"  actor {i} episode {payload.get('episode')}: round {payload.get('round_reached', '?')}, "
-                    f"return {payload.get('return', float('nan')):.1f}, {payload.get('length', 0)} steps"
-                    + (f" ({payload['reason']})" if payload.get("reason") else ""))
+                                              **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}},
+                                             default=_json_scalar) + "\n")
+                say(episode_line(i, payload))
             elif kind == "error":
                 say(f"  actor {i} failed:\n{payload}")
             for j, p in list(procs.items()):
@@ -729,17 +850,31 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
                     restarts[j] += 1
                     say(f"  actor {j} is down; restarting it ({restarts[j]}/{config.actor_restarts})")
                     spawn(j)
-            if not procs:
+            if not procs and fleet is None:
                 raise RuntimeError("every actor is down")
             if batch_n >= config.batch_steps:
                 stats = learner.update(batch)
                 step += batch_n
                 version += 1
                 publish(run_dir / "weights.pt", learner.net, version)
+                alive = sum(p.is_alive() for p in procs.values())
+                per_machine = None
+                if fleet is not None:
+                    per_machine = machines.flush()
+                    fleet.set_weights(version, run_dir / "weights.pt")
+                    alive += fleet.remote_actors_alive()
+                    (run_dir / "fleet.json").write_text(json.dumps(fleet.snapshot(per_machine), indent=2))
+                    for m, verdict in machines.verdicts(per_machine):
+                        who = "this machine" if m == 0 else fleet.name_of(m)
+                        say(f"  {who}: {100 * per_machine[str(m)]['bad_step_frac']:.0f}% of its steps late"
+                            + (" -- its games are feeding the batch more steps nobody chose; fewer --actors there?"
+                               if verdict == "late" else ", back to normal"))
                 row = {"update": learner.updates, "step": step, "sps": int(step / max(time.time() - start, 1e-9)),
                        "episodes": episodes, "version": version, "dropped_segments": dropped,
-                       "policy_lag_mean": float(np.mean(lags)) if lags else 0.0,
-                       "actors_alive": sum(p.is_alive() for p in procs.values()), **stats}
+                       "policy_lag_mean": float(np.mean(lags)) if lags else 0.0, "actors_alive": alive, **stats}
+                if fleet is not None:
+                    row["machines"] = (1 if config.n_actors else 0) + len(fleet.alive())
+                    row["per_machine"] = per_machine
                 if recent:
                     for key in ("return", "length", "round_reached", "repair_share", "max_term_share", "seconds"):
                         vals = [e[key] for e in recent if isinstance(e.get(key), (int, float))]
@@ -754,6 +889,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
         say("interrupted: stopping the actors")
     finally:
         stop.set()
+        if fleet is not None:
+            fleet.close()  # the workers stop their games when they lose us
         deadline = time.time() + 20
         while any(p.is_alive() for p in procs.values()) and time.time() < deadline:
             try:  # keep draining so no actor blocks on a full queue while it shuts down
@@ -767,6 +904,28 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print) -> Path:
         episode_log.close()
         learner.checkpoint(checkpoint, step, {"episodes": episodes})
     return checkpoint
+
+
+def episode_line(actor, payload: dict) -> str:
+    """The log line of a finished game. Summaries come from other machines too (rl/fleet.py cleans them, but a
+    field can still be missing), so nothing here may raise on a missing, None or odd value: a bad summary must
+    never end the run for every machine."""
+
+    def number(key: str, fmt: str = "") -> str:
+        value = payload.get(key)
+        if isinstance(value, numbers.Real) and not isinstance(value, (bool, np.bool_)) and math.isfinite(value):
+            return format(value, fmt)
+        return "?"
+
+    reason = payload.get("reason")
+    return (f"  actor {actor} episode {number('episode')}: round {number('round_reached')}, "
+            f"return {number('return', '.1f')}, {number('length')} steps"
+            + (f" ({reason[:200]})" if isinstance(reason, str) and reason else ""))
+
+
+def _json_scalar(value):
+    """For json.dumps: a numpy scalar as its Python value, anything else unknown as its text."""
+    return value.item() if isinstance(value, np.generic) else str(value)
 
 
 def _print_row(row: dict, say) -> None:

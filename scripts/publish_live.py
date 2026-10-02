@@ -4,6 +4,11 @@ its training runs and the stream's numbers to the site every few seconds (viz/li
     uv run python scripts/publish_live.py --dest zombies-live@lts.lan:     # every 5 s, until Ctrl-C
     uv run python scripts/publish_live.py --once                           # write the files, push nothing
 
+On a PC that plays for the learner (scripts/fleet_worker.py), --worker <id> pushes only that machine and what its
+worker is doing, as live/machine-<id>.json; the page shows it once deploy/deploy.sh is run with LIVE_MACHINES=<id>:
+
+    uv run python scripts/publish_live.py --dest zombies-live: --worker rig2 --label "Gaming PC 2"
+
 --dest is anything rsync takes. With the restricted key README.md sets up ("Live on the site"), the server pins
 the directory, so the path after the colon is empty. ZOMBIES_LIVE_DEST stands in for --dest (the systemd unit sets it).
 """
@@ -13,7 +18,8 @@ import os
 import time
 from pathlib import Path
 
-from zombiesai.viz.live_site import LivePublisher
+from zombiesai.rl.fleet import STATUS_FILE
+from zombiesai.viz.live_site import LivePublisher, machine_id, worker_file
 from zombiesai.viz.system import SystemSampler
 
 REPO = Path(__file__).resolve().parents[1]
@@ -29,19 +35,33 @@ def main() -> None:
     parser.add_argument("--once", action="store_true", help="sample, write the files once, and push only with --dest")
     parser.add_argument("--stream-run", help="the run the stream overlay's numbers come from (default: the one "
                                              "training now, the real game before the sim)")
+    parser.add_argument("--worker", metavar="ID", default=os.environ.get("ZOMBIES_LIVE_WORKER"),
+                        help="this PC plays for the learner: push only live/machine-<ID>.json (a-z, 0-9, -; "
+                             "$ZOMBIES_LIVE_WORKER)")
+    parser.add_argument("--label", default=os.environ.get("ZOMBIES_LIVE_LABEL"),
+                        help="what the page calls this machine (default: \"Training PC\", or the worker's id)")
+    parser.add_argument("--worker-status", type=Path, default=REPO / "runs" / "fleet" / STATUS_FILE,
+                        help="the status fleet_worker.py writes (default: runs/fleet/status.json)")
     args = parser.parse_args()
+    if args.worker:
+        try:
+            machine_id(args.worker)
+        except ValueError as error:
+            parser.error(str(error))
     out = args.out or Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "zombiesai-live"
     if not args.dest and not args.once:
         parser.error("--dest (or ZOMBIES_LIVE_DEST) is where the site's zombies/training/live/ is; --once to try it")
 
     sampler = SystemSampler().start()
     publisher = LivePublisher(REPO, out, args.dest, sampler=sampler, runs_every_s=args.runs_every,
-                              stream_run=args.stream_run)
+                              stream_run=args.stream_run, label=args.label, worker=args.worker,
+                              worker_status=args.worker_status)
     time.sleep(2.5)  # the sampler's first rates need two samples
     try:
         if args.once:
             publisher.tick()
-            print(f"wrote {out}/machine.json, runs.json and stream.json" + (f", pushed to {args.dest}" if args.dest else ""))
+            wrote = f"{out}/{worker_file(args.worker)}" if args.worker else f"{out}/machine.json, runs.json and stream.json"
+            print(f"wrote {wrote}" + (f", pushed to {args.dest}" if args.dest else ""))
             return
         print(f"publishing every {args.every:g}s to {args.dest} (Ctrl-C to stop)", flush=True)
         while True:

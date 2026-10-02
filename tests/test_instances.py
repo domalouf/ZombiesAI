@@ -208,3 +208,66 @@ def test_a_headless_weston_is_exactly_the_games_size(tmp_path, monkeypatch):
     assert config.resolved_host() == "hyprland"
     monkeypatch.setattr(inst.shutil, "which", lambda name: "/usr/bin/weston")
     assert config.resolved_host() == "weston"
+
+
+def test_a_config_installed_in_the_fleet_root_wins_over_the_steam_profile(tmp_path, monkeypatch):
+    steam_cfg = tmp_path / "steam" / "config.cfg"
+    steam_cfg.parent.mkdir()
+    steam_cfg.write_text('seta sensitivity "9"\n')
+    monkeypatch.setattr("zombiesai.demos.game_settings.candidate_configs", lambda: [steam_cfg])
+    root = tmp_path / "fleet"
+    assert inst.game_config(root) == steam_cfg  # nothing installed: the PC's own
+    root.mkdir()
+    (root / "config.cfg").write_text('seta sensitivity "2"\n')
+    assert inst.game_config(root) == root / "config.cfg"
+    written = inst.sync_plutonium_profile(tmp_path / "pluto", source=inst.game_config(root), say=lambda m: None)
+    assert written.read_text() == 'seta sensitivity "2"\n' and steam_cfg.read_text() == 'seta sensitivity "9"\n'
+
+
+def profile(prefix: Path, text: str) -> Path:
+    path = prefix / inst.PREFIX_PROFILES / "$$$" / "config.cfg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    return path
+
+
+def test_a_steam_client_fleet_plays_with_its_prefixes_profile_not_an_installed_config(tmp_path, monkeypatch):
+    steam_cfg = tmp_path / "steam" / "config.cfg"
+    steam_cfg.parent.mkdir()
+    steam_cfg.write_text('seta sensitivity "9"\n')
+    monkeypatch.setattr("zombiesai.demos.game_settings.candidate_configs", lambda: [steam_cfg])
+    config = fake_install(tmp_path, client="steam")
+    root = Path(config.root)
+    root.mkdir()
+    (root / "config.cfg").write_text('seta sensitivity "2"\n')  # what `fleet.py prep` would install
+    assert inst.game_config(root) == root / "config.cfg"  # no fleet.json yet: it will be Plutonium's
+    inst.save_fleet(config)
+    template = profile(Path(config.template_prefix), 'seta sensitivity "5"\n')
+    assert inst.game_config(root) == template  # no instance prefix yet: the one it will be copied from
+    prepare_prefix(config, specs(config)[0], say=lambda m: None)
+    copied = inst.game_config(root)
+    assert copied.is_relative_to(specs(config)[0].prefix) and copied.read_text() == 'seta sensitivity "5"\n'
+
+    from zombiesai.rl.fleet import describe, play_settings
+
+    assert play_settings(root)["dvars"]["sensitivity"] == "5"
+    me = describe(root)
+    assert me["client"] == "steam" and me["settings_from"] == "prefix" and me["instances"] == 3
+
+
+def test_a_plutonium_fleet_plays_with_the_installed_config(tmp_path, monkeypatch):
+    monkeypatch.setattr("zombiesai.demos.game_settings.candidate_configs", lambda: [])
+    config = fake_install(tmp_path, client="plutonium")
+    inst.save_fleet(config)
+    root = Path(config.root)
+    profile(Path(config.template_prefix), 'seta sensitivity "5"\n')
+    assert inst.game_config(root) is None  # Plutonium never reads the prefix's profile
+    (root / "config.cfg").write_text('seta sensitivity "2"\n')
+    assert inst.game_config(root) == root / "config.cfg"
+
+
+def test_a_steam_client_fleet_without_any_profile_has_no_config(tmp_path):
+    config = fake_install(tmp_path, client="steam")
+    inst.save_fleet(config)
+    (Path(config.root) / "config.cfg").write_text('seta sensitivity "2"\n')
+    assert inst.game_config(config.root) is None

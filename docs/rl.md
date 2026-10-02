@@ -200,6 +200,111 @@ To continue, pass the last run's `checkpoint.pt` as the first argument with a ne
 (so no second critic warm-up), the KL weight and the KL anchor carry over -- the anchor is always the BC
 policy the chain started from (`rl/parallel_ppo.py: root_prior`), never the checkpoint being continued.
 
+## Several PCs
+
+One run can take games from every gaming PC in the house. The machine with the GPU you want to train on runs the
+**learner** (and its own games, as before); every other gaming PC runs a **worker** that plays its games for it
+(`rl/fleet.py`, `scripts/fleet_worker.py`). The actors on a worker are the same processes `train()` starts --
+they still ship segments through a local queue and follow a local `weights.pt` -- and the worker forwards the
+one and pulls the other over the LAN. So lag, bad steps and "never stall a live game" work as described above.
+
+```
+ learner PC (RTX 5070)                                   other gaming PC
+ 4 games ── actors 0..3 ──► learner ◄── POST /segment ── forwarder ◄── actors 100..103 ── 4 games
+                            weights.pt ── GET /weights ──► puller ──► weights.pt
+```
+
+The lts laptop is neither. It has no GPU worth training on, and it doesn't need to be on the training path: it
+stays the site, and the place the PCs report to (`publish_live.py`). Putting the learner there would add a hop
+for every frame, for nothing.
+
+```sh
+# Once: a shared secret, the same on every machine (in the environment, never in the repo), SSH from the
+# learner to each PC with a key (`fleet.py` runs non-interactively), and the repo cloned at ~/Projects/ZombiesAI.
+python -c 'import secrets; print(secrets.token_hex(16))'      # -> ZOMBIES_FLEET_TOKEN
+
+# Before each run, on the learner PC: every other PC to this commit and this machine's game settings, games up.
+git push                                                       # the PCs fetch the commit from origin
+uv run python scripts/fleet.py prep rig2.lan                   # or rig2.lan=2 for 2 games there; $ZOMBIES_FLEET_HOSTS
+uv run python scripts/instances.py up --n 4
+ZOMBIES_FLEET_TOKEN=... uv run python scripts/train_rl.py runs/bc_real3/bc.pt --actors 4 --listen :47860 --out runs/rl5
+
+# Each other gaming PC (or leave deploy/zombiesai-worker.service running there):
+ZOMBIES_FLEET_TOKEN=... uv run python scripts/fleet_worker.py --learner <learner-host>.lan --actors 4
+```
+
+**`scripts/fleet.py prep`** (`rl/fleet_admin.py`) does, on each PC over SSH and all PCs at once, what a refusal
+would otherwise send you over there to do:
+
+| step | what | |
+|---|---|---|
+| reach | the checkout is there, with nothing uncommitted | a PC with uncommitted work is left alone |
+| commit | `git fetch`, check out the learner's commit, detached | no branch of theirs moves; it must be pushed |
+| sync | `uv sync` | |
+| settings | the learner's `config.cfg` installed in the fleet's root | the PC's own Steam profile is not touched; a `--client steam` fleet is warned, not installed (only Plutonium reads the file) |
+| games | `instances.py up`, restarted if their settings just changed | a game reads config.cfg at launch |
+| worker | `zombiesai-worker` restarted if the code or settings changed | |
+| check | `fleet_worker.py --describe`, judged as hello judges it | |
+
+It refuses to start while the learner's own checkout has uncommitted changes: the PCs can only get the last
+commit, and hello compares commits, so they would train on different code under the same name.
+`scripts/fleet.py check` runs only the last step, and changes nothing.
+
+A worker can be left running (`deploy/zombiesai-worker.service`). It waits for a learner, joins whatever run
+the learner starts, and stops its actors (every key released) when it hasn't heard from the learner for 60 s.
+Then it waits for the next run. The games stay up between runs, as they do on the learner.
+
+**What the learner refuses**, at hello, before a single segment:
+
+- **A different commit or spec version.** The actor code, reward shaping and observation layout must be the
+  learner's. `scripts/fleet.py prep` fixes it.
+- **Different game settings.** Sensitivity, `m_yaw`/`m_pitch`, field of view and every key binding come from
+  the `config.cfg` `instances.py` copies into each instance: one installed in the fleet's root
+  (`runs/instances/config.cfg`, which is what `prep` puts there), else the machine's own Steam profile. A
+  different sensitivity makes every look bin turn by a different angle, and a different binding makes a key do
+  something else, and neither shows up in any number. The refusal lists what differs. Resolution, fps and vsync
+  are set per instance on the command line, so they're not compared. (A `--client steam` fleet plays with the
+  config inside each instance's copied Steam prefix instead, and that is what it reports.)
+- **A name another live worker is using.** Workers are told apart by `--name` (the host name by default) and a
+  random id per process. A second process under a name the learner heard from in the last 60 s is refused, so two
+  PCs that share a host name are never merged into one machine; it waits and asks again, so a worker that was just
+  restarted takes its PC's place once the old one has gone quiet.
+
+**What it takes care of:**
+
+- **Actor numbers.** Worker k's actors are `100k`, `100k+1`, ...: `episodes.jsonl`, the stream's numbers and the
+  reward scaler's per-actor returns keep the machines apart. Its RNG seed moves by the same offset.
+- **The starting checkpoint.** The worker downloads it from the learner (checked by SHA-256), along with the run's
+  settings, so nothing has to be copied around by hand. `--counts-per-degree` and `--record-every` on the worker
+  override the learner's for that machine. Clips are written on the machine that played them.
+- **What it accepts over the network.** Segments are `.npz` read with `allow_pickle=False` and shape-checked;
+  weights and the checkpoint are opened with `weights_only=True`; every request needs the token. It is plain
+  HTTP, meant for a home LAN: for anything wider, put the machines on Tailscale or WireGuard.
+
+**What to watch: each machine on its own.** One PC's games can feed the batch worse data than the rest -- a
+slower GPU makes more late steps, a broken install plays worse -- and a run-wide average hides it. So every
+update, the learner also scores each machine separately (`MachineStats` in `rl/parallel_ppo.py`):
+
+- `metrics.jsonl` gains `machines` and `per_machine`, keyed by machine number (0 is the learner, 1 the first
+  worker to join, ...; numbers and not names, because the last row is published with the site's training page):
+  segments taken, `dropped_segments` (too stale for `max_policy_lag`), steps, `bad_step_frac`, `policy_lag_mean`,
+  and over each machine's last 50 games `round_reached_mean`, `return_mean` and `seconds_mean`.
+- `runs/<run>/fleet.json` has the same per machine, by name, plus what each worker says it sent and lost on
+  the way (the link, or the learner's inbox full), and when it was last heard from.
+- The dashboard (`scripts/dashboard.py`, and the site's training page) draws them in an **Each machine** section
+  for any run trained on several PCs: late steps against the 10% line, round reached, each machine's share of the
+  training data, and segments too stale to use (pooled over 10 updates), one line per machine. Pick the run and
+  hide machines with the chips above the charts. The local page names each worker; the site's says "Machine 1".
+- The log says it when a machine's late steps pass 10% of its steps, and again when they fall back under 5%:
+  "rig2: 18% of its steps late -- ... fewer --actors there?". `actors_alive` counts every machine's actors.
+
+Traffic is ~415 KB/s per game before compression (128x72 frames at 15 Hz): nothing for wired gigabit,
+worth checking on Wi-Fi.
+
+**On the site.** Each worker PC can report itself to lts the way the training PC does (`publish_live.py
+--worker <id>`; README.md, "Live on the site"): the Training Room shows a card per machine, with what its worker
+is doing, read from the `runs/fleet/status.json` the worker rewrites every few seconds.
+
 ## Rehearse on the sim first
 
 The same actors and learner run on NachtSim's rendered view with `--env sim`, as fast as the CPU allows (about

@@ -7,14 +7,19 @@ zombies/training/live/:
     runs.json     every 60 s  every run's curves: the payload the static training page is built from
     stream.json   every 5 s   the stream overlay's numbers and its page's details (viz/stream.py)
 
-The page itself (scripts/dashboard.py --site ... --live) is the static training page with the machine and
-"Training now" added, polling the first two; the stream's page and overlay (zombies/live/) poll the third. All
-are public, so all go through the same scrub as the site build: no paths, no command lines, no host name, no
-process ids -- a process is its name and its load, and a run is its name.
+The other gaming PCs, which play for the learner (rl/fleet.py), push one file each beside them:
+
+    machine-<id>.json  every 5 s  that machine, and what its worker is doing: waiting, or playing for which run
+
+The page itself (scripts/dashboard.py --site ... --live) is the static training page with the machines and
+"Training now" added, polling these; the stream's page and overlay (zombies/live/) poll stream.json. All are
+public, so all go through the same scrub as the site build: no paths, no command lines, no host name, no
+process ids -- a process is its name and its load, and a run is its name. A machine is the label it was given.
 """
 
 import json
 import os
+import re
 import shlex
 import subprocess
 import time
@@ -33,6 +38,39 @@ LIVE_INTRO = (
     "real game, behavioural cloning from human play, and the inverse dynamics model."
 )
 PROC_FIELDS = ("name", "cpu", "rss", "mem_pct", "threads")
+# A worker machine's id is its file name on the site and nothing else: short, lower case, no dots or slashes.
+MACHINE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+LEARNER_LABEL = "Training PC"
+# What a worker's status may say in public (rl/fleet.py writes more, for the person at that machine).
+WORKER_FIELDS = ("state", "run", "actors", "alive", "sent", "dropped", "version", "episodes", "last_round",
+                 "best_round")
+WORKER_STALE_S = 30.0  # the worker rewrites its status every 5-10 s; older than this, it is not running
+
+
+def machine_id(value: str) -> str:
+    if not MACHINE_ID.fullmatch(value or ""):
+        raise ValueError(f"machine id {value!r}: 1-32 of a-z, 0-9 and -, starting with a letter or digit")
+    return value
+
+
+def worker_file(mid: str) -> str:
+    return f"machine-{machine_id(mid)}.json"
+
+
+def worker_status(path: Path, now: float) -> dict:
+    """The worker's status file (rl/fleet.py), as the public page may show it."""
+    try:
+        status = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"state": "not running"}
+    if not isinstance(status, dict) or now - float(status.get("at") or 0) > WORKER_STALE_S:
+        return {"state": "not running"}
+    out = {k: status[k] for k in WORKER_FIELDS if k in status}
+    if out.get("state") not in ("waiting", "playing", "refused", "stopped"):
+        out["state"] = "not running"
+    if out.get("run") is not None:
+        out["run"] = Path(str(out["run"])).name
+    return out
 
 
 def downsample(points: list[dict], step_s: float) -> list[dict]:
@@ -90,15 +128,18 @@ def public_runs(payload: dict, trainers: list[dict]) -> dict:
     return out
 
 
-def write_live_page(repo: Path, out_dir: Path, description: str) -> Path:
+def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[str] = ()) -> Path:
     """The training page, live: the runs as they stand now baked in (what a visitor sees if the PC is off), and
-    the machine and Training now filled from live/*.json. out_dir is the site's zombies/training/."""
+    the machines and Training now filled from live/*.json. out_dir is the site's zombies/training/. `machines`
+    are the worker PCs' ids, whose live/machine-<id>.json the page also reads (a static site has no listing)."""
     payload = build_payload(run_roots(repo))
     here = Path(__file__).parent
+    ids = [machine_id(m) for m in machines]
     return write_dashboard_site(
         live_runs(payload, live_trainers(payload["run_paths"])), out_dir, LIVE_INTRO, SITE_LINKS, description,
         body_before=(here / "live_panel.html").read_text(),
-        script_after=(here / "system_view.html").read_text() + (here / "live_public.html").read_text(),
+        script_after=f"<script>window.LIVE_MACHINES = {json.dumps(ids)};</script>\n"
+                     + (here / "system_view.html").read_text() + (here / "live_public.html").read_text(),
     )
 
 
@@ -128,12 +169,19 @@ def _write(path: Path, value) -> None:
 
 class LivePublisher:
     """Writes machine.json, runs.json and stream.json to `out_dir` and, with a `dest`, rsyncs them there.
-    `stream_run` pins the run the stream's numbers come from (by its public name); otherwise it follows training."""
+    `stream_run` pins the run the stream's numbers come from (by its public name); otherwise it follows training.
+
+    With `worker` (a machine id), this is one of the PCs that play for the learner: it writes and pushes only its
+    own machine-<id>.json, with what its worker is doing read from `worker_status` -- never runs.json or
+    stream.json, which are the learner's."""
 
     def __init__(self, repo: Path, out_dir: Path, dest: str | None, *, sampler: SystemSampler,
                  runs_every_s: float = 60.0, stream_run: str | None = None, ssh: str = "ssh", run=subprocess.run,
-                 say=print):
+                 say=print, label: str | None = None, worker: str | None = None, worker_status: Path | None = None):
         self.repo, self.out_dir, self.dest, self.sampler = repo, out_dir, dest, sampler
+        self.worker = machine_id(worker) if worker else None
+        self.label = (label or (self.worker or LEARNER_LABEL))[:40]
+        self.worker_status = worker_status
         self.stream = StreamFeed(stream_run)
         self.runs_every_s, self.run, self.say = runs_every_s, run, say
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +196,15 @@ class LivePublisher:
 
     def tick(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
+        if self.worker:
+            machine = public_system(self.sampler.payload())
+            machine.update(at=now, label=self.label, role="worker",
+                           fleet=worker_status(self.worker_status, now) if self.worker_status else
+                           {"state": "not running"})
+            _write(self.out_dir / worker_file(self.worker), machine)
+            if self.dest:
+                self.push()
+            return
         if self.runs is None or now - self.runs_at >= self.runs_every_s:
             payload = build_payload(run_roots(self.repo))
             self.run_paths = payload["run_paths"]
@@ -161,14 +218,15 @@ class LivePublisher:
         machine["at"] = now
         machine["runs_at"] = self.runs_at
         machine["training"] = training_now(trainers, self.runs)
+        machine["label"], machine["role"] = self.label, "learner"
         _write(self.out_dir / "machine.json", machine)
         _write(self.out_dir / "stream.json", self.stream.payload(self.runs, trainers, now))
         if self.dest:
             self.push()
 
     def push(self) -> bool:
-        argv = ["rsync", "-a", "--timeout=20", "-e", self.ssh, "--include=*.json", "--exclude=*",
-                f"{self.out_dir}/", self.dest]
+        files = [f"--include={worker_file(self.worker)}"] if self.worker else ["--include=*.json"]
+        argv = ["rsync", "-a", "--timeout=20", "-e", self.ssh, *files, "--exclude=*", f"{self.out_dir}/", self.dest]
         try:
             result = self.run(argv, capture_output=True, text=True, timeout=60)
             problem = None if result.returncode == 0 else (result.stderr.strip().splitlines() or ["rsync failed"])[-1]

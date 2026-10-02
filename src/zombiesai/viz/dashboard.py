@@ -4,6 +4,7 @@ Deliberately stdlib-only. A training run's log is JSON on disk; reading it shoul
 numpy or gymnasium, so this can be pointed at a runs/ directory copied off the training box.
 """
 
+import ipaddress
 import json
 import math
 import re
@@ -54,6 +55,20 @@ IDM_SERIES = (
     ("loss", "Loss", "training, per epoch"),
 )
 KIND_SERIES = {"ppo": PPO_SERIES, "bc": BC_SERIES, "idm": IDM_SERIES}
+# A run trained on several PCs (rl/fleet.py) logs each machine's share of every update as per_machine, keyed by
+# machine number (0 is the learner). These are the curves drawn per machine, one line each, so one PC feeding
+# the batch worse data than the rest is visible instead of averaged away. (key, label, hint)
+MACHINE_SERIES = (
+    ("bad_step_pct", "Late steps, %", "share of each machine's steps that missed their deadline; the learner warns at 10%"),
+    ("round_reached_mean", "Round reached", "mean of each machine's last 50 games"),
+    ("share_pct", "Share of the training data, %", "each machine's steps in each update; one falling to 0 has stopped"),
+    ("stale_pct", "Segments too stale to use, %",
+     "arrived more than max_policy_lag versions behind the learner; over the last 10 updates"),
+)
+# A machine sends a handful of segments an update, so one stale segment is a 15% spike; this many updates are
+# pooled for that curve instead.
+STALE_WINDOW = 10
+LATE_WARN_PCT = 10.0  # MachineStats.BAD_STEP_WARN in rl/parallel_ppo.py
 # Charts are scoped to one of these at a time. Plotting CartPole's return beside NachtSim's would put two
 # different units on one axis, and a 500k-step run beside a 20M-step one squashes the short one to nothing.
 GROUP_LABEL = {"bc": "behavioural cloning", "idm": "inverse dynamics"}
@@ -129,6 +144,71 @@ def bucket(xs: list[float], ys: list[float], buckets: int) -> dict:
 def _round(v: float, nd: int = 4) -> float:
     r = round(float(v), nd)
     return int(r) if r == int(r) and abs(r) < 1e15 else r
+
+
+def _machine_value(key: str, machine: dict, machines: dict) -> float | None:
+    if not isinstance(machine, dict):
+        return None
+    if key == "bad_step_pct":
+        frac = _num(machine.get("bad_step_frac"))
+        return None if frac is None else 100.0 * frac
+    if key == "share_pct":
+        total = sum(_num(m.get("steps"), 0) for m in machines.values() if isinstance(m, dict))
+        steps = _num(machine.get("steps"))
+        return None if steps is None or total <= 0 else 100.0 * steps / total
+    return _num(machine.get(key))
+
+
+def machine_series(rows: list[dict], x_key: str, buckets: int, names: dict | None = None) -> dict | None:
+    """The per-machine curves of a run trained on several PCs, or None for a run on one. Each machine keeps the
+    colour of its number, so a machine that drops out never repaints the others."""
+    logged = [(row[x_key], row["per_machine"]) for row in rows
+              if isinstance(row.get("per_machine"), dict) and _num(row.get(x_key)) is not None]
+    if not logged:
+        return None
+    ids = sorted({k for _, pm in logged for k in pm if str(k).isdigit()}, key=int)
+    series = {}
+    for key, label, hint in MACHINE_SERIES:
+        by = {}
+        for m in ids:
+            xs, ys = [], []
+            window: list[tuple[float, float]] = []  # (taken, dropped) of the last STALE_WINDOW updates
+            for x, pm in logged:
+                if key == "stale_pct":
+                    row = pm.get(m)
+                    if not isinstance(row, dict):
+                        continue
+                    window = (window + [(_num(row.get("segments"), 0), _num(row.get("dropped_segments"), 0))])[-STALE_WINDOW:]
+                    total = sum(t + d for t, d in window)
+                    v = 100.0 * sum(d for _, d in window) / total if total > 0 else None
+                else:
+                    v = _machine_value(key, pm.get(m), pm)
+                if v is not None and math.isfinite(v):
+                    xs.append(x)
+                    ys.append(v)
+            if ys:
+                by[m] = bucket(xs, ys, buckets)
+        if by:
+            series[key] = {"label": label, "hint": hint, "by": by}
+    if not series:
+        return None
+    return {"ids": ids, "colors": {m: SERIES_COLORS[int(m) % len(SERIES_COLORS)] for m in ids},
+            "names": {m: n for m, n in (names or {}).items() if m in ids}, "series": series,
+            "late_warn_pct": LATE_WARN_PCT}
+
+
+def fleet_names(run_dir: Path) -> dict[str, str]:
+    """Machine number -> the name each worker gave itself, from the learner's fleet.json. Local only: the site's
+    copy of the page drops them (public_payload), because a worker's name is its host name by default."""
+    try:
+        fleet = json.loads((run_dir / "fleet.json").read_text())
+    except (OSError, ValueError):
+        return {}
+    out = {}
+    for w in fleet.get("workers") or []:
+        if isinstance(w, dict) and isinstance(w.get("machine"), int) and isinstance(w.get("name"), str):
+            out[str(w["machine"])] = w["name"]
+    return out
 
 
 def trend(xs: list[float], ys: list[float], tail: float = 0.34) -> dict | None:
@@ -284,6 +364,7 @@ def read_run(run_dir: Path, buckets: int = 160, stale_after: float = 600.0, now:
         "x_key": x_key,
         "series": series,
         "last_row": rows[-1] if rows else {},
+        "machines": machine_series(rows, x_key, buckets, fleet_names(run_dir)) if kind == "ppo" else None,
     }
     run["stats"] = _stats(run)
     run["notes"] = _notes(run)
@@ -393,13 +474,36 @@ def build_dashboard(root: Path, buckets: int = 160, stale_after: float = 600.0, 
     }
 
 
+# Config keys that name a machine on the network: a run trained on several PCs (rl/fleet.py) keeps the address
+# its learner listened on ("192.168.1.20:47860", "gamingpc.lan:47860"), which says where the user's PCs are.
+NETWORK_KEYS = frozenset({"listen"})
+# host:port, with the host empty (":47860"), a name, an IPv4 address or a bracketed IPv6 one. A port is two
+# digits or more, so a device such as "cuda:0" is not taken for one.
+HOST_PORT = re.compile(r"(?:\[[0-9A-Fa-f:.%\w]*\]|[\w.-]*):\d{2,5}")
+
+
+def _names_a_host(value: str) -> bool:
+    """A host:port, or an IPv4 or IPv6 address anywhere in the string: belt and braces for NETWORK_KEYS, should a
+    trainer grow another field that carries one."""
+    if HOST_PORT.fullmatch(value.strip()):
+        return True
+    for token in re.split(r"[\s,;()<>\"'=]+", value):
+        try:
+            ipaddress.ip_address(token.strip("[]").split("%")[0])
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def _scrub(value):
-    """Drop anything path-shaped. A trainer's config carries the paths of the clips it read, and those
-    are the user's own filesystem: fine on their machine, not fine on a public page."""
+    """Drop anything path-shaped, and anything that names a machine on the network. A trainer's config carries the
+    paths of the clips it read, and a fleet run's the address its learner listened on: the user's own filesystem
+    and network, fine on their machine, not fine on a public page."""
     if isinstance(value, str):
-        return None if "/" in value or "\\" in value else value
+        return None if "/" in value or "\\" in value or _names_a_host(value) else value
     if isinstance(value, dict):
-        return {k: v for k, v in ((k, _scrub(v)) for k, v in value.items()) if v is not None}
+        return {k: v for k, v in ((k, _scrub(v)) for k, v in value.items() if k not in NETWORK_KEYS) if v is not None}
     if isinstance(value, list):
         kept = [v for v in (_scrub(v) for v in value) if v is not None]
         return kept if len(kept) == len(value) else None
@@ -407,9 +511,11 @@ def _scrub(value):
 
 
 def public_payload(payload: dict, root_label: str = "runs/") -> dict:
-    """The same page with nothing local in it: no absolute paths, no clip filenames, no machine names."""
+    """The same page with nothing local in it: no absolute paths, no clip filenames, no machine names or addresses."""
     out = dict(payload, root=root_label)
-    out["runs"] = [dict(run, config=_scrub(run["config"]), last_row=_scrub(run["last_row"])) for run in payload["runs"]]
+    out["runs"] = [dict(run, config=_scrub(run["config"]), last_row=_scrub(run["last_row"]),
+                        machines=run.get("machines") and dict(run["machines"], names={}))
+                   for run in payload["runs"]]
     return out
 
 

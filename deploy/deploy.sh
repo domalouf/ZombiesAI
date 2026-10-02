@@ -15,6 +15,8 @@
 #   SEED        which game to show (default: 10030, one of its round-4 games)
 #   TWITCH_CHANNEL  the channel /zombies/live/ embeds (default: none, a placeholder until there is a stream).
 #                   The site's CSP must let the player in: frame-src https://player.twitch.tv.
+#   LIVE_MACHINES   the other gaming PCs' ids, space-separated (default: none): the Training Room shows each one's
+#                   live/machine-<id>.json beside the training PC (publish_live.py --worker <id> on that PC).
 #
 set -euo pipefail
 

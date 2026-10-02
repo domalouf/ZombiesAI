@@ -118,6 +118,7 @@
   .chart .end-label { font: 600 12px var(--ui); fill: var(--chalk); }
   .chart .crosshair { stroke: var(--chalk-dim); stroke-width: 1; shape-rendering: crispEdges; }
   .empty-note { font-size: 13px; color: var(--chalk-faint); padding: 18px 0; }
+  .section-note { margin: -4px 0 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 72ch; }
 
   .tip {
     position: absolute;
@@ -245,7 +246,8 @@ let runs = DATA.runs;
 // group the reader is most likely to want is simply the first one.
 const groups = [];
 for (const r of runs) if (!groups.some((g) => g.key === r.group)) groups.push({ key: r.group, label: r.group_label });
-const state = { group: groups.length ? groups[0].key : null, visible: new Set(runs.map((r) => r.name)) };
+const state = { group: groups.length ? groups[0].key : null, visible: new Set(runs.map((r) => r.name)),
+                fleetRun: null, hiddenMachines: new Set() };
 let charts = [];
 const inGroup = () => runs.filter((r) => r.group === state.group);
 
@@ -279,7 +281,7 @@ function Chart(spec) {
   let frame = null, hover = null;
 
   function visibleSeries() {
-    return spec.series().filter((s) => s.x.length && state.visible.has(s.run));
+    return spec.series().filter((s) => s.x.length && (spec.ownFilter || state.visible.has(s.run)));
   }
 
   function draw() {
@@ -439,6 +441,69 @@ function chartCard(key, opts = {}) {
   }).node;
 }
 
+/* -- each machine ------------------------------------------------------------
+   A run trained on several PCs (rl/fleet.py) logs every machine's share of each update. One run at a time, one
+   line per machine, coloured by the machine's number: one PC feeding the batch worse data stands out here
+   instead of being averaged into the curves above. */
+function machineLabel(run, m) {
+  const name = run.machines.names[m];
+  if (m === "0") return name || "Training PC";
+  return name ? `${name} (machine ${m})` : `Machine ${m}`;
+}
+
+function machineCard(run, key, opts = {}) {
+  const s = run.machines.series[key];
+  if (!s) return null;
+  return Chart({
+    title: s.label, hint: s.hint, zero: true, gate: opts.gate, ownFilter: true, xLabel: "step", xFormat: stepFormat,
+    series: () => run.machines.ids.filter((m) => s.by[m] && !state.hiddenMachines.has(m))
+      .map((m) => ({ run: run.name, name: machineLabel(run, m), color: run.machines.colors[m], ...s.by[m] })),
+  }).node;
+}
+
+function machinesSection() {
+  const fleetRuns = inGroup().filter((r) => r.machines);
+  if (!fleetRuns.length) return null;
+  if (!fleetRuns.some((r) => r.name === state.fleetRun)) state.fleetRun = fleetRuns[0].name;  // newest first
+  const run = fleetRuns.find((r) => r.name === state.fleetRun);
+  const picker = fleetRuns.length > 1 ? el("div", { class: "filters" }, [
+    el("span", { class: "caption", text: "Run:" }),
+    ...fleetRuns.map((r) => el("button", {
+      class: "chip seg", type: "button", "aria-pressed": String(r.name === run.name),
+      onclick: () => { state.fleetRun = r.name; renderScoped(); },
+    }, [el("span", { class: "key", style: `background:${r.color}` }), el("span", { text: r.name })])),
+  ]) : null;
+  // The legend and the filter at once, as the run chips are: identity is never colour alone.
+  const legend = el("div", { class: "filters" }, [
+    el("span", { class: "caption", text: "Machines:" }),
+    ...run.machines.ids.map((m) => {
+      const chip = el("button", { class: "chip", type: "button", "aria-pressed": String(!state.hiddenMachines.has(m)) }, [
+        el("span", { class: "key", style: `background:${run.machines.colors[m]}` }),
+        el("span", { text: machineLabel(run, m) }),
+      ]);
+      chip.addEventListener("click", () => {
+        if (state.hiddenMachines.has(m)) state.hiddenMachines.delete(m); else state.hiddenMachines.add(m);
+        chip.setAttribute("aria-pressed", String(!state.hiddenMachines.has(m)));
+        for (const draw of charts) draw();
+      });
+      return chip;
+    }),
+  ]);
+  const warn = run.machines.late_warn_pct;
+  const cards = [
+    machineCard(run, "bad_step_pct", { gate: { value: warn, label: `warns at ${warn}%` } }),
+    machineCard(run, "round_reached_mean"),
+    machineCard(run, "share_pct"),
+    machineCard(run, "stale_pct"),
+  ].filter(Boolean);
+  return el("section", {}, [
+    el("h2", { text: "Each machine" }),
+    el("p", { class: "section-note", text: `${run.name} trained on games from ${run.machines.ids.length} ` +
+      `machine${run.machines.ids.length === 1 ? "" : "s"}. Each line is one machine's own share of every update.` }),
+    picker, legend, el("div", { class: "grid" }, cards),
+  ]);
+}
+
 function section(title, nodes) {
   const kept = nodes.filter(Boolean);
   if (!kept.length) return null;
@@ -482,7 +547,9 @@ function heroCard() {
   ]);
 }
 
-function tile(label, value, sub) {
+/* Not plain tile(): the live and supervise pages append system_view.html, whose own tile() would replace this
+   one, since every page script shares one global scope. */
+function runTile(label, value, sub) {
   return el("div", { class: "card" }, [
     el("div", { class: "label", text: label }),
     el("div", { class: "value", text: value }),
@@ -495,11 +562,11 @@ function tiles() {
   const live = runs.filter((r) => r.status === "running");
   const fastest = runs.reduce((a, r) => Math.max(a, r.stats.sps || 0), 0);
   return el("div", { class: "tiles" }, [
-    tile("Runs", String(runs.length), `${live.length} running, ${runs.filter((r) => r.status === "done").length} finished`),
-    tile("Steps trained", fmtCompact(sum((r) => r.stats.steps)), "environment steps across every run"),
-    tile("Episodes played", fmtCompact(sum((r) => r.stats.episodes)), "games finished in simulation"),
-    tile("Training time", fmtDuration(sum((r) => r.elapsed_s)), "wall clock, summed"),
-    fastest ? tile("Fastest", fmtCompact(fastest) + "/s", "steps per second") : null,
+    runTile("Runs", String(runs.length), `${live.length} running, ${runs.filter((r) => r.status === "done").length} finished`),
+    runTile("Steps trained", fmtCompact(sum((r) => r.stats.steps)), "environment steps across every run"),
+    runTile("Episodes played", fmtCompact(sum((r) => r.stats.episodes)), "games finished in simulation"),
+    runTile("Training time", fmtDuration(sum((r) => r.elapsed_s)), "wall clock, summed"),
+    fastest ? runTile("Fastest", fmtCompact(fastest) + "/s", "steps per second") : null,
   ]);
 }
 
@@ -654,6 +721,7 @@ function renderScoped() {
       chartCard("val.accuracy.mean_balanced", { big: true, hint: "mean per-class recall across the action heads, on held-out clips" }),
       chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
     ]),
+    machinesSection(),
     section("Reward hacking gates (PLAN.md, M7 T1)", [
       chartCard("max_term_share_mean", { gate: { value: DATA.gates.max_term_share.limit, label: "gate 0.60" }, zero: true }),
       chartCard("repair_share_mean", { gate: { value: DATA.gates.repair_share.limit, label: "gate 0.25" }, zero: true }),
@@ -673,7 +741,7 @@ function renderScoped() {
     notesPanel(),
   ].filter(Boolean));
   document.getElementById("scoped").replaceChildren(scoped);
-  for (const btn of document.querySelectorAll(".seg")) {
+  for (const btn of document.querySelectorAll(".seg[data-group]")) {
     btn.setAttribute("aria-pressed", String(btn.dataset.group === state.group));
   }
   for (const draw of charts) draw();

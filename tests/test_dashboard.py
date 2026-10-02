@@ -236,6 +236,25 @@ def test_public_payload_drops_anything_path_shaped(tmp_path):
     assert public["root"] == "runs/"  # never the absolute path the build happened to run from
 
 
+@pytest.mark.parametrize("listen", ["192.168.1.20:47860", "gamingpc.lan:47860"])
+def test_public_payload_drops_the_address_a_fleet_learner_listened_on(tmp_path, listen):
+    config = {"env": "real-waw", "device": "cuda:0", "n_actors": 4, "listen": listen, "lr": 0.0003,
+              "note": "learner at 10.0.0.5 for now"}
+    rows = ppo_rows(5)
+    rows[-1]["peer"] = "[fe80::1]:47860"  # should a trainer ever log one, the last row is published too
+    write_run(tmp_path / "runs", "rl5", rows, config)
+    payload = build_dashboard(tmp_path / "runs")
+    assert payload["runs"][0]["config"]["listen"] == listen  # the local page keeps it: it is the user's own
+    public = public_payload(payload)
+    kept, text = public["runs"][0]["config"], json.dumps(public)
+    assert "listen" not in kept and "note" not in kept and "peer" not in public["runs"][0]["last_row"]
+    assert kept["device"] == "cuda:0" and kept["n_actors"] == 4 and kept["env"] == "real-waw"
+    host = listen.split(":")[0]
+    assert host not in text and "47860" not in text and "10.0.0.5" not in text and "fe80" not in text
+    index = write_dashboard_site(payload, tmp_path / "site", "intro", [], "d").read_text()
+    assert host not in index and "47860" not in index and "10.0.0.5" not in index
+
+
 def test_site_build_is_a_static_directory_with_no_external_request(tmp_path):
     write_run(tmp_path / "runs", "ppo-nacht-state-s1", ppo_rows(30, env_metrics=True), {"env": "nacht-state"})
     out = tmp_path / "site"
@@ -257,3 +276,44 @@ def test_site_build_is_a_static_directory_with_no_external_request(tmp_path):
     assert 'http-equiv="refresh"' not in html  # a published page is a snapshot, not a poller
     data = json.loads(re.search(r"(?:const|let) DATA = (\{.*?\});\n", html, re.S).group(1))
     assert data["intro"] == "How training is going." and data["links"][0] == ["← domalouf.com", "/"]
+
+
+def fleet_rows(n, per=4096):
+    rows = []
+    for u in range(1, n + 1):
+        machines = {
+            "0": {"segments": 6, "dropped_segments": 0, "steps": 1500, "bad_step_frac": 0.03, "round_reached_mean": 4.0},
+            "1": {"segments": 4, "dropped_segments": 1 if u % 2 else 0, "steps": 500, "bad_step_frac": 0.2,
+                  "round_reached_mean": None},
+        }
+        rows.append({"update": u, "step": u * per, "return_mean": 1.0, "machines": 2, "per_machine": machines})
+    return rows
+
+
+def test_a_run_on_several_pcs_charts_each_machine_on_its_own(tmp_path):
+    run_dir = write_run(tmp_path, "rl5", fleet_rows(20), {"total_steps": 100_000, "env": "real-waw"})
+    (run_dir / "fleet.json").write_text(json.dumps({"workers": [{"name": "rig2", "machine": 1}]}))
+    machines = read_run(run_dir)["machines"]
+    assert machines["ids"] == ["0", "1"] and machines["names"] == {"1": "rig2"}
+    assert machines["colors"]["0"] != machines["colors"]["1"] and machines["late_warn_pct"] == 10.0
+    series = machines["series"]
+    assert series["bad_step_pct"]["by"]["1"]["y"][-1] == pytest.approx(20.0)
+    assert series["share_pct"]["by"]["0"]["y"][-1] == pytest.approx(75.0)  # 1500 of the update's 2000 steps
+    # pooled over the last 10 updates: 5 stale of 45 segments, not a 20% spike every other update
+    assert series["stale_pct"]["by"]["1"]["y"][-1] == pytest.approx(100 * 5 / 45, abs=0.01)
+    assert series["round_reached_mean"]["by"].keys() == {"0"}  # machine 1 has finished no game: no line, not 0
+
+
+def test_a_run_on_one_pc_has_no_machine_charts(tmp_path):
+    assert read_run(write_run(tmp_path, "solo", ppo_rows(5), {"total_steps": 100_000}))["machines"] is None
+
+
+def test_the_site_shows_machine_numbers_never_their_names(tmp_path):
+    run_dir = write_run(tmp_path / "runs", "rl5", fleet_rows(5), {"total_steps": 100_000})
+    (run_dir / "fleet.json").write_text(json.dumps({"workers": [{"name": "DomPC-mk3", "machine": 1}]}))
+    payload = build_dashboard(tmp_path / "runs")
+    assert payload["runs"][0]["machines"]["names"] == {"1": "DomPC-mk3"}  # the local page may say who it is
+    public = public_payload(payload)
+    assert public["runs"][0]["machines"]["names"] == {} and "DomPC" not in json.dumps(public)
+    index = write_dashboard_site(payload, tmp_path / "site", "intro", [], "d")
+    assert "DomPC" not in index.read_text() and "machinesSection" in index.read_text()

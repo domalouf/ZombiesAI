@@ -1,0 +1,27 @@
+# Keep this gaming PC playing for the learner: it waits for a run, joins it, stops its games' actors when the
+# learner goes away, and waits for the next one (scripts/fleet_worker.py; docs/rl.md, "Several PCs"). A user
+# unit, like zombiesai-live; the games themselves are started with scripts/instances.py up, and stay up.
+#
+#   mkdir -p ~/.config/zombiesai
+#   printf 'ZOMBIES_FLEET_TOKEN=%s\nZOMBIES_FLEET_LEARNER=%s\n' '<token>' '<learner-host>.lan' > ~/.config/zombiesai/fleet.env
+#   chmod 600 ~/.config/zombiesai/fleet.env
+#   cp deploy/zombiesai-worker.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now zombiesai-worker
+#   journalctl --user -u zombiesai-worker -f        # "joined run ...", or why the learner refused it
+
+[Unit]
+Description=ZombiesAI: play this PC's games for the learner
+After=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/zombiesai/fleet.env
+WorkingDirectory=%h/Projects/ZombiesAI
+ExecStart=/usr/bin/uv run --no-sync python -u scripts/fleet_worker.py --actors 4
+# A refusal (another commit, other settings) exits; trying again every minute picks up a fix once it is made.
+Restart=always
+RestartSec=60
+KillSignal=SIGINT
+TimeoutStopSec=40
+
+[Install]
+WantedBy=default.target

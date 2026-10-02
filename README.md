@@ -98,6 +98,12 @@ uv run python scripts/train_rl.py runs/bc1/bc.pt --actors 4 --counts-per-degree 
 uv run python scripts/instances.py down
 ```
 
+More games than one PC can run: the other gaming PCs join the same run as **workers** (`scripts/fleet_worker.py`),
+sending their games to the learner over the LAN. The learner turns away any PC on a different commit or with
+different game settings; `scripts/fleet.py prep` brings every PC to this one's commit and settings and starts
+its games, over SSH, and the learner scores each machine's games on their own so one bad PC stands out. See
+[`docs/rl.md`](./docs/rl.md), "Several PCs".
+
 On the machine that runs the game (Linux; see [`docs/linux.md`](./docs/linux.md)
 for why, and for the udev and libinput setup), the M0 spikes are two commands:
 
@@ -180,6 +186,26 @@ deploy/deploy.sh    # the page itself; it leaves training/live/ alone
 nginx serves the two files as it does any static file, and the page asks for
 them with `cache: "no-store"`. If a CDN sits in front, keep it from caching
 `/zombies/training/live/`.
+
+**The other gaming PCs** (the ones playing for the learner, `scripts/fleet_worker.py`)
+show up on the same page, one card each beside the training PC: live or offline,
+CPU, GPU and RAM, and what its worker is doing (waiting for a run, or playing N
+games for which run, segments sent, best round). Click a card for that machine in
+full. Each PC pushes only its own `live/machine-<id>.json`, never `runs.json` or
+`stream.json`; nothing is relayed through the learner, so a PC shows up between
+runs too. The id is the file name on the site (a-z, 0-9, `-`); the label is what
+the page calls it, and the host name is never published.
+
+```sh
+# On each such PC: steps 1-3 above, with a key of its own (one more line in lts's
+# authorized_keys, the same rrsync -wo directory), then say which machine it is:
+mkdir -p ~/.config/zombiesai
+printf 'ZOMBIES_LIVE_WORKER=rig2\nZOMBIES_LIVE_LABEL=Gaming PC 2\n' > ~/.config/zombiesai/live.env
+systemctl --user restart zombiesai-live
+
+# On the training PC: rebuild the page with the PCs' ids (a static site cannot list a directory).
+LIVE_MACHINES="rig2" deploy/deploy.sh
+```
 
 ### The Twitch stream
 
