@@ -41,7 +41,9 @@ lived, how many shots it fired and landed -- which the stream overlay is built f
 
 import copy
 import json
+import math
 import multiprocessing as mp
+import numbers
 import os
 import queue as queue_mod
 import time
@@ -513,6 +515,12 @@ class Learner:
         self.critic_opt = torch.optim.Adam(self.net.critic.parameters(), lr=config.lr * 10, eps=1e-5)
         self.offsets = self.bc_config.offsets
         self.uses_audio = self.bc_config.use_audio
+        # One step's audio feature, as the actors build it (_actor_loop) and the network takes it; None if deaf.
+        self.audio_shape = None
+        if self.uses_audio:
+            from zombiesai.demos.hearing import AudioFeatureConfig, feature_config
+
+            self.audio_shape = (feature_config(self.meta.get("audio_features")) or AudioFeatureConfig()).shape
         self.scaler = RunningStd(config.gamma)
         self.updates = int(previous.get("updates", 0))
         self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
@@ -767,9 +775,11 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     if config.listen:
         from zombiesai.rl.fleet import FleetServer, play_settings
 
+        # Every segment must reach as far back as this policy's oldest frame and hear as it does
+        # (FrameHistory.depth and the actor's audio); the server refuses one that does not fit.
         fleet = FleetServer(config.listen, fleet_token or "", config=config, run_dir=run_dir,
                             settings=play_settings(config.fleet_root) if config.env == "real" else None,
-                            say=say).start()
+                            context=max(learner.offsets), audio_shape=learner.audio_shape, say=say).start()
         fleet.set_weights(version, run_dir / "weights.pt")
         host, port = fleet.address
         say(f"listening for other machines' games on {host}:{port}")
@@ -826,10 +836,9 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 if machines is not None:
                     machines.episode(i, payload)
                 episode_log.write(json.dumps({"t": round(time.time(), 1), "step": step, "version": version,
-                                              **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}}) + "\n")
-                say(f"  actor {i} episode {payload.get('episode')}: round {payload.get('round_reached', '?')}, "
-                    f"return {payload.get('return', float('nan')):.1f}, {payload.get('length', 0)} steps"
-                    + (f" ({payload['reason']})" if payload.get("reason") else ""))
+                                              **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}},
+                                             default=_json_scalar) + "\n")
+                say(episode_line(i, payload))
             elif kind == "error":
                 say(f"  actor {i} failed:\n{payload}")
             for j, p in list(procs.items()):
@@ -895,6 +904,28 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
         episode_log.close()
         learner.checkpoint(checkpoint, step, {"episodes": episodes})
     return checkpoint
+
+
+def episode_line(actor, payload: dict) -> str:
+    """The log line of a finished game. Summaries come from other machines too (rl/fleet.py cleans them, but a
+    field can still be missing), so nothing here may raise on a missing, None or odd value: a bad summary must
+    never end the run for every machine."""
+
+    def number(key: str, fmt: str = "") -> str:
+        value = payload.get(key)
+        if isinstance(value, numbers.Real) and not isinstance(value, (bool, np.bool_)) and math.isfinite(value):
+            return format(value, fmt)
+        return "?"
+
+    reason = payload.get("reason")
+    return (f"  actor {actor} episode {number('episode')}: round {number('round_reached')}, "
+            f"return {number('return', '.1f')}, {number('length')} steps"
+            + (f" ({reason[:200]})" if isinstance(reason, str) and reason else ""))
+
+
+def _json_scalar(value):
+    """For json.dumps: a numpy scalar as its Python value, anything else unknown as its text."""
+    return value.item() if isinstance(value, np.generic) else str(value)
 
 
 def _print_row(row: dict, say) -> None:

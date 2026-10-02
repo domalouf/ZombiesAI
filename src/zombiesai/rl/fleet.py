@@ -20,7 +20,11 @@ What the network must not be allowed to do, and what stops it:
   silently. Every segment carries the spec version again.
 * **Mix two machines' actor 0.** The server numbers each worker's actors from its own block (100, 200, ...), so
   `episodes.jsonl`, the reward scaler's per-actor returns and the stream's numbers keep them apart; the worker's
-  RNG seed moves by the same offset, so two machines never play the same random stream.
+  RNG seed moves by the same offset, so two machines never play the same random stream. A machine is known by
+  its name and a random id its worker draws at start: a second PC under a name already playing is refused (one
+  of them needs `--name`), unless the first has gone quiet -- then it was the same PC's worker, restarted.
+  An actor number outside the machine's block is refused, as is a segment whose frame context or audio does not
+  fit the learner's policy (it would train on the wrong frames, or crash the update).
 * **Run arbitrary code.** Segments travel as `.npz` loaded with `allow_pickle=False`, and weights and the starting
   checkpoint as `torch.save` blobs the receiver opens with `weights_only=True`. Every request needs the fleet's
   shared token (`ZOMBIES_FLEET_TOKEN`), and a body over `MAX_BODY` is refused before it is read.
@@ -37,6 +41,7 @@ import hmac
 import http.client
 import io
 import json
+import math
 import multiprocessing as mp
 import os
 import queue as queue_mod
@@ -44,6 +49,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -58,6 +65,10 @@ TOKEN_ENV = "ZOMBIES_FLEET_TOKEN"
 MAX_BODY = 256 << 20  # a 256-step segment is ~7 MB raw; this is far past any real one
 STATUS_FILE = "status.json"  # in the worker's out_root
 ACTOR_BLOCK = 100  # worker k's actors are numbered from k * ACTOR_BLOCK; the learner's own stay at 0..n-1
+INSTANCE_HEADER = "X-Worker-Instance"  # the worker process's random id, beside its name in X-Worker
+# A worker heartbeats every 5 s, so one silent this long has stopped: a hello under its name from another
+# process is the same PC's worker restarted, and takes over its block. Sooner, it is a second PC with that name.
+STALE_S = 60.0
 # The settings that decide what an action does in the game. Resolution, fps, vsync and the rest are set per
 # instance on the command line (FleetConfig.dvars), so they cannot differ between machines and are not compared.
 PLAY_DVARS = ("sensitivity", "m_yaw", "m_pitch", "input_viewSensitivity", "cg_fov", "cg_fovscale")
@@ -85,12 +96,17 @@ def encode_segment(segment) -> bytes:
     return buf.getvalue()
 
 
-def decode_segment(data: bytes, actor: int):
-    """The inverse of `encode_segment`, checked for shape: a malformed segment raises ValueError, never trains."""
+def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[int, ...] | None):
+    """The inverse of `encode_segment`, checked against the learner's policy: a malformed segment raises
+    ValueError, never trains. `context` is the policy's frame history depth (the oldest offset), which the
+    learner's index arithmetic assumes every segment carries; `audio_shape` is one step's audio feature, or None
+    for a policy that does not hear."""
     from zombiesai.rl.parallel_ppo import Segment
 
     with np.load(io.BytesIO(data), allow_pickle=False) as z:
         meta = json.loads(z["meta"].tobytes().decode())
+        if not isinstance(meta, dict):
+            raise ValueError("a segment's header is a JSON object")
         audio = z["audio"] if "audio" in z.files else None
         audio_mask = z["audio_mask"] if "audio_mask" in z.files else None
         seg = Segment(actor=actor, version=int(meta["version"]), context=int(meta["context"]), frames=z["frames"],
@@ -99,16 +115,66 @@ def decode_segment(data: bytes, actor: int):
                       terminated=bool(meta["terminated"]), audio=audio, audio_mask=audio_mask)
     if meta.get("spec_version") != spec.SPEC_VERSION:
         raise ValueError(f"segment from spec {meta.get('spec_version')}, learner is on {spec.SPEC_VERSION}")
+    if seg.context != context:
+        raise ValueError(f"a frame context of {seg.context}, the learner's policy looks back {context}")
     n = seg.n
     if seg.frames.dtype != np.uint8 or seg.frames.shape != (seg.context + n + 1, *spec.PIXELS_SHAPE):
         raise ValueError(f"frames {seg.frames.dtype} {seg.frames.shape} for {n} steps after {seg.context}")
-    if seg.actions.shape != (n, len(spec.ACTION_NVEC)) or not (len(seg.logp) == len(seg.rewards) == len(seg.bad) == n):
+    if seg.actions.shape != (n, len(spec.ACTION_NVEC)) or not (seg.logp.shape == seg.rewards.shape == seg.bad.shape
+                                                                == (n,)):
         raise ValueError("actions, log-probs, rewards and bad flags disagree on the segment's length")
     if (seg.actions < 0).any() or (seg.actions >= np.asarray(spec.ACTION_NVEC)).any():
         raise ValueError("an action outside its head's range")
-    if seg.audio is not None and (seg.audio_mask is None or len(seg.audio) != n + 1 or len(seg.audio_mask) != n + 1):
-        raise ValueError("audio does not have one feature per observation")
+    if audio_shape is None:
+        if seg.audio is not None or seg.audio_mask is not None:
+            raise ValueError("audio for a policy that does not hear")
+        return seg
+    # The learner stacks these straight into the network's audio input: anything but float32 of the feature's
+    # shape fails there, mid-update, after the batch is gathered. Narrower types widen safely; float64 does not.
+    if seg.audio is None or seg.audio_mask is None:
+        raise ValueError("no audio for a policy that hears")
+    if seg.audio.shape != (n + 1, *audio_shape) or seg.audio_mask.shape != (n + 1,):
+        raise ValueError(f"audio {seg.audio.shape} and mask {seg.audio_mask.shape} for {n + 1} observations of "
+                         f"{tuple(audio_shape)}")
+    for name in ("audio", "audio_mask"):
+        array = getattr(seg, name)
+        if not np.can_cast(array.dtype, np.float32, casting="safe"):
+            raise ValueError(f"{name} is {array.dtype}, not float32")
+        array = array.astype(np.float32, copy=False)
+        if not np.isfinite(array).all():
+            raise ValueError(f"{name} is not finite")
+        setattr(seg, name, array)
     return seg
+
+
+EPISODE_TEXT_FIELDS = ("reason",)  # the summary's one field that is words, not a number
+
+
+def clean_episode(body: dict) -> dict:
+    """What the learner keeps of a worker's episode summary: the fields episodes.jsonl and its log line use
+    (parallel_ppo.EPISODE_FIELDS), numbers as finite ints or floats and the reason as a short string. Anything
+    else -- a null, a string where a number goes, NaN -- is dropped, so the learner never has to guess."""
+    from zombiesai.rl.parallel_ppo import EPISODE_FIELDS
+
+    out = {}
+    for key in EPISODE_FIELDS:
+        value = body.get(key)
+        if key in EPISODE_TEXT_FIELDS:
+            if isinstance(value, str) and value:
+                out[key] = value[:200]
+        elif isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            out[key] = value
+    return out
+
+
+def _count(value, default: int | None = None) -> int:
+    """A count from a request: an int (a JSON true is not one), else ValueError, which the handler turns into
+    a 400."""
+    if value is None and default is not None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{value!r} is not a whole number")
+    return value
 
 
 # ------------------------------------------------------------------------------------------------ agreement
@@ -202,18 +268,22 @@ class WorkerState:
     lost: int = 0
     host: str = ""
     commit: str = ""
+    instance: str = ""  # the worker process's random id: two PCs with one name differ in it
     settings: dict | None = field(default=None, repr=False)
 
 
 class FleetServer:
     """The learner's door for other PCs' actors. Runs on its own threads; the learner loop reads `inbox` beside
-    its own actors' queue and calls `set_weights` after every publish."""
+    its own actors' queue and calls `set_weights` after every publish. `context` and `audio_shape` are what the
+    learner's policy needs of a segment (its frame history depth; one step's audio feature, None if it does not
+    hear), for `decode_segment` to check."""
 
-    def __init__(self, address: str, token: str, *, config, run_dir: Path, settings: dict | None,
-                 inbox_size: int = 32, say=print):
+    def __init__(self, address: str, token: str, *, config, run_dir: Path, settings: dict | None, context: int,
+                 audio_shape: tuple[int, ...] | None, inbox_size: int = 32, say=print):
         if not token:
             raise ValueError(f"a fleet needs a shared token: set {TOKEN_ENV} on every machine")
         self.token, self.config, self.run_dir, self.say = token, config, Path(run_dir), say
+        self.context, self.audio_shape = int(context), None if audio_shape is None else tuple(audio_shape)
         self.settings = settings  # None until a worker brings some, if this machine has no game
         self.provenance = provenance()
         self.inbox: queue_mod.Queue = queue_mod.Queue(maxsize=inbox_size)
@@ -280,6 +350,10 @@ class FleetServer:
 
     def hello(self, body: dict, host: str) -> tuple[int, dict]:
         name = str(body.get("name") or host)[:64]
+        actors = body.get("actors")
+        # Checked before anything is registered: the block a machine gets holds ACTOR_BLOCK actors, no more.
+        if isinstance(actors, bool) or not isinstance(actors, int) or not 1 <= actors <= ACTOR_BLOCK:
+            return 400, {"error": f"actors {actors!r}: a machine plays 1..{ACTOR_BLOCK}"}
         ours = self.provenance
         if body.get("spec_version") != ours["spec_version"]:
             return 409, {"error": f"spec {body.get('spec_version')} here is {ours['spec_version']}: "
@@ -287,6 +361,10 @@ class FleetServer:
         if "unknown" not in (body.get("sha"), ours["sha"]) and body.get("sha") != ours["sha"]:
             return 409, {"error": f"that machine is on commit {str(body.get('sha'))[:12]}, the learner on "
                                   f"{ours['sha'][:12]}: `scripts/fleet.py prep` on the learner brings it over"}
+        instance = body.get("instance")
+        if not isinstance(instance, str) or not instance:
+            return 400, {"error": "no worker instance id: update the worker"}
+        instance = instance[:64]
         if self.config.env == "real":
             with self._lock:
                 if self.settings is None and body.get("settings") is not None:
@@ -299,25 +377,33 @@ class FleetServer:
                     return 409, {"error": "its game settings differ from the learner's -- `scripts/fleet.py prep` "
                                           "on the learner installs its config.cfg there: " + "; ".join(diffs[:8])
                                           + (f" (and {len(diffs) - 8} more)" if len(diffs) > 8 else "")}
+        now = time.time()
         with self._lock:
             worker = self.workers.get(name)
             if worker is None:
-                worker = WorkerState(name=name, first_actor=ACTOR_BLOCK * (len(self.workers) + 1))
+                worker = WorkerState(name=name, first_actor=ACTOR_BLOCK * (len(self.workers) + 1), instance=instance)
                 self.workers[name] = worker
-                self.say(f"  fleet: {name} joined from {host} with {body.get('actors')} actors "
-                         f"(actors {worker.first_actor}+)")
-            worker.actors = int(body.get("actors") or 0)
-            worker.last_seen, worker.host, worker.commit = time.time(), host, str(body.get("sha"))
-        if worker.actors > ACTOR_BLOCK:
-            return 400, {"error": f"at most {ACTOR_BLOCK} actors a machine"}
+                self.say(f"  fleet: {name} joined from {host} with {actors} actors (actors {worker.first_actor}+)")
+            elif worker.instance != instance:
+                # Two processes under one name would share a block of actor numbers and an RNG stream. A quiet
+                # one has stopped -- this is its PC's worker, restarted -- otherwise it is another machine.
+                if now - worker.last_seen < STALE_S:
+                    return 409, {"error": f"another machine is already playing as {name} (from {worker.host}): "
+                                          "give one of them --name"}
+                self.say(f"  fleet: {name} is back from {host}, a new worker taking over actors {worker.first_actor}+")
+                worker.instance, worker.alive = instance, 0
+            worker.actors = actors
+            worker.last_seen, worker.host, worker.commit = now, host, str(body.get("sha"))
         return 200, {"run": self.run_dir.name, "first_actor": worker.first_actor, "config": asdict(self.config),
                      "version": self._weights[0], "init_sha256": self._init_sha}
 
-    def worker(self, name: str | None) -> WorkerState | None:
+    def worker(self, name: str | None, instance: str | None) -> WorkerState | None:
+        """The worker a request comes from, if it said hello -- as this process, not another under its name."""
         with self._lock:
             w = self.workers.get(name or "")
-            if w is not None:
-                w.last_seen = time.time()
+            if w is None or not instance or w.instance != instance:
+                return None
+            w.last_seen = time.time()
             return w
 
     def deliver(self, item, timeout_s: float = 5.0) -> bool:
@@ -376,10 +462,19 @@ class _Handler(BaseHTTPRequestHandler):
         return None
 
     def _known_worker(self) -> WorkerState | None:
-        worker = self.fleet.worker(self.headers.get("X-Worker"))
+        """A 409 for a stranger, and for a process other than the one that said hello under that name: the
+        worker ends its session on a 409 and says hello again, which settles which of two is playing."""
+        worker = self.fleet.worker(self.headers.get("X-Worker"), self.headers.get(INSTANCE_HEADER))
         if worker is None:
             self._reply(409, {"error": "say hello first", "hello": True})
         return worker
+
+    @staticmethod
+    def _local_actor(local: int, worker: WorkerState) -> int:
+        """One of the actors the machine said hello with, numbered from 0, or ValueError."""
+        if not 0 <= local < worker.actors:
+            raise ValueError(f"actor {local} of a machine with {worker.actors}")
+        return local
 
     def do_GET(self):
         if not self._authorized():
@@ -419,11 +514,10 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path == "/segment":
             try:
-                local = int(self.headers.get("X-Actor", "-1"))
-                if not 0 <= local < max(worker.actors, 1):
-                    raise ValueError(f"actor {local} of a machine with {worker.actors}")
-                segment = decode_segment(data, worker.first_actor + local)
-            except (ValueError, KeyError, OSError) as error:
+                local = self._local_actor(int(self.headers.get("X-Actor", "-1")), worker)
+                segment = decode_segment(data, worker.first_actor + local, context=fleet.context,
+                                         audio_shape=fleet.audio_shape)
+            except (ValueError, KeyError, TypeError, OSError, EOFError, zipfile.BadZipFile) as error:
                 worker.refused += 1
                 self._reply(400, {"error": f"bad segment: {error}"})
                 return
@@ -436,8 +530,12 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._json(data)
             if body is None:
                 return
-            local = int(body.get("actor", 0))
-            payload = {k: v for k, v in body.items() if isinstance(v, (int, float, str, bool)) or v is None}
+            try:
+                local = self._local_actor(_count(body.get("actor")), worker)
+            except ValueError as error:
+                self._reply(400, {"error": f"bad episode: {error}"})
+                return
+            payload = clean_episode(body)
             payload["actor"] = worker.first_actor + local
             payload["machine"] = worker.name
             worker.episodes += 1
@@ -447,9 +545,15 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._json(data)
             if body is None:
                 return
-            worker.alive = int(body.get("alive", 0))
-            worker.actors = int(body.get("actors", worker.actors))
-            worker.sent, worker.lost = int(body.get("sent", worker.sent)), int(body.get("dropped", worker.lost))
+            # The actor count is the one hello registered: a heartbeat reports on those actors, never adds more.
+            try:
+                alive = _count(body.get("alive"), 0)
+                sent, lost = _count(body.get("sent"), worker.sent), _count(body.get("dropped"), worker.lost)
+            except ValueError as error:
+                self._reply(400, {"error": f"bad heartbeat: {error}"})
+                return
+            worker.alive = min(max(alive, 0), worker.actors)
+            worker.sent, worker.lost = max(sent, 0), max(lost, 0)
             self._reply(200, {"ok": True, "version": fleet._weights[0]})
         else:
             self._reply(404, {"error": f"no {path}"})
@@ -464,10 +568,13 @@ class FleetClient:
     def __init__(self, learner: str, token: str, name: str, timeout_s: float = 30.0):
         host, port = parse_address(learner, default_host="127.0.0.1")
         self.base, self.token, self.name, self.timeout_s = f"http://{host}:{port}", token, name, timeout_s
+        # Drawn once per process: what tells this worker apart from another PC (or a second copy) with its name.
+        self.instance = uuid.uuid4().hex
 
     def _request(self, method: str, path: str, data: bytes | None = None, headers: dict | None = None):
         req = urllib.request.Request(self.base + path, data=data, method=method,
-                                     headers={"X-Fleet-Token": self.token, "X-Worker": self.name, **(headers or {})})
+                                     headers={"X-Fleet-Token": self.token, "X-Worker": self.name,
+                                              INSTANCE_HEADER: self.instance, **(headers or {})})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
                 return resp.status, resp.read(), resp.headers
@@ -482,8 +589,8 @@ class FleetClient:
             return code, {"error": data[:200].decode(errors="replace")}
 
     def hello(self, actors: int, settings: dict | None) -> dict:
-        code, body = self._post_json("/hello", {"name": self.name, "actors": actors, "settings": settings,
-                                                **provenance()})
+        code, body = self._post_json("/hello", {"name": self.name, "instance": self.instance, "actors": actors,
+                                                "settings": settings, **provenance()})
         if code == 401:
             raise FleetError(f"the learner refused the fleet token: set the same {TOKEN_ENV} on both machines")
         if code != 200:
