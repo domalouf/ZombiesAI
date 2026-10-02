@@ -72,6 +72,8 @@ def test_a_tick_writes_both_files_and_pushes_them_saying_only_when_that_changes(
     machine = json.loads((tmp_path / "out" / "machine.json").read_text())
     assert machine["at"] == 170.0 and machine["runs_at"] == 170.0 and machine["training"] == []
     assert json.loads((tmp_path / "out" / "runs.json").read_text())["runs"][0]["name"] == "rl8"
+    stream = json.loads((tmp_path / "out" / "stream.json").read_text())
+    assert stream["at"] == 170.0 and stream["run"] is None and stream["stats"]["games"] == 0  # no run has played
     assert calls[0][:2] == ["rsync", "-a"] and calls[0][-2:] == [f"{tmp_path / 'out'}/", "lts:"]
     assert "ControlMaster=auto" in calls[0][calls[0].index("-e") + 1]
     assert [s.split("  ", 1)[1] for s in said] == ["pushing to lts:", "push failing: rsync: connection refused",

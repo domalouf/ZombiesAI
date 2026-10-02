@@ -246,3 +246,23 @@ def test_a_fresh_game_s_scoreboard_is_cleared_and_its_return_is_a_down():
         _, reward, terminated, truncated, info = env.step(IDLE)
     assert terminated and not truncated and info["episode"]["reason"] == "down"
     assert reward < 0  # the death penalty, the same as solo's game over
+
+
+def test_shots_are_magazine_marks_gone_while_the_trigger_is_held():
+    env, game, _, _, _ = make_env([500] * 4)
+    env.reset()
+    fire = spec.make_action(fire=1)
+    # Held: 30 -> 28 -> 27 is three shots. Idle: 27 -> 30 is a reload, 30 -> 20 a swap, not ten shots. Held
+    # again: 20 -> 19 -> 12 is eight more.
+    steps = [(30, fire), (28, fire), (27, fire), (30, IDLE), (20, IDLE), (19, fire), (12, fire), (12, IDLE)]
+    mags = iter(m for m, _ in steps)
+
+    def with_mag(crops):
+        r = reader(crops)
+        r.mag, r.mag_status = next(mags), OK
+        return r
+
+    env.reader = with_mag
+    for _, action in steps:
+        env.step(action)
+    assert env.summary()["shots"] == 11 and env.summary()["hits"] == 0

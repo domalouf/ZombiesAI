@@ -23,6 +23,11 @@ Reset is an explicit state machine, never a blind sleep. It releases every key, 
 the game's console (`map nazi_zombie_prototype`), and waits for the HUD to show a *settled* 500 points on a live
 picture. A try that does not get there within `start_timeout_s` is repeated; after `reset_attempts` of them
 the game is relaunched (`restart`, which the instance manager provides), and the wait starts over.
+
+The episode summary also carries an estimate of how well it shoots, for the stream overlay (viz/stream.py):
+`shots` are the magazine marks that went away between two good reads while the fire button was held, and
+`hits` the settled non-repair gains -- every one of those is at least one bullet that landed, but a counter
+still rolling from one hit when the next lands settles as a single gain, so `hits / shots` is a floor.
 """
 
 import time
@@ -36,6 +41,10 @@ from zombiesai.hud.track import START_POINTS, HudTracker
 from zombiesai.realgame.hud_reward import HudSignals, SignalConfig
 from zombiesai.realgame.instances import NACHT
 from zombiesai.reward import REWARD_TERMS, RewardConfig, RewardShaper
+
+
+# More marks than this gone between two good reads is a misread or a weapon swap, not a burst.
+MAX_SHOTS_BETWEEN_READS = 12
 
 
 @dataclass(frozen=True)
@@ -152,6 +161,20 @@ class RealGameEnv:
         self._stale_since = None
         self._absent_since = None
         self._seen_hud = False
+        self.shots = 0
+        self._mag = -1  # the last good magazine read, -1 when there is none to count from
+        self._fired = False  # fire held since that read
+
+    def _count_shots(self, reading, action) -> None:
+        """Magazine marks that went away while the trigger was held. A drop without firing is a weapon swap,
+        a rise is a reload; neither is a shot, and both start the count again from the new read."""
+        self._fired = self._fired or bool(action[spec.FIRE])
+        if reading is None or reading.mag_status != OK:
+            return
+        drop = self._mag - reading.mag
+        if self._mag >= 0 and self._fired and 0 < drop <= MAX_SHOTS_BETWEEN_READS:
+            self.shots += drop
+        self._mag, self._fired = reading.mag, False
 
     def _observe(self):
         """Grab now: (obs, reading, stale). The HUD is parsed from the same grab as the frame."""
@@ -330,6 +353,7 @@ class RealGameEnv:
             # Nothing new read: carry the settled state, but no event is re-reported.
             tracked.points_event, tracked.points_delta, tracked.round_changed = "", 0, False
         signals = self.signals.step(tracked, action)
+        self._count_shots(reading, action)
         shown = self.downed is not None and self.downed()
         if shown and self.clock() - self.t_start < self.config.down_grace_s:
             if self.press is not None and self.config.after_start_key and self.clock() >= self._next_clear:
@@ -380,6 +404,8 @@ class RealGameEnv:
             "seconds": self.clock() - self.t_start,
             "round_reached": max(self.signals.round, 1),
             "points_gained": self.signals.points_gained,
+            "shots": self.shots,
+            "hits": self.signals.events["gain"],
             "bad_steps": self.bad_steps,
             "repair_share": stats.repair_share(),
             "max_term_share": stats.max_term_share(),

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build the NachtSim replay page and the training dashboard, and publish both to
-# https://domalouf.com/zombies/ (the agent playing) and /zombies/training/ (how it learned).
+# Build the NachtSim replay page, the training dashboard and the stream's page, and publish them to
+# https://domalouf.com/zombies/ (the agent playing), /zombies/training/ (how it learned) and /zombies/live/
+# (the Twitch stream, with the overlay OBS draws on it at /zombies/live/overlay/).
 #
 # Same pattern as the site's other project pages: rsync a static directory into a
 # sub-dir of the site's web root on the server (~/site/www/, which the MyWebsite repo's nginx serves).
@@ -12,6 +13,8 @@
 #   DEPLOY_DEST     rsync destination  (default: lts:site/www/zombies/)
 #   CHECKPOINT  trained policy     (default: runs/ppo-nacht-state-s1/checkpoint.pt)
 #   SEED        which game to show (default: 10030, one of its round-4 games)
+#   TWITCH_CHANNEL  the channel /zombies/live/ embeds (default: none, a placeholder until there is a stream).
+#                   The site's CSP must let the player in: frame-src https://player.twitch.tv.
 #
 set -euo pipefail
 
@@ -36,9 +39,13 @@ uv run python scripts/build_site.py --checkpoint "$checkpoint" --seed "$seed" --
 log "building the live training dashboard"
 uv run python scripts/dashboard.py --site site/zombies/training --live
 
+# The stream's page and its overlay poll training/live/stream.json, which publish_live.py pushes beside the rest.
+log "building the stream page (channel=${TWITCH_CHANNEL:-none yet})"
+uv run python scripts/build_stream.py --out site/zombies/live
+
 log "publishing site/zombies/ -> $dest"
 # --delete so a rebuilt page doesn't leave stale files behind; trailing slashes matter. The filter protects
 # training/live/ from it: those files are the training PC's, pushed there and not built here.
 rsync -av --delete --filter='P training/live/' site/zombies/ "$dest"
 
-log "done — https://domalouf.com/zombies/ and https://domalouf.com/zombies/training/"
+log "done — https://domalouf.com/zombies/, /zombies/training/ and /zombies/live/"

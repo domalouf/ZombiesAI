@@ -181,6 +181,41 @@ nginx serves the two files as it does any static file, and the page asks for
 them with `cache: "no-store"`. If a CDN sits in front, keep it from caching
 `/zombies/training/live/`.
 
+### The Twitch stream
+
+`domalouf.com/zombies/live/` is the stream's page: the Twitch player, the
+overlay's four numbers beside it, and the PPO run under it — progress, steps,
+games, throughput, the round, survival and accuracy curves over its games, the
+policy's health (entropy, KL, clip fraction, explained variance, KL to the
+human prior), its last games and where they end. `/zombies/live/overlay/` is
+the overlay alone on a transparent page, for OBS: **best round, average round,
+shot accuracy and average survival time**, in a small panel over the game.
+
+Both poll `training/live/stream.json`, which `publish_live.py` now pushes
+beside the other two (same key, same directory). Its games are the run's
+`episodes.jsonl`: one line per finished game, written by `train_rl.py`
+(`rl/parallel_ppo.py`). The run is the one training now (the real game before a
+sim rehearsal), or `--stream-run <name>`. Averages are over the last 100 games;
+the best round is the run's. On the real game, accuracy is read off the HUD:
+magazine marks that went while the trigger was held, against the hits the
+points counter paid for — two hits inside one counter roll settle as one gain,
+so it reads low.
+
+```sh
+TWITCH_CHANNEL=<channel> deploy/deploy.sh          # builds /zombies/live/ with the player
+uv run python scripts/build_stream.py --demo        # made-up games, to look at the layout locally
+```
+
+In OBS: add a **Browser** source, 1920×1080, URL
+`https://domalouf.com/zombies/live/overlay/`, on top of the game capture. The
+query string places it: `?corner=tl|tr|bl|br` (default `tl`, clear of Nacht's
+HUD), `?scale=1.25`, `?layout=column`, `?inset=28`, and `?demo=1` to position
+it before there are games.
+
+The site's CSP has to let the player in: add `frame-src https://player.twitch.tv`
+(in MyWebsite's nginx config). Twitch also checks the page's host against the
+`parent` the page sends, which is the host it is served from.
+
 `watch.py` writes a self-contained replay to `runs/replays/`: a top-down map with
 play/pause, speed, scrubbing, what the agent could and couldn't see, its action
 each step, and a clickable match log. Add `#t=90` to the file's URL to open it at

@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zombies AI Live</title>
+<meta name="description" content="__DESCRIPTION__">
+<meta name="color-scheme" content="dark">
+<!--fonts-->
+<link rel="stylesheet" href="fonts/fonts.css">
+<!--/fonts-->
+<style>
+  /* The stream's page: the Twitch player with the overlay's numbers beside it, and the PPO training under it.
+     Same bunker slate as the replay and the Training Room; the one series colour is the first validated dark
+     categorical slot, and the chalk palette is chrome that never carries data. */
+  :root {
+    --ground: #1a211f;
+    --panel: #212a27;
+    --floor: #2a3430;
+    --line: #37423d;
+    --chalk: #e8e4d8;
+    --chalk-dim: #9aa39b;
+    --chalk-faint: #6f7a73;
+    --sanguine: #d0593f;
+    --amber: #ddb04d;
+    --good: #0ca30c;
+    --warning: #fab219;
+    --series: #3987e5;
+    --display: "Big Shoulders Stencil Display", Impact, "Arial Narrow", sans-serif;
+    --ui: "Sofia Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+    --mono: "Red Hat Mono", ui-monospace, Menlo, Consolas, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html { background: var(--ground); }
+  body { margin: 0; background: var(--ground); color: var(--chalk); font: 15px/1.45 var(--ui);
+         padding-inline: clamp(16px, 3vw, 36px); padding-block: 22px 56px; }
+  main { max-width: 1360px; margin-inline: auto; }
+  h1 { margin: 0; font: 800 clamp(30px, 4vw, 44px)/0.95 var(--display); letter-spacing: 0.01em; text-transform: uppercase; }
+  h2 { margin: 34px 0 12px; font: 700 13px/1.2 var(--ui); letter-spacing: 0.13em; text-transform: uppercase; color: var(--chalk-dim); }
+  a { color: var(--chalk); }
+  .masthead { display: grid; gap: 10px; margin-bottom: 20px; }
+  .tagline { margin: 0; max-width: 78ch; color: var(--chalk-dim); font-size: 14.5px; }
+  .site-nav { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 13.5px; }
+  .site-nav a { color: var(--chalk-dim); text-decoration: none; border-bottom: 1px solid var(--line); }
+  .site-nav a:hover { color: var(--chalk); border-color: var(--chalk-dim); }
+  :focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 14px 16px; }
+  .status { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin: 0; font-size: 14px; color: var(--chalk-dim); }
+  .flag { font: 600 11.5px/1 var(--mono); padding: 3px 6px; border-radius: 2px; border: 1px solid currentColor; }
+  .flag.good { color: var(--good); }
+  .flag.warning { color: var(--warning); }
+
+  /* The stage: the player and the overlay's four numbers, side by side, stacked on a phone. */
+  .stage { display: grid; grid-template-columns: minmax(0, 1fr) minmax(240px, 300px); gap: 14px; align-items: stretch; }
+  @media (max-width: 900px) { .stage { grid-template-columns: minmax(0, 1fr); } }
+  .player { position: relative; aspect-ratio: 16 / 9; background: #0f1312; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .player .off { position: absolute; inset: 0; display: grid; place-content: center; gap: 8px; padding: 24px; text-align: center; }
+  .player .off b { font: 800 clamp(24px, 3.4vw, 38px)/1 var(--display); text-transform: uppercase; }
+  .player .off span { color: var(--chalk-dim); font-size: 14.5px; max-width: 46ch; }
+  .scoreboard { display: grid; align-content: start; gap: 14px; }
+  .scoreboard .title { font: 700 13px/1.2 var(--ui); letter-spacing: 0.13em; text-transform: uppercase; color: var(--chalk-dim); }
+  .big { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 14px; }
+  @media (max-width: 900px) { .big { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  @media (max-width: 520px) { .big { grid-template-columns: 1fr 1fr; } }
+  .big .label { font-size: 13px; color: var(--chalk-dim); }
+  .big .value { font: 800 44px/1 var(--display); }
+  .scoreboard .note { font-size: 13px; color: var(--chalk-dim); margin: 0; }
+  .twitch-link { font-size: 13.5px; }
+
+  /* Training progress. */
+  .progress { display: grid; gap: 10px; }
+  .progress .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; }
+  .progress .run { font: 700 18px/1.2 var(--ui); }
+  .progress .kind { font-size: 13.5px; color: var(--chalk-dim); }
+  .bar { height: 8px; background: var(--floor); border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--series); border-radius: 4px; }
+  .progress .text { font-size: 13.5px; color: var(--chalk-dim); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--line);
+           border: 1px solid var(--line); border-radius: 4px; overflow: hidden; margin-top: 14px; }
+  .tiles > div { background: var(--panel); padding: 12px 14px; display: grid; gap: 1px; }
+  .tiles .label { font-size: 13px; color: var(--chalk-dim); }
+  .tiles .value { font: 600 26px/1.1 var(--ui); }
+  .tiles .sub { font-size: 12.5px; color: var(--chalk-faint); }
+
+  /* Charts: one series each, so the title names it and there is no legend. */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .chart { display: grid; gap: 6px; position: relative; align-content: start; }
+  .chart .title { font: 700 15px/1.2 var(--ui); display: flex; justify-content: space-between; gap: 10px; }
+  .chart .title .now { font-weight: 600; color: var(--chalk-dim); }
+  .chart .hint { font-size: 13px; color: var(--chalk-dim); margin: 0; }
+  figure { margin: 0; }
+  .chart svg { display: block; width: 100%; height: auto; overflow: visible; touch-action: pan-y; }
+  .axis { font: 500 11px var(--mono); fill: var(--chalk-faint); }
+  .rule { stroke: var(--line); stroke-width: 1; shape-rendering: crispEdges; }
+  .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .crosshair { stroke: var(--chalk-dim); stroke-width: 1; shape-rendering: crispEdges; }
+  .dot { fill: var(--series); stroke: var(--panel); stroke-width: 2; }
+  .empty-note { font-size: 13px; color: var(--chalk-faint); padding: 18px 0; margin: 0; }
+  .tip { position: absolute; z-index: 5; pointer-events: none; min-width: 120px; padding: 7px 10px; background: rgba(12, 16, 15, 0.94);
+         border: 1px solid var(--line); border-radius: 3px; font-size: 13px; opacity: 0; transition: opacity 90ms linear; }
+  .tip .when { color: var(--chalk-dim); font: 500 11px var(--mono); margin-bottom: 3px; }
+  .tip b { font: 600 14px var(--ui); }
+
+  .health { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-top: 14px; }
+  .health .card { display: grid; gap: 2px; align-content: start; }
+  .health .label { font-size: 13px; color: var(--chalk-dim); }
+  .health .value { font: 600 24px/1.1 var(--ui); }
+  .health .sub { font-size: 12.5px; color: var(--chalk-faint); }
+
+  .split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 14px; align-items: start; }
+  @media (max-width: 900px) { .split { grid-template-columns: minmax(0, 1fr); } }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font: 600 12px/1.2 var(--ui); letter-spacing: 0.06em; text-transform: uppercase; color: var(--chalk-dim);
+       padding: 0 10px 8px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  td { padding: 7px 10px 7px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.num, th.num { text-align: right; }
+  td.dim { color: var(--chalk-dim); }
+  tr:last-child td { border-bottom: 0; }
+  footer { margin-top: 40px; font-size: 13px; color: var(--chalk-faint); max-width: 90ch; }
+</style>
+</head>
+<body>
+<main>
+  <header class="masthead">
+    <nav class="site-nav" aria-label="Site"><!--nav--></nav>
+    <h1>The agent, live</h1>
+    <p class="tagline">A reinforcement-learning agent learning Nacht der Untoten the way a person would: it sees the screen,
+      presses keys and moves the mouse, and nothing else. Its policy started as a copy of human play and is being fine-tuned
+      with PPO, several games at once. The stream shows one of them; the numbers are over every game the run has played.</p>
+    <p class="status" id="status" role="status">Connecting to the PC…</p>
+  </header>
+
+  <section class="stage" aria-label="Stream">
+    <div class="player" id="player" data-channel="__CHANNEL__"></div>
+    <aside class="card scoreboard" aria-labelledby="sb-title">
+      <div class="title" id="sb-title">On the overlay</div>
+      <div class="big">
+        <div><div class="label">Best round</div><div class="value" id="s-best">–</div></div>
+        <div><div class="label">Average round</div><div class="value" id="s-avg">–</div></div>
+        <div><div class="label">Shot accuracy</div><div class="value" id="s-acc">–</div></div>
+        <div><div class="label">Average survival</div><div class="value" id="s-surv">–</div></div>
+      </div>
+      <p class="note" id="s-note"></p>
+      <p class="note">Accuracy is read off the HUD: magazine marks that went while the trigger was held, against the hits the
+        points counter paid for. Two hits inside one counter roll count once, so it is a floor.</p>
+    </aside>
+  </section>
+
+  <section aria-labelledby="ppo-title">
+    <h2 id="ppo-title">PPO training</h2>
+    <div class="card progress" id="progress"><p class="empty-note">No PPO run has played a game yet.</p></div>
+    <div class="tiles" id="tiles"></div>
+  </section>
+
+  <section aria-labelledby="plays-title">
+    <h2 id="plays-title">How it plays</h2>
+    <div class="grid" id="play-charts"></div>
+  </section>
+
+  <section aria-labelledby="learns-title">
+    <h2 id="learns-title">How it learns</h2>
+    <div class="grid" id="learn-charts"></div>
+    <div class="health" id="health"></div>
+  </section>
+
+  <div class="split">
+    <section aria-labelledby="games-title">
+      <h2 id="games-title">Last games</h2>
+      <div class="card table-wrap" id="games"><p class="empty-note">No games yet.</p></div>
+    </section>
+    <section aria-labelledby="rounds-title">
+      <h2 id="rounds-title">Where its games end</h2>
+      <div class="card chart" id="rounds"><p class="empty-note">No games yet.</p></div>
+    </section>
+  </div>
+
+  <footer id="footer">Live from the gaming PC it trains on: it pushes these numbers to this site every few seconds
+    (scripts/publish_live.py), and nothing on the site reaches back in.</footer>
+</main>
+<script>
+const SNAPSHOT = /*__STREAM_DATA__*/null;  // the numbers as they stood when the page was built
+const SRC = new URLSearchParams(location.search).get("src") || "../training/live/stream.json";
+const OFFLINE_AFTER_S = 30;
+const state = { data: SNAPSHOT, fetchedAt: null };
+
+// ------------------------------------------------------------------------------------------------ helpers
+function el(tag, attrs = {}, kids = []) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null) continue;
+    if (k === "text") node.textContent = v;
+    else if (k === "class") node.className = v;
+    else node.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) node.append(kid);
+  return node;
+}
+const SVG = "http://www.w3.org/2000/svg";
+function sv(tag, attrs = {}) {
+  const node = document.createElementNS(SVG, tag);
+  for (const [k, v] of Object.entries(attrs)) if (v != null) node.setAttribute(k, v);
+  return node;
+}
+function mount(holder, kids) { holder.replaceChildren(...kids.filter((k) => k != null)); }
+function fmtInt(v) { return v == null ? "–" : Math.round(v).toLocaleString("en-US"); }
+function fmtValue(v) {
+  if (v == null) return "–";
+  const a = Math.abs(v);
+  if (a >= 1e6) return `${(v / 1e6).toFixed(a >= 1e7 ? 1 : 2)}M`;
+  if (a >= 1e4) return `${(v / 1e3).toFixed(1)}k`;
+  if (a >= 100) return v.toFixed(0);
+  if (a >= 1) return v.toFixed(2);
+  if (a === 0) return "0";
+  return v.toPrecision(2);
+}
+function fmtClock(s) {
+  if (s == null) return "–";
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+}
+function fmtDuration(s) {
+  if (s == null) return "–";
+  if (s < 90) return `${Math.round(s)}s`;
+  if (s < 5400) return `${Math.round(s / 60)} min`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)} h`;
+  return `${(s / 86400).toFixed(1)} days`;
+}
+function fmtPct(v) { return v == null ? "–" : `${(100 * v).toFixed(v < 0.1 ? 1 : 0)}%`; }
+const REASON = { death: "died", down: "went down", hud_lost: "lost the HUD", picture_lost: "picture froze",
+                 hud_gone: "HUD vanished", time_limit: "time limit" };
+
+// ------------------------------------------------------------------------------------------------ the player
+(function player() {
+  const holder = document.getElementById("player");
+  const channel = holder.dataset.channel;
+  if (channel && location.hostname) {
+    const src = `https://player.twitch.tv/?channel=${encodeURIComponent(channel)}`
+      + `&parent=${encodeURIComponent(location.hostname)}&muted=true&autoplay=true`;
+    holder.append(el("iframe", { src, title: `${channel} on Twitch`, allowfullscreen: "", allow: "autoplay; fullscreen" }));
+    const link = el("a", { href: `https://www.twitch.tv/${encodeURIComponent(channel)}`, text: "Watch on Twitch, with chat →",
+                           class: "twitch-link", rel: "noopener" });
+    document.querySelector(".scoreboard").append(link);
+  } else {
+    holder.append(el("div", { class: "off" }, [
+      el("b", { text: "The stream is not on yet" }),
+      el("span", { text: "When it is, the agent plays here, with these numbers drawn over the game. Until then, the run's numbers below are live." }),
+    ]));
+  }
+})();
+
+// ------------------------------------------------------------------------------------------------ charts
+const tip = el("div", { class: "tip", role: "presentation" });
+
+function lineChart(card, xs, ys, { fmtY = fmtValue, xName = "game", fmtX = fmtInt, yMin = null } = {}) {
+  const pts = xs.map((x, i) => [x, ys[i]]).filter(([x, y]) => x != null && y != null);
+  const holder = card.querySelector(".plot");
+  if (pts.length < 2) { mount(holder, [el("p", { class: "empty-note", text: "Not enough yet to draw." })]); return; }
+  const W = Math.max(280, holder.clientWidth || 400), H = 190, L = 44, R = 10, T = 8, B = 24;
+  const x0 = pts[0][0], x1 = pts[pts.length - 1][0];
+  let lo = Math.min(...pts.map((p) => p[1])), hi = Math.max(...pts.map((p) => p[1]));
+  if (yMin != null) lo = Math.min(lo, yMin);
+  if (hi === lo) { hi += 1; lo -= yMin != null && lo - 1 < yMin ? 0 : 1; }
+  const pad = (hi - lo) * 0.08; hi += pad; if (yMin == null || lo - pad >= yMin) lo -= pad;
+  const sx = (x) => L + (W - L - R) * (x1 === x0 ? 0.5 : (x - x0) / (x1 - x0));
+  const sy = (y) => T + (H - T - B) * (1 - (y - lo) / (hi - lo));
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img",
+                          "aria-label": card.querySelector(".title span").textContent });
+  for (let k = 0; k <= 3; k++) {
+    const y = lo + ((hi - lo) * k) / 3;
+    svg.append(sv("line", { class: "rule", x1: L, x2: W - R, y1: sy(y), y2: sy(y) }));
+    const label = sv("text", { class: "axis", x: L - 6, y: sy(y) + 4, "text-anchor": "end" });
+    label.textContent = fmtY(y);
+    svg.append(label);
+  }
+  for (const [x, anchor] of [[x0, "start"], [x1, "end"]]) {
+    const label = sv("text", { class: "axis", x: sx(x), y: H - 6, "text-anchor": anchor });
+    label.textContent = fmtX(x);
+    svg.append(label);
+  }
+  svg.append(sv("path", { class: "line", d: pts.map(([x, y], i) => `${i ? "L" : "M"}${sx(x).toFixed(1)},${sy(y).toFixed(1)}`).join("") }));
+  const cross = sv("line", { class: "crosshair", y1: T, y2: H - B, visibility: "hidden" });
+  const dot = sv("circle", { class: "dot", r: 4.5, visibility: "hidden" });
+  svg.append(cross, dot);
+  const hit = sv("rect", { x: L, y: 0, width: W - L - R, height: H, fill: "transparent" });
+  svg.append(hit);
+  const move = (ev) => {
+    const box = svg.getBoundingClientRect();
+    const px = ((ev.clientX - box.left) / box.width) * W;
+    let best = pts[0];
+    for (const p of pts) if (Math.abs(sx(p[0]) - px) < Math.abs(sx(best[0]) - px)) best = p;
+    cross.setAttribute("x1", sx(best[0])); cross.setAttribute("x2", sx(best[0]));
+    dot.setAttribute("cx", sx(best[0])); dot.setAttribute("cy", sy(best[1]));
+    cross.setAttribute("visibility", "visible"); dot.setAttribute("visibility", "visible");
+    mount(tip, [el("div", { class: "when", text: `${xName} ${fmtX(best[0])}` }), el("b", { text: fmtY(best[1]) })]);
+    card.append(tip);
+    const cardBox = card.getBoundingClientRect();
+    const left = box.left - cardBox.left + (sx(best[0]) / W) * box.width;
+    tip.style.left = `${Math.min(cardBox.width - 130, Math.max(0, left + 12))}px`;
+    tip.style.top = `${box.top - cardBox.top + (sy(best[1]) / H) * box.height - 52}px`;
+    tip.style.opacity = 1;
+  };
+  hit.addEventListener("pointermove", move);
+  hit.addEventListener("pointerleave", () => {
+    cross.setAttribute("visibility", "hidden"); dot.setAttribute("visibility", "hidden"); tip.style.opacity = 0;
+  });
+  mount(holder, [svg]);
+}
+
+function chartCard(title, hint, now) {
+  return el("figure", { class: "card chart" }, [
+    el("div", { class: "title" }, [el("span", { text: title }), now != null ? el("span", { class: "now", text: now }) : null]),
+    hint ? el("p", { class: "hint", text: hint }) : null,
+    el("div", { class: "plot" }),
+  ]);
+}
+
+function roundBars(card, rounds) {
+  if (!rounds || !rounds.length) { mount(card, [el("p", { class: "empty-note", text: "No games yet." })]); return; }
+  const title = el("div", { class: "title" }, [el("span", { text: "Games by the round they ended in" })]);
+  const plot = el("div", { class: "plot" });
+  mount(card, [title, el("p", { class: "hint", text: "Every game of the run." }), plot]);
+  const W = Math.max(260, plot.clientWidth || 360), H = 190, L = 34, R = 6, T = 8, B = 24;
+  const most = Math.max(...rounds.map((r) => r[1]), 1);
+  const slot = (W - L - R) / rounds.length, gap = Math.min(2 + slot * 0.18, 10), bw = Math.max(2, slot - gap);
+  const sy = (v) => T + (H - T - B) * (1 - v / most);
+  const svg = sv("svg", { viewBox: `0 0 ${W} ${H}`, width: W, height: H, role: "img",
+                          "aria-label": "Games by the round they ended in" });
+  for (const v of [0, most / 2, most]) {
+    svg.append(sv("line", { class: "rule", x1: L, x2: W - R, y1: sy(v), y2: sy(v) }));
+    const label = sv("text", { class: "axis", x: L - 6, y: sy(v) + 4, "text-anchor": "end" });
+    label.textContent = fmtInt(v);
+    svg.append(label);
+  }
+  const g = sv("g");
+  svg.append(g);
+  const total = rounds.reduce((a, r) => a + r[1], 0);
+  rounds.forEach(([round, n], i) => {
+    const x = L + i * slot + gap / 2, h = Math.max(0, H - B - sy(n));
+    // 4px rounded data end, square at the baseline
+    const r = Math.min(4, bw / 2, h);
+    const y = H - B - h;
+    const d = `M${x},${H - B}V${y + r}Q${x},${y} ${x + r},${y}H${x + bw - r}Q${x + bw},${y} ${x + bw},${y + r}V${H - B}Z`;
+    const bar = sv("path", { d });
+    bar.style.fill = "var(--series)";
+    g.append(bar);
+    if (rounds.length <= 16 || i % Math.ceil(rounds.length / 16) === 0) {
+      const label = sv("text", { class: "axis", x: x + bw / 2, y: H - 6, "text-anchor": "middle" });
+      label.textContent = round;
+      svg.append(label);
+    }
+    const hit = sv("rect", { x: L + i * slot, y: T, width: slot, height: H - T - B, fill: "transparent" });
+    hit.addEventListener("pointerenter", () => {
+      bar.style.fill = "#6aa6ee";
+      mount(tip, [el("div", { class: "when", text: `round ${round}` }),
+                  el("b", { text: `${fmtInt(n)} game${n === 1 ? "" : "s"}` }),
+                  el("div", { class: "when", text: `${fmtPct(total ? n / total : 0)} of them` })]);
+      card.append(tip);
+      const box = svg.getBoundingClientRect(), cardBox = card.getBoundingClientRect();
+      tip.style.left = `${Math.min(cardBox.width - 130, box.left - cardBox.left + ((x + bw) / W) * box.width + 8)}px`;
+      tip.style.top = `${box.top - cardBox.top + (y / H) * box.height - 20}px`;
+      tip.style.opacity = 1;
+    });
+    hit.addEventListener("pointerleave", () => { bar.style.fill = "var(--series)"; tip.style.opacity = 0; });
+    svg.append(hit);
+  });
+  mount(plot, [svg]);
+}
+
+// ------------------------------------------------------------------------------------------------ render
+function renderStage(d) {
+  const s = (d && d.stats) || {};
+  document.getElementById("s-best").textContent = s.best_round == null ? "–" : String(s.best_round);
+  document.getElementById("s-avg").textContent = s.avg_round == null ? "–" : s.avg_round.toFixed(1);
+  document.getElementById("s-acc").textContent = fmtPct(s.accuracy);
+  document.getElementById("s-surv").textContent = fmtClock(s.avg_survival_s);
+  document.getElementById("s-note").textContent = s.games
+    ? `Best of all ${fmtInt(s.games)} games in ${d.run}; the rest averaged over the last ${s.window}.`
+    : "Waiting for the run's first game.";
+}
+
+function renderProgress(d) {
+  const p = d && d.ppo;
+  const holder = document.getElementById("progress"), tiles = document.getElementById("tiles");
+  if (!p) {
+    mount(holder, [el("p", { class: "empty-note", text: d && d.run ? `${d.run} has not written a training row yet.` : "No PPO run has played a game yet." })]);
+    mount(tiles, []);
+    tiles.hidden = true;
+    return;
+  }
+  tiles.hidden = false;
+  const pct = p.progress == null ? null : Math.min(100, 100 * p.progress);
+  const status = d.live ? (p.warmup ? "warming up the critic" : "training now") : (p.status === "done" ? "finished" : "stopped");
+  mount(holder, [
+    el("div", { class: "top" }, [el("span", { class: "run", text: d.run }),
+                                 el("span", { class: "kind", text: [d.env, status].filter(Boolean).join(" · ") })]),
+    pct != null ? el("div", { class: "bar", role: "progressbar", "aria-valuenow": pct.toFixed(0), "aria-valuemin": 0, "aria-valuemax": 100,
+                              "aria-label": "Training progress" }, [el("i", { style: `width:${pct.toFixed(1)}%` })]) : null,
+    el("div", { class: "text", text: [p.progress_text, pct != null ? `${pct.toFixed(0)}%` : null].filter(Boolean).join(" · ") }),
+  ]);
+  const tile = (label, value, sub) => el("div", {}, [el("span", { class: "label", text: label }), el("span", { class: "value", text: value }),
+                                                     sub ? el("span", { class: "sub", text: sub }) : null]);
+  mount(tiles, [
+    tile("Steps", fmtValue(p.steps), "decisions the agent has made"),
+    tile("Updates", fmtInt(p.updates), "PPO gradient rounds"),
+    tile("Games played", fmtInt(p.episodes), p.actors ? `${p.actors} game${p.actors === 1 ? "" : "s"} at once` : null),
+    tile("Steps/s", fmtInt(p.sps), "across every game"),
+    tile("Training time", fmtDuration(p.elapsed_s), null),
+    tile("Time left", d.live && p.eta_s ? fmtDuration(p.eta_s) : "–", d.live ? "at this pace" : null),
+  ]);
+}
+
+function renderCharts(d) {
+  const c = (d && d.curves) || { x: [] }, s = (d && d.stats) || {};
+  const holder = document.getElementById("play-charts");
+  const w = d ? d.window : 100;
+  const cards = [
+    [chartCard("Round reached", `mean of the last ${w} games, by game`, s.avg_round != null ? s.avg_round.toFixed(1) : null), c.round,
+     { fmtY: (v) => v.toFixed(1), yMin: 1 }],
+    [chartCard("Survival time", `mean of the last ${w} games, by game`, s.avg_survival_s != null ? fmtClock(s.avg_survival_s) : null), c.survival,
+     { fmtY: fmtClock, yMin: 0 }],
+    [chartCard("Shot accuracy", `landed over fired, last ${w} games, by game`, s.accuracy != null ? fmtPct(s.accuracy) : null), c.accuracy,
+     { fmtY: fmtPct, yMin: 0 }],
+  ];
+  mount(holder, cards.map(([card]) => card));
+  for (const [card, ys, opts] of cards) lineChart(card, c.x || [], ys || [], opts);
+
+  const learn = document.getElementById("learn-charts");
+  const series = (d && d.ppo && d.ppo.series) || {};
+  const want = ["return_mean", "round_reached_mean", "entropy", "explained_variance"];
+  const learnCards = want.filter((k) => series[k]).map((k) => {
+    const s = series[k];
+    const card = chartCard(s.label, s.hint + (s.trend ? ` · ${s.trend}` : ""), fmtValue(s.last));
+    return [card, s];
+  });
+  mount(learn, learnCards.length ? learnCards.map(([card]) => card)
+    : [el("p", { class: "empty-note", text: "The run's curves appear after its first PPO updates." })]);
+  for (const [card, s] of learnCards) lineChart(card, s.x, s.y, { xName: "step", fmtX: fmtValue });
+
+  const health = document.getElementById("health");
+  mount(health, ((d && d.ppo && d.ppo.health) || []).map((h) => el("div", { class: "card" }, [
+    el("span", { class: "label", text: h.label }), el("span", { class: "value", text: fmtValue(h.value) }),
+    h.hint ? el("span", { class: "sub", text: h.hint }) : null,
+  ])));
+}
+
+function renderGames(d) {
+  const holder = document.getElementById("games");
+  const games = (d && d.recent) || [];
+  if (!games.length) { mount(holder, [el("p", { class: "empty-note", text: "No games yet." })]); }
+  else {
+    const now = Date.now() / 1000;
+    const head = el("tr", {}, [["Game", "num"], ["Round", "num"], ["Survived", "num"], ["Accuracy", "num"], ["Ended", ""], ["When", "num"]]
+      .map(([t, c]) => el("th", { class: c, scope: "col", text: t })));
+    const rows = games.map((g) => el("tr", {}, [
+      el("td", { class: "num dim", text: `#${fmtInt(g.n)}` }), el("td", { class: "num", text: g.round == null ? "–" : String(g.round) }),
+      el("td", { class: "num", text: fmtClock(g.seconds) }), el("td", { class: "num", text: fmtPct(g.accuracy) }),
+      el("td", { class: "dim", text: REASON[g.reason] || g.reason || "–" }),
+      el("td", { class: "num dim", text: g.t ? `${fmtDuration(Math.max(0, now - g.t))} ago` : "–" }),
+    ]));
+    mount(holder, [el("table", {}, [el("thead", {}, [head]), el("tbody", {}, rows)])]);
+  }
+  roundBars(document.getElementById("rounds"), d && d.rounds);
+}
+
+function renderStatus() {
+  const node = document.getElementById("status");
+  const d = state.data;
+  const age = d && d.at ? Math.max(0, Date.now() / 1000 - d.at) : null;
+  let flag, text;
+  if (state.fetchedAt && age != null && age <= OFFLINE_AFTER_S) {
+    flag = el("span", { class: "flag good", text: "LIVE" });
+    text = `Numbers updated ${Math.round(age)}s ago, straight from the PC it trains on.`;
+  } else {
+    flag = el("span", { class: "flag warning", text: "OFFLINE" });
+    text = age == null ? "The PC is not reporting, and no run has played a game yet."
+      : `The PC last reported ${fmtDuration(age)} ago; these are its last numbers.`;
+  }
+  mount(node, [flag, document.createTextNode(text)]);
+}
+
+function render() {
+  const d = state.data;
+  renderStage(d);
+  renderProgress(d);
+  renderCharts(d);
+  renderGames(d);
+  renderStatus();
+}
+
+function shape(d) {
+  return JSON.stringify([d.run, d.live, d.stats, d.ppo && d.ppo.updates, d.ppo && d.ppo.status, d.recent && d.recent.length && d.recent[0].n]);
+}
+
+async function poll() {
+  try {
+    const response = await fetch(SRC, { cache: "no-store" });
+    if (!response.ok) throw new Error(String(response.status));
+    const data = await response.json();
+    // Redraw only when there is something new to draw, so a reader's hover survives the 5 s poll.
+    const changed = !state.data || shape(data) !== shape(state.data);
+    state.data = data;
+    state.fetchedAt = Date.now();
+    if (changed) render();
+  } catch (e) { /* keep what is on the page; the status line says how old it is */ }
+  renderStatus();
+}
+
+render();
+poll();
+setInterval(() => { if (!document.hidden) poll(); }, 5000);
+setInterval(renderStatus, 1000);
+let resizeTimer = null;
+addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(() => { renderCharts(state.data); renderGames(state.data); }, 150); });
+</script>
+</body>
+</html>

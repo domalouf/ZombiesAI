@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stream Overlay</title>
+<!--fonts-->
+<link rel="stylesheet" href="fonts/fonts.css">
+<!--/fonts-->
+<style>
+  /* The overlay on the Twitch stream: OBS's browser source draws this page over the game, so the page is
+     transparent and only the panel is drawn. Add the source at the canvas size (1920x1080) and leave it
+     there; the query string places it. Same bunker slate as the site's other pages, a little see-through. */
+  :root {
+    --panel: rgba(26, 33, 31, 0.84);
+    --line: rgba(232, 228, 216, 0.16);
+    --chalk: #e8e4d8;
+    --chalk-dim: #aab2aa;
+    --sanguine: #d0593f;
+    --amber: #ddb04d;
+    --good: #0ca30c;
+    --display: "Big Shoulders Stencil Display", Impact, "Arial Narrow", sans-serif;
+    --ui: "Sofia Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+    --scale: 1;
+    --inset: 28px;
+  }
+  html, body { margin: 0; background: transparent; overflow: hidden; }
+  body { width: 100vw; height: 100vh; font: 15px/1.2 var(--ui); color: var(--chalk); }
+  .panel {
+    position: absolute;
+    display: grid;
+    gap: 6px;
+    padding: 9px 14px 10px 16px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--sanguine);
+    border-radius: 3px;
+    transform: scale(var(--scale));
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  }
+  .panel.tl { top: var(--inset); left: var(--inset); transform-origin: top left; }
+  .panel.tr { top: var(--inset); right: var(--inset); transform-origin: top right; }
+  .panel.bl { bottom: var(--inset); left: var(--inset); transform-origin: bottom left; }
+  .panel.br { bottom: var(--inset); right: var(--inset); transform-origin: bottom right; }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font: 700 11.5px/1 var(--ui);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--chalk-dim);
+  }
+  .head .live { display: inline-flex; align-items: center; gap: 5px; color: var(--chalk); }
+  .head .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .head .live[hidden] { display: none; }
+  .stats { display: grid; grid-template-columns: repeat(4, auto); gap: 0 20px; }
+  .panel.column .stats { grid-template-columns: auto auto; gap: 6px 20px; }
+  .stat { display: grid; gap: 2px; min-width: 64px; }
+  .stat .label { font: 600 12px/1 var(--ui); color: var(--chalk-dim); white-space: nowrap; }
+  .stat .value {
+    font: 800 34px/0.95 var(--display);
+    letter-spacing: 0.01em;
+    font-variant-numeric: tabular-nums;
+    transition: color 1.2s ease-out;
+  }
+  .stat .value.changed { color: var(--amber); transition: none; }
+  .foot { font: 500 11.5px/1 var(--ui); color: var(--chalk-dim); }
+</style>
+</head>
+<body>
+<div class="panel tl" id="panel" aria-live="polite">
+  <div class="head"><span>Zombies AI · PPO</span><span class="live" id="live" hidden>Training live</span></div>
+  <div class="stats">
+    <div class="stat"><span class="label">Best round</span><span class="value" id="best_round">–</span></div>
+    <div class="stat"><span class="label">Avg round</span><span class="value" id="avg_round">–</span></div>
+    <div class="stat"><span class="label">Accuracy</span><span class="value" id="accuracy">–</span></div>
+    <div class="stat"><span class="label">Avg survival</span><span class="value" id="avg_survival_s">–</span></div>
+  </div>
+  <div class="foot" id="foot">Waiting for the first game…</div>
+</div>
+<script>
+/* Query string, all optional:
+     corner=tl|tr|bl|br   which corner of the canvas (default tl: Nacht's HUD is along the bottom)
+     scale=1.25           size, for a canvas that is not 1080p or a stream that wants it bigger
+     inset=28             pixels from the canvas edges
+     layout=column        two by two instead of one row
+     src=URL              where stream.json is (default: the site's, beside this page)
+     demo=1               made-up numbers, to place it in OBS before a run has played a game */
+const q = new URLSearchParams(location.search);
+const panel = document.getElementById("panel");
+const corner = ["tl", "tr", "bl", "br"].includes(q.get("corner")) ? q.get("corner") : "tl";
+panel.className = `panel ${corner}` + (q.get("layout") === "column" ? " column" : "");
+if (Number(q.get("scale")) > 0) document.documentElement.style.setProperty("--scale", Number(q.get("scale")));
+if (q.get("inset") != null && Number.isFinite(Number(q.get("inset"))))
+  document.documentElement.style.setProperty("--inset", `${Number(q.get("inset"))}px`);
+const SRC = q.get("src") || "../../training/live/stream.json";
+
+function duration(s) {
+  if (s == null) return "–";
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}` : `${m}:${String(sec).padStart(2, "0")}`;
+}
+const FORMAT = {
+  best_round: (v) => v == null ? "–" : String(v),
+  avg_round: (v) => v == null ? "–" : v.toFixed(1),
+  accuracy: (v) => v == null ? "–" : `${(100 * v).toFixed(v < 0.1 ? 1 : 0)}%`,
+  avg_survival_s: duration,
+};
+
+function show(data) {
+  const s = (data && data.stats) || {};
+  for (const [key, fmt] of Object.entries(FORMAT)) {
+    const node = document.getElementById(key);
+    const text = fmt(s[key]);
+    if (node.textContent !== text) {
+      const first = node.textContent === "–";
+      node.textContent = text;
+      if (!first) {  // a new number glows amber and fades back, so a new best round is seen on stream
+        node.classList.add("changed");
+        requestAnimationFrame(() => requestAnimationFrame(() => node.classList.remove("changed")));
+      }
+    }
+  }
+  document.getElementById("live").hidden = !(data && data.live);
+  const foot = document.getElementById("foot");
+  if (!s.games) foot.textContent = "Waiting for the first game…";
+  else foot.textContent = `Averages over the last ${s.window} of ${s.games.toLocaleString("en-US")} games`
+    + (data.ppo && data.ppo.updates ? ` · update ${data.ppo.updates.toLocaleString("en-US")}` : "");
+}
+
+const DEMO = { live: true, stats: { games: 1234, window: 100, best_round: 9, avg_round: 4.6, accuracy: 0.318, avg_survival_s: 432 },
+               ppo: { updates: 812 } };
+
+async function poll() {
+  if (q.has("demo")) return show(DEMO);
+  try {
+    const response = await fetch(SRC, { cache: "no-store" });
+    if (response.ok) show(await response.json());
+  } catch (e) { /* keep the last numbers on screen; the next poll will do */ }
+}
+poll();
+setInterval(poll, 5000);
+</script>
+</body>
+</html>

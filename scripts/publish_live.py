@@ -1,5 +1,5 @@
-"""Keep domalouf.com/zombies/training/ live: push this machine and its training runs to the site every few seconds
-(viz/live_site.py). It only ever connects out -- nothing on this PC is opened to the network.
+"""Keep domalouf.com/zombies/training/ and the stream's page and overlay (/zombies/live/) live: push this machine,
+its training runs and the stream's numbers to the site every few seconds (viz/live_site.py). It only ever connects out -- nothing on this PC is opened to the network.
 
     uv run python scripts/publish_live.py --dest zombies-live@lts.lan:     # every 5 s, until Ctrl-C
     uv run python scripts/publish_live.py --once                           # write the files, push nothing
@@ -27,18 +27,21 @@ def main() -> None:
     parser.add_argument("--runs-every", type=float, default=60.0, help="seconds between rebuilds of runs.json")
     parser.add_argument("--out", type=Path, help="staging directory (default: $XDG_RUNTIME_DIR/zombiesai-live)")
     parser.add_argument("--once", action="store_true", help="sample, write the files once, and push only with --dest")
+    parser.add_argument("--stream-run", help="the run the stream overlay's numbers come from (default: the one "
+                                             "training now, the real game before the sim)")
     args = parser.parse_args()
     out = args.out or Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "zombiesai-live"
     if not args.dest and not args.once:
         parser.error("--dest (or ZOMBIES_LIVE_DEST) is where the site's zombies/training/live/ is; --once to try it")
 
     sampler = SystemSampler().start()
-    publisher = LivePublisher(REPO, out, args.dest, sampler=sampler, runs_every_s=args.runs_every)
+    publisher = LivePublisher(REPO, out, args.dest, sampler=sampler, runs_every_s=args.runs_every,
+                              stream_run=args.stream_run)
     time.sleep(2.5)  # the sampler's first rates need two samples
     try:
         if args.once:
             publisher.tick()
-            print(f"wrote {out}/machine.json and runs.json" + (f", pushed to {args.dest}" if args.dest else ""))
+            print(f"wrote {out}/machine.json, runs.json and stream.json" + (f", pushed to {args.dest}" if args.dest else ""))
             return
         print(f"publishing every {args.every:g}s to {args.dest} (Ctrl-C to stop)", flush=True)
         while True:
