@@ -6,3 +6,8 @@
 *.ckpt filter=lfs diff=lfs merge=lfs -text
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 *.npz filter=lfs diff=lfs merge=lfs -text
+
+# ...but the small data files the code and tests ship with stay plain git: they are committed as ordinary blobs,
+# and CI checks out without LFS, so routing them through the filter would turn them into pointers.
+src/zombiesai/**/*.npz -filter -diff -merge binary
+tests/fixtures/** -filter -diff -merge binary

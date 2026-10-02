@@ -29,8 +29,8 @@
   .panel {
     position: absolute;
     display: grid;
-    gap: 6px;
-    padding: 9px 14px 10px 16px;
+    gap: 7px;
+    padding: 11px 17px 12px 19px;
     background: var(--panel);
     border: 1px solid var(--line);
     border-left: 3px solid var(--sanguine);
@@ -46,26 +46,26 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    font: 700 11.5px/1 var(--ui);
+    font: 700 13.5px/1 var(--ui);
     letter-spacing: 0.14em;
     text-transform: uppercase;
     color: var(--chalk-dim);
   }
   .head .live { display: inline-flex; align-items: center; gap: 5px; color: var(--chalk); }
-  .head .live::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); }
+  .head .live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
   .head .live[hidden] { display: none; }
-  .stats { display: grid; grid-template-columns: repeat(4, auto); gap: 0 20px; }
-  .panel.column .stats { grid-template-columns: auto auto; gap: 6px 20px; }
-  .stat { display: grid; gap: 2px; min-width: 64px; }
-  .stat .label { font: 600 12px/1 var(--ui); color: var(--chalk-dim); white-space: nowrap; }
+  .stats { display: grid; grid-template-columns: repeat(4, auto); gap: 0 24px; }
+  .panel.column .stats { grid-template-columns: auto auto; gap: 7px 24px; }
+  .stat { display: grid; gap: 3px; min-width: 76px; }
+  .stat .label { font: 600 14px/1 var(--ui); color: var(--chalk-dim); white-space: nowrap; }
   .stat .value {
-    font: 800 34px/0.95 var(--display);
+    font: 800 41px/0.95 var(--display);
     letter-spacing: 0.01em;
     font-variant-numeric: tabular-nums;
     transition: color 1.2s ease-out;
   }
   .stat .value.changed { color: var(--amber); transition: none; }
-  .foot { font: 500 11.5px/1 var(--ui); color: var(--chalk-dim); }
+  .foot { font: 500 13.5px/1 var(--ui); color: var(--chalk-dim); }
 </style>
 </head>
 <body>
