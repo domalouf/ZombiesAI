@@ -60,8 +60,8 @@ class RecorderConfig:
     # How long the capture may keep repeating a stale frame before the recording gives up. Long enough to
     # glance at another workspace; short enough that a closed game does not leave the recorder running on.
     max_outage_seconds: float = 30.0
-    # A human plays in real time and the loop must wait for them. A sim source produces its own time, so
-    # waiting on the wall clock would only make CI slow.
+    # A human plays in real time and the loop must wait for them. A synthetic source produces its own time,
+    # so waiting on the wall clock would only make CI slow.
     realtime: bool = True
     input: InputConfig = None  # type: ignore[assignment]
     notes: str = ""
@@ -87,7 +87,7 @@ def record(
     annotations: dict | None = None,
     on_mark=None,
 ) -> Path:
-    """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished sim).
+    """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished game).
 
     `audio` is an optional `demos.audio.AudioRecorder`; without it the clip is exactly what it always was.
     `annotations` are extra top-level clip.json entries (the game's settings), written before the first step
@@ -359,8 +359,8 @@ def quality_report(clip, sample: int = 400) -> dict:
     needs the HUD parser M4 brings, so it is not here yet.)
 
     The expected lag is 0 for the real game -- the recorder shares one clock between log and capture, and
-    WaW answers a turn before the next frame (demo_0000 peaks sharply at 0) -- and the sim's own input
-    latency for a sim recording, which its manifest carries.
+    WaW answers a turn before the next frame (demo_0000 peaks sharply at 0) -- or the source's own input
+    latency where its manifest declares one (`source.latency_steps`, as the synthetic stand-in's does).
     """
     from zombiesai.demos import stats
 

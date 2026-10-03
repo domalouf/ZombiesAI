@@ -28,7 +28,8 @@ class RewardConfig:
 
 @dataclass(frozen=True, slots=True)
 class StepSignals:
-    """What a backend observed during one decision step, in HUD-level terms both sim and real can produce."""
+    """What a backend observed during one decision step, in HUD-level terms: the real game's HUD reader
+    (realgame/hud_reward.py) produces them, and so does the synthetic stand-in."""
 
     delta_points: float = 0.0
     repair_points: float = 0.0

@@ -86,6 +86,7 @@ def factored_action_space() -> spaces.MultiDiscrete:
 
 
 # ---------------------------------------------------------------- compact profile (value methods)
+# Nothing here uses it any more; it stays because SPEC_VERSION hashes it, and every clip and checkpoint is stamped.
 _COMPACT_SPECS = (
     {},
     {"forward": 1},
@@ -232,7 +233,8 @@ def decode_hud(encoded: np.ndarray) -> np.ndarray:
     return np.where(_HUD_LOG, np.expm1(x), x)
 
 
-# ---------------------------------------------------------------- sim state vector (state profile only)
+# ---------------------------------------------------------------- state vector (state profile only)
+# The old simulator's observation. Nothing here uses it any more; it stays because SPEC_VERSION hashes it.
 # Bearings are egocentric and clockwise-positive (to the right), matching the yaw bins.
 ZONES = ("start", "help", "upstairs")
 DOORS = ("help_door", "start_debris", "upstairs_door")

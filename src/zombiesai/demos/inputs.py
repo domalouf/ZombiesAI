@@ -423,9 +423,9 @@ class FlowCheck:
     # Fewer sampled turning steps than this and the verdict is "too_little_turning", not a guess.
     min_samples: int = 8
     # Spearman rank correlation of yaw against image motion at the best lag must reach this. demo_0000 (real,
-    # 10 minutes) scores 0.70-0.74 depending on the sample; sim clips 0.43-0.85; labels shuffled against their
-    # frames stay within +-0.15 on a few hundred samples but reach 0.34 on the ~40 turning steps of a short
-    # sim clip, hence the second condition.
+    # 10 minutes) scores 0.70-0.74 depending on the sample; recordings of the synthetic stand-in 0.73-0.90;
+    # labels shuffled against their frames stay within +-0.2 on a few hundred samples but reached 0.34 on a
+    # short clip's ~40 turning steps, hence the second condition.
     min_rank_correlation: float = 0.3
     # ...and be this many standard errors (rho * sqrt(n - 1)) clear of zero, so a short clip's lucky 0.34 at
     # one of seven lags is not read as signal (that one is 2.3). Real footage clears it six times over.
@@ -443,13 +443,14 @@ class FlowCheck:
     # px/deg, a 2x sensitivity error on real footage, is 19 px), and big flicks smear.
     slope_turn_deg: tuple[float, float] = (2.0, 8.0)
     # Horizontal FOV implied by the measured px/deg, on the 128-px observation. WaW's cg_fov 65-80 is 81-96
-    # degrees at 16:9 (Hor+); the sim renders 80 and the estimator reads 77-82 there; demo_0000 reads 83-86.
+    # degrees at 16:9 (Hor+); the synthetic stand-in draws 80 and the estimator reads 79.9-80.1 there;
+    # demo_0000 reads 83-86.
     # A 2x error in counts_per_degree moves an 80-96 degree FOV to 118-132 (labels too big) or 45-59 (too
     # small); the band sits between. A 1.5x error mostly passes -- it is the gross errors this is for. ADS does
     # not bias it: WaW scales sensitivity with zoom (demo_0000: 1.17 px/deg aiming down sights, 1.19 hip).
     fov_deg: tuple[float, float] = (62.0, 110.0)
     # Only for the hint in the "wrong_scale" reason: the FOV to assume when suggesting a corrected
-    # counts_per_degree. demo_0000 measures 85; the sim is 80; WaW's default is 81.
+    # counts_per_degree. demo_0000 measures 85; WaW's default is 81.
     typical_fov_deg: float = 85.0
 
 
@@ -486,8 +487,8 @@ def _px_per_deg(turns: np.ndarray, moved: np.ndarray) -> float:
 
     Zero shifts are dropped first. In the fitting range every plausible FOV moves the image at least a pixel,
     so a zero is the SAD search locking onto something that does not move with the view -- the gun, the HUD,
-    a textureless wall in the sim -- not a measurement; a short sim clip can be mostly those. The median of
-    per-step ratios then shrugs off the wrong locks that remain, but on the sim's few discrete turns it is
+    a stretch of featureless wall -- not a measurement; a short clip can be mostly those. The median of
+    per-step ratios then shrugs off the wrong locks that remain, but on a clip of a few discrete turns it is
     stuck on integer-pixel ratios (2 degrees reads 1.0 or 1.5 px/deg, never 1.33). So it only picks the
     inliers -- steps within 1.5 px or 30% of what it predicts -- and a least-squares fit through the origin
     over those gives the number, which averages the rounding away.
@@ -524,8 +525,8 @@ def yaw_flow_agreement(
     * **lag** -- where yaw and image motion agree best, by Spearman rank correlation (all lags in `by_lag`).
       The action recorded at step k is what the player commanded while looking at frame k, so on a correctly
       paired recording the response shows up between frames k+lag and k+lag+1, where lag is the closed-loop
-      delay in decisions: 0 for the recorder on the real game (demo_0000) and for a sim without input
-      latency. The sweep includes negative lags on purpose -- a peak there means the image moved *before*
+      delay in decisions: 0 for the recorder on the real game (demo_0000), and a source's own
+      `latency_steps` where it declares one. The sweep includes negative lags on purpose -- a peak there means the image moved *before*
       the hand did, which only a misaligned log produces. `lag_confidence` is the bootstrap share of
       resamples in which the best lag beats `expected_lag`.
     * **px_per_deg** and the **fov_deg** it implies -- a robust slope of image shift against labelled yaw at
