@@ -196,13 +196,73 @@ uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2   # --corr
 
 | Piece | Linux | Windows |
 |---|---|---|
-| Capture | `demos/x11_capture.py` (XWayland, MIT-SHM) | `dxcam` Desktop Duplication |
+| Capture | `demos/x11_capture.py` (XWayland, MIT-SHM) | gone (it was `dxcam` Desktop Duplication) |
 | Recording human input | `demos/evdev_input.py` | `demos/win32_input.py` |
 | Synthetic input | `realgame/uinput.py` | not written yet (`SendInput` ladder) |
 | Several games at once | `realgame/instances.py` + `realgame/xtest.py` (an X server per game; `docs/rl.md`) | not possible (one foreground window per desktop) |
 | Everything else | identical | identical |
 
-`demos/capture.py` picks the backend by platform, so nothing above the adapter layer knows which it got.
+`demos/capture.py` is X11 only: its `ScreenCapture` reads the game's window over MIT-SHM, on the desktop's
+XWayland or on an instance's own rootful Xwayland.
+
+## Per-step cost
+
+An actor has 66.7 ms per decision, and everything it spends there is CPU the game, the X server and the other
+actors on the PC do not get -- and, past the deadline, a wasted step. `scripts/bench_actor.py` times what a
+`RealGameEnv` step runs, single-threaded as actors run (OMP/OPENBLAS/MKL threads = 1), on synthetic BGRX frames
+with real HUD crops pasted in and a LiveAudio fed 10 ms chunks; only the X server's own copy into the shared
+segment (~1.4 ms at 1440p under Weston, `docs/rl.md`) and the policy's forward are left out.
+
+```sh
+uv run python scripts/bench_actor.py                # 2560x1440, 1920x1080, 1280x720
+```
+
+Median ms per step on the i9-9900K, 2026-10-02/03 (p99 within ~1.5x of the median except where other agents'
+jobs shared the machine):
+
+| 2560x1440 | before | after |
+|---|---:|---:|
+| grab: the frame as RGB | 15.05 | 0 (read in place) |
+| policy frame, 128x72 | 6.52 | 2.44 |
+| HUD crops (points, round, console, scoreboard) | 4.34 | 1.26 |
+| HUD parse | 1.41 | 1.16 |
+| console + scoreboard readers, tracker, signals, reward | 0.13 | 0.13 |
+| `LiveAudio.observe` | 2.04 | 1.68 |
+| **`capture.read`** | **26.11** | **3.64** |
+| **`RealGameEnv.step`, all of it** | **29.80** | **6.62** |
+| `RealGameEnv.step` at 1920x1080 | 19.07 | 8.09 |
+| `RealGameEnv.step` at 1280x720 | 9.44 | 3.79 |
+
+What changed:
+
+- **No full-frame copy.** `X11Grabber.grab()` converted each frame to a contiguous RGB array -- 15 ms at 1440p,
+  half the step. `ScreenCapture.read()` now takes `grab_bgrx()`, a view of the shared segment, and computes
+  everything from it in place before the next grab can overwrite it.
+- **Whole multiples are integer sums** (`frames.block_mean`). 2560x1440 is exactly 20x the policy frame and the
+  1440p HUD crops exactly 2x, so each output pixel is a block mean: summed as 16-bit lanes of 64-bit words, four
+  channels at once, and rounded half to even -- the true mean on any CPU or BLAS, where the float32 path rounded
+  a float32 sum. They differ only on exact ties, by one: never for 15x (1080p) or for the 2x crops, about one
+  value in 2,000 at 20x, one in 500 at 10x. Everything else -- 1080p crops, letterboxed boxes -- stays on the
+  float path, bit for bit as before (the console crop's 2:1 width is done without its dense product, and
+  provably the same bits).
+- **Hearing** (`demos/hearing.py`): `log_mel` reads its frames as a strided view instead of a gathered copy, and
+  the ring's window is built with one sorted merge instead of 24,064 binary searches. `features_at` is
+  untouched and the live feature is still the training feature to the bit (tested).
+- **The round reader** converts only the fifth of the crop its strokes read; same bits.
+
+At 1440p what is left is one pass over the 14.7 MB frame (~2 ms, nearly all of the policy frame), the HUD
+parser (~1 ms), hearing (~1.5 ms, half of it the FFTs) and ~1 ms of crops. 1080p is now dearer than 1440p:
+its crops are not whole multiples (2:3), so they take the float path.
+
+**Could the server scale the frame instead?** The X server could hand over a 128x72 frame: XRender composites
+with a scaling transform, and glamor would run it on the GPU, so neither the 14.7 MB copy nor the 2 ms pass
+would be the actor's. Not done, because it cannot be the same frame. XRender's filters are nearest, bilinear
+and convolution; a 20x20 box kernel is the only area average among them, its weights are 16.16 fixed point
+(1/400 is not representable, so they do not sum to one), and the result is rounded to 8 bits by whatever the
+GPU does -- not the exact mean every clip and BC checkpoint was made with. glamor also falls back to pixman
+(the server's CPU) for convolution filters, which moves the cost rather than removing it. It would need a test
+against a real glamor server, too: Xvfb has no glamor. If the full grab ever becomes the bottleneck, the
+cheaper exact step is to keep MIT-SHM but grab only what is read -- it is already all of it at 20x.
 
 ## Troubleshooting
 
