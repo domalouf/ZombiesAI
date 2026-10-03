@@ -4,11 +4,7 @@ import numpy as np
 import pytest
 
 from zombiesai import spec
-from zombiesai.agents.random_agent import RandomAgent
 from zombiesai.demos import clips as clipmod
-from zombiesai.rollout import run_episode
-from zombiesai.sim.nacht_sim import NachtSim, SimConfig
-from zombiesai.store.episode_store import EpisodeWriter, episode_dir
 
 
 def frame(value: int) -> np.ndarray:
@@ -112,16 +108,21 @@ def test_monte_carlo_returns_discount_backwards():
     np.testing.assert_allclose(clipmod.monte_carlo_returns(rewards, 0.5), [1.5, 1.0, 2.0])
 
 
-def test_an_episode_reads_as_a_clip_with_value_and_auxiliary_targets(tmp_path):
-    env = NachtSim(SimConfig(max_steps=120, obs_profile="render"))
-    writer = EpisodeWriter(episode_dir(tmp_path, 0))
-    run_episode(env, RandomAgent(0), seed=1, writer=writer)
-    clip = clipmod.clip_from_episode(episode_dir(tmp_path, 0))
-    assert clip.labelled and clip.n_steps > 0
-    assert clip.frames.shape[1:] == spec.PIXELS_SHAPE
-    assert clip.extra("mc_return") is not None and clip.extra("aux_damage") is not None
-    assert set(np.unique(clip.extra("aux_dpoints"))) <= set(range(len(clipmod.DPOINTS_EDGES) + 1))
-    assert clip.label_source == "agent"
+def test_a_clip_serves_the_value_and_auxiliary_targets_its_source_wrote(tmp_path):
+    """A recording with rewards can hand the value head Monte-Carlo returns and the auxiliary heads their targets;
+    video has none of them, so a trainer asks with extra() and gets None for a column the clip lacks."""
+    returns = clipmod.monte_carlo_returns(np.array([0.6, 0.0, -1.0, 0.1]), 0.9)
+    writer = clipmod.ClipWriter(tmp_path / "c", source={"kind": "test"}, label_source="agent")
+    for k, gained in enumerate((60, 0, 0, 10)):
+        writer.add(frame(k), spec.make_action(), extras={
+            "mc_return": np.float32(returns[k]),
+            "aux_dpoints": np.uint8(np.digitize(gained, clipmod.DPOINTS_EDGES)),
+            "aux_damage": np.uint8(k == 2),
+        })
+    clip = clipmod.load_clip(writer.close())
+    np.testing.assert_allclose(clip.extra("mc_return"), returns, rtol=1e-6)
+    assert clip.extra("aux_dpoints").tolist() == [2, 0, 0, 1] and clip.extra("aux_damage").tolist() == [0, 0, 1, 0]
+    assert clip.extra("not_a_column") is None and clip.label_source == "agent" and clip.usable().all()
 
 
 def test_iter_clips_finds_every_clip_under_a_root(tmp_path):

@@ -10,7 +10,7 @@ from dataclasses import asdict
 import numpy as np
 import pytest
 import torch
-from test_audio import RATE, FakeStream, recorded_audio, sim_recording
+from test_audio import RATE, FakeStream, recorded_audio, synthetic_recording
 
 from zombiesai import spec
 from zombiesai.demos import bc
@@ -92,12 +92,12 @@ def test_log_mel_refuses_a_window_of_the_wrong_length():
 @pytest.fixture(scope="module")
 def heard_clip(tmp_path_factory):
     stream = FakeStream(seconds=4.0, origin=time.monotonic() - 0.5)
-    return sim_recording(tmp_path_factory.mktemp("heard"), audio=AudioRecorder(stream, compress=False))
+    return synthetic_recording(tmp_path_factory.mktemp("heard"), audio=AudioRecorder(stream, compress=False))
 
 
 @pytest.fixture(scope="module")
 def silent_clip(tmp_path_factory):
-    return sim_recording(tmp_path_factory.mktemp("silent"))
+    return synthetic_recording(tmp_path_factory.mktemp("silent"))
 
 
 def test_clip_features_are_the_feature_function_at_each_steps_frame(heard_clip):
@@ -222,7 +222,7 @@ def test_a_policy_that_hears_trains_saves_and_plays_with_or_without_sound(heard_
     assert agent.audio_features == CFG
     frame = np.zeros(spec.PIXELS_SHAPE, np.uint8)
     agent.act({"pixels": frame, "audio": clip_features(heard_clip, CFG, None)[5], "audio_mask": 1.0})
-    agent.act({"pixels": frame})  # the sim, or a dead stream: played deaf
+    agent.act({"pixels": frame})  # a dead stream: played deaf
 
 
 # ------------------------------------------------------------------------------------------ live side

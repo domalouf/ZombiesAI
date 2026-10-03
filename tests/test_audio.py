@@ -9,13 +9,12 @@ import numpy as np
 import pytest
 
 from zombiesai import spec
-from zombiesai.agents.scripted import ScriptedAgent
 from zombiesai.demos import audio as audiomod
 from zombiesai.demos.audio import INDEX_DTYPE, AudioRecorder, ClipAudio, PulseMonitorStream, chunk_offsets
-from zombiesai.demos.capture import SimSource
 from zombiesai.demos.clips import load_clip
 from zombiesai.demos.inputs import InputConfig
 from zombiesai.demos.recorder import RecorderConfig, record
+from zombiesai.synthetic import SyntheticSource
 
 RATE = 48_000
 CHUNK = 480  # 10 ms, what parec delivers at --latency-msec=10
@@ -215,8 +214,8 @@ def test_a_stream_that_dies_mid_recording_is_noted_and_keeps_what_it_had(tmp_pat
 CONFIG = InputConfig(counts_per_degree=10.0)
 
 
-def sim_recording(tmp_path, steps=40, audio=None):
-    source = SimSource(ScriptedAgent(), seed=0, hardness=0.4, max_steps=steps)
+def synthetic_recording(tmp_path, steps=40, audio=None):
+    source = SyntheticSource(seed=0, max_steps=steps)
     config = RecorderConfig(max_steps=steps, realtime=False, input=CONFIG)
     path = record(source, source, tmp_path / "demo", config, stop=lambda: source.done, progress_every=0, audio=audio)
     return load_clip(path)
@@ -225,7 +224,7 @@ def sim_recording(tmp_path, steps=40, audio=None):
 def test_a_recording_with_audio_maps_each_step_to_the_sound_playing_at_its_frame(tmp_path):
     # Audio that started playing 0.5 s before the recorder -- as it does, since capture opens before t0.
     stream = FakeStream(seconds=4.0, origin=time.monotonic() - 0.5)
-    clip = sim_recording(tmp_path, audio=AudioRecorder(stream, compress=False))
+    clip = synthetic_recording(tmp_path, audio=AudioRecorder(stream, compress=False))
     manifest = json.loads((clip.path / "clip.json").read_text())
     meta = manifest["audio"]
     assert meta["rate"] == RATE and meta["channels"] == 2 and meta["source"]["device"] == "fake.monitor"
@@ -240,7 +239,7 @@ def test_a_recording_with_audio_maps_each_step_to_the_sound_playing_at_its_frame
 
 def test_a_recording_that_never_closed_still_knows_where_step_zero_was(tmp_path):
     stream = FakeStream(seconds=4.0, origin=time.monotonic() - 0.5)
-    clip = sim_recording(tmp_path, audio=AudioRecorder(stream, compress=False))
+    clip = synthetic_recording(tmp_path, audio=AudioRecorder(stream, compress=False))
     manifest = json.loads((clip.path / "clip.json").read_text())
     del manifest["summary"]
     (clip.path / "clip.json").write_text(json.dumps(manifest))
@@ -249,7 +248,7 @@ def test_a_recording_that_never_closed_still_knows_where_step_zero_was(tmp_path)
 
 
 def test_recording_without_audio_is_unchanged(tmp_path):
-    clip = sim_recording(tmp_path)
+    clip = synthetic_recording(tmp_path)
     assert "audio" not in clip.manifest
     assert clip.audio() is None and clip.audio_for_step(0) is None
     assert not list(clip.path.glob("audio*"))
@@ -262,7 +261,7 @@ def test_an_audio_stream_that_will_not_open_stops_the_recording_before_it_starts
             raise RuntimeError("parec not found")
 
     with pytest.raises(RuntimeError, match="parec"):
-        sim_recording(tmp_path, audio=AudioRecorder(Broken()))
+        synthetic_recording(tmp_path, audio=AudioRecorder(Broken()))
 
 
 def test_clip_audio_reports_its_shape():

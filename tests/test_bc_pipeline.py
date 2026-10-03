@@ -1,4 +1,5 @@
-"""The whole path from recorded play to a policy that can be handed to the sim, on one small run."""
+"""The whole path from recorded play to a policy that plays, on one small run: the synthetic stand-in's scripted
+player recorded exactly as a human demo is, an inverse dynamics model trained on that, and behavioural cloning."""
 
 import json
 
@@ -7,16 +8,15 @@ import pytest
 import torch
 
 from zombiesai import spec
-from zombiesai.agents.scripted import ScriptedAgent
 from zombiesai.demos import bc, idm, stats
-from zombiesai.demos.capture import SimSource
-from zombiesai.demos.clips import load_clip
+from zombiesai.demos.agent import BCAgent
+from zombiesai.demos.clips import DPOINTS_EDGES, ClipWriter, load_clip, monte_carlo_returns
 from zombiesai.demos.dataset import ClipDataset, DataConfig
 from zombiesai.demos.inputs import InputConfig
 from zombiesai.demos.losses import factored_cross_entropy, head_confidence, head_predictions
 from zombiesai.demos.recorder import RecorderConfig, record
-from zombiesai.rl.agent import load_agent
-from zombiesai.sim.nacht_sim import NachtSim, SimConfig
+from zombiesai.reward import REWARD_TERMS
+from zombiesai.synthetic import ScriptedPlayer, SyntheticConfig, SyntheticSource, SyntheticWorld
 
 STEPS = 160
 
@@ -27,7 +27,7 @@ def demos(tmp_path_factory):
     config = RecorderConfig(max_steps=STEPS, realtime=False, input=InputConfig(counts_per_degree=10.0))
     paths = []
     for seed in range(3):
-        source = SimSource(ScriptedAgent(), seed=seed, hardness=0.4, max_steps=STEPS)
+        source = SyntheticSource(seed=seed, max_steps=STEPS)
         paths.append(record(source, source, root / f"demo_{seed}", config, stop=lambda s=source: s.done,
                             progress_every=0))
     return [load_clip(p) for p in paths]
@@ -91,7 +91,7 @@ def test_the_idm_labels_video_it_has_never_seen(idm_checkpoint, demos, tmp_path)
     assert labelled.usable(min_confidence=0.5).sum() <= labelled.n_steps
 
 
-def test_behavioural_cloning_produces_a_policy_the_sim_can_play(demos, tmp_path):
+def test_behavioural_cloning_produces_a_policy_that_plays(demos, tmp_path):
     config = bc.BCConfig(
         frame_stack=2, hidden=64, epochs=1, batch_size=16, max_batches_per_epoch=4,
         val_fraction=0.34, device="cpu", seed=0,
@@ -99,17 +99,16 @@ def test_behavioural_cloning_produces_a_policy_the_sim_can_play(demos, tmp_path)
     checkpoint = bc.train(demos, config, tmp_path / "bc")
     assert (tmp_path / "bc" / "config.json").exists() and (tmp_path / "bc" / "report.json").exists()
 
-    agent = load_agent(checkpoint)
-    assert agent.obs_profile == "render"
-    env = NachtSim(SimConfig(hardness=0.4, max_steps=30, obs_profile="render"))
-    obs, _ = env.reset(seed=99)
+    agent = BCAgent(checkpoint)
+    world = SyntheticWorld(SyntheticConfig(max_steps=30), seed=99)
+    obs = world.observe()
     agent.reset()
     taken = []
     for _ in range(30):
         action = agent.act(obs)
         assert spec.action_tuple(action)  # a valid factored action, in range on every head
         taken.append(action)
-        obs, _, terminated, truncated, _ = env.step(action)
+        obs, _, terminated, truncated, _ = world.step(action)
         if terminated or truncated:
             break
     assert len(taken) > 1
@@ -119,15 +118,15 @@ def test_behavioural_cloning_produces_a_policy_the_sim_can_play(demos, tmp_path)
 def test_a_bc_policy_refuses_observations_without_pixels(demos, tmp_path):
     config = bc.BCConfig(frame_stack=2, hidden=32, epochs=1, batch_size=16, max_batches_per_epoch=2,
                          val_fraction=0.34, device="cpu")
-    agent = load_agent(bc.train(demos, config, tmp_path / "bc2"))
+    agent = BCAgent(bc.train(demos, config, tmp_path / "bc2"))
     with pytest.raises(KeyError):
-        agent.act({"state": np.zeros(spec.STATE_DIM, np.float32)})
+        agent.act({"hud": np.zeros(spec.HUD_DIM, np.float32)})
 
 
 def test_the_agent_stacks_frames_the_way_the_loader_does(demos, tmp_path):
     config = bc.BCConfig(frame_stack=3, hidden=32, epochs=1, batch_size=16, max_batches_per_epoch=2,
                          val_fraction=0.34, device="cpu")
-    agent = load_agent(bc.train(demos, config, tmp_path / "bc3"))
+    agent = BCAgent(bc.train(demos, config, tmp_path / "bc3"))
     agent.reset()
     first = agent.stack(np.full(spec.PIXELS_SHAPE, 7, np.uint8))
     assert first.shape == (3, *spec.PIXELS_SHAPE)
@@ -136,17 +135,32 @@ def test_the_agent_stacks_frames_the_way_the_loader_does(demos, tmp_path):
     assert [int(f[0, 0, 0]) for f in second] == [7, 7, 9]  # oldest first, current last
 
 
-def test_bc_trains_the_value_and_auxiliary_heads_when_the_clips_carry_them(tmp_path):
-    from zombiesai.agents.random_agent import RandomAgent
-    from zombiesai.demos.clips import clip_from_episode
-    from zombiesai.rollout import run_episode
-    from zombiesai.store.episode_store import EpisodeWriter, episode_dir
+def played_clip(path, seed: int, steps: int = 120, gamma: float = 0.995):
+    """A clip of the scripted player in the synthetic world that carries what a recording with rewards can: a
+    Monte-Carlo return for the value head, and the "did I just score" and "am I being hit" targets."""
+    world, player = SyntheticWorld(SyntheticConfig(max_steps=steps), seed=seed), ScriptedPlayer(seed)
+    frames, actions, rewards, gained, hurt = [], [], [], [], []
+    done = False
+    while not done:
+        frames.append(world.render())
+        actions.append(player.act(world))
+        points = world.points
+        _, reward, terminated, truncated, info = world.step(actions[-1])
+        rewards.append(reward)
+        gained.append(world.points - points)
+        hurt.append(info["terms"][REWARD_TERMS.index("damage")] < 0)
+        done = terminated or truncated
+    returns = monte_carlo_returns(np.asarray(rewards), gamma)
+    writer = ClipWriter(path, source={"kind": "synthetic", "seed": seed}, label_source="agent")
+    for k, (frame, action) in enumerate(zip(frames, actions)):
+        writer.add(frame, action, extras={"mc_return": np.float32(returns[k]),
+                                          "aux_dpoints": np.uint8(np.digitize(gained[k], DPOINTS_EDGES)),
+                                          "aux_damage": np.uint8(hurt[k])})
+    return load_clip(writer.close())
 
-    for index in range(2):
-        env = NachtSim(SimConfig(hardness=0.4, max_steps=120, obs_profile="render"))
-        writer = EpisodeWriter(episode_dir(tmp_path / "episodes", index))
-        run_episode(env, RandomAgent(index), seed=index, writer=writer)
-    clips = [clip_from_episode(episode_dir(tmp_path / "episodes", i)) for i in range(2)]
+
+def test_bc_trains_the_value_and_auxiliary_heads_when_the_clips_carry_them(tmp_path):
+    clips = [played_clip(tmp_path / f"played_{seed}", seed) for seed in range(2)]
 
     config = bc.BCConfig(frame_stack=2, hidden=32, epochs=1, batch_size=16, max_batches_per_epoch=3,
                          val_fraction=0.0, device="cpu")

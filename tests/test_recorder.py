@@ -4,8 +4,7 @@ import numpy as np
 import pytest
 
 from zombiesai import spec
-from zombiesai.agents.scripted import ScriptedAgent
-from zombiesai.demos.capture import ClipPlayback, ReplayInput, SimSource
+from zombiesai.demos.capture import ClipPlayback, ReplayInput
 from zombiesai.demos.clips import (
     FLAG_BAD_STEP,
     FLAG_CLIP_START,
@@ -14,37 +13,21 @@ from zombiesai.demos.clips import (
 )
 from zombiesai.demos.inputs import InputConfig, read_log, synthesize
 from zombiesai.demos.recorder import RecorderConfig, quality_report, record, requantize, wait_to_start
-from zombiesai.sim.nacht_sim import NachtSim, SimConfig
-from zombiesai.sim.render import FOV_DEG
+from zombiesai.synthetic import FOV_DEG, ScriptedPlayer, SyntheticSource, SyntheticWorld, scripted_actions
 
 CONFIG = InputConfig(counts_per_degree=10.0)
 
 
 def recorded(tmp_path, steps=120, seed=0):
-    source = SimSource(ScriptedAgent(), seed=seed, hardness=0.4, max_steps=steps)
+    source = SyntheticSource(seed=seed, max_steps=steps)
     config = RecorderConfig(max_steps=steps, realtime=False, input=CONFIG, notes="test")
     path = record(source, source, tmp_path / "demo", config, stop=lambda: source.done, progress_every=0)
     return load_clip(path), source
 
 
-def true_actions(steps, seed=0, hardness=0.4):
-    env = NachtSim(SimConfig(hardness=hardness, max_steps=steps, obs_profile="render"))
-    obs, _ = env.reset(seed=seed)
-    agent = ScriptedAgent()
-    agent.reset()
-    out = []
-    for _ in range(steps):
-        action = np.asarray(agent.act({**obs, "state": env.state()}))
-        out.append(action)
-        obs, _, terminated, truncated, _ = env.step(action)
-        if terminated or truncated:
-            break
-    return np.array(out, dtype=np.uint8)
-
-
 def test_a_recording_labels_every_frame_with_what_the_player_actually_did(tmp_path):
     clip, _ = recorded(tmp_path)
-    expected = true_actions(120)[: clip.n_steps]
+    expected = scripted_actions(120)[: clip.n_steps]
     np.testing.assert_array_equal(clip.actions, expected)
     assert clip.label_source == "input_log"
     assert not (clip.flags & FLAG_BAD_STEP).any()
@@ -53,15 +36,12 @@ def test_a_recording_labels_every_frame_with_what_the_player_actually_did(tmp_pa
 def test_the_frame_is_the_one_the_player_was_looking_at_when_they_acted(tmp_path):
     """Off-by-one in the pairing is the bug that looks like 'the model can't aim' for a week."""
     clip, _ = recorded(tmp_path)
-    env = NachtSim(SimConfig(hardness=0.4, max_steps=120, obs_profile="render"))
-    obs, _ = env.reset(seed=0)
-    agent = ScriptedAgent()
-    agent.reset()
+    world, player = SyntheticWorld(seed=0), ScriptedPlayer(0)  # the game and the hands the source recorded
     for step in range(min(clip.n_steps, 20)):
-        np.testing.assert_array_equal(clip.frames[step], obs["pixels"])
-        action = np.asarray(agent.act({**obs, "state": env.state()}))
+        np.testing.assert_array_equal(clip.frames[step], world.render())
+        action = np.asarray(player.act(world))
         np.testing.assert_array_equal(clip.actions[step], action.astype(np.uint8))
-        obs, *_ = env.step(action)
+        world.step(action)
 
 
 def test_the_raw_input_log_is_kept_and_reproduces_the_labels(tmp_path):
@@ -86,7 +66,7 @@ def test_requantizing_at_a_different_sensitivity_rescales_the_look(tmp_path):
 def test_the_manifest_records_where_the_frames_came_from(tmp_path):
     clip, _ = recorded(tmp_path)
     manifest = json.loads((clip.path / "clip.json").read_text())
-    assert manifest["source"]["kind"] == "sim"
+    assert manifest["source"]["kind"] == "synthetic"
     assert manifest["config"]["recorder"]["input"]["counts_per_degree"] == 10.0
     assert manifest["summary"]["notes"] == "test" and "t0_mono" in manifest["summary"]
 
@@ -116,18 +96,18 @@ def test_a_finished_recording_reports_whether_it_is_worth_keeping(tmp_path):
     assert 0.0 <= report["mean_confidence"] <= 1.0
     assert report["clamped_looks"] == 0.0
     flow = report["yaw_flow"]
-    # The scripted agent turns, the frames move with it, and the response is immediate in the sim's own
-    # timing here -- so the best-fitting lag is the one the recorder's pairing implies.
+    # The scripted player turns, the frames move with it, and this world answers a turn at once -- so the
+    # best-fitting lag is the one the recorder's pairing implies.
     assert flow["verdict"] == "ok" and flow["lag"] == 0 and flow["rank_correlation"] > 0.5
-    # ...and the pixels per degree give back the renderer's lens, to within the integer-pixel search.
+    # ...and the pixels per degree give back the lens it was drawn with, to within the integer-pixel search.
     assert flow["fov_deg"] == pytest.approx(FOV_DEG, abs=6.0)
     assert set(report["behaviour"]) >= {"fire_duty", "abs_yaw_deg_per_s"}
 
 
-def test_the_quality_check_expects_the_sims_own_input_latency(tmp_path):
-    """A sim episode can draw a latency of a decision or two; that is the lag its recording should peak at,
-    and the manifest says so rather than the check calling it misaligned."""
-    source = SimSource(ScriptedAgent(), seed=2, hardness=0.4, max_steps=300)
+def test_the_quality_check_expects_the_sources_own_input_latency(tmp_path):
+    """A source whose picture answers the hand a decision late should peak at that lag; its manifest says so,
+    rather than the check calling a correctly paired recording misaligned."""
+    source = SyntheticSource(seed=2, max_steps=300, latency_steps=1)
     assert source.describe()["latency_steps"] == 1
     config = RecorderConfig(max_steps=300, realtime=False, input=CONFIG)
     clip = load_clip(record(source, source, tmp_path / "demo", config, stop=lambda: source.done, progress_every=0))
@@ -306,7 +286,7 @@ def test_the_mark_key_flags_every_step_whose_window_was_not_play(tmp_path, capsy
 
 
 def test_a_held_mark_key_repeating_is_one_toggle_not_many(tmp_path):
-    """Windows Raw Input repeats the make code while a key is held; that must not flicker the marking."""
+    """A log can hold a key's down again and again while it is held; that must not flicker the marking."""
     held = [{"t": 3.3 + 0.05 * i, "type": "key", "code": "f8", "down": True} for i in range(12)]
     held.append({"t": 4.0, "type": "key", "code": "f8", "down": False})
     clip, _ = marked_recording(tmp_path, presses=(), extra=held)
