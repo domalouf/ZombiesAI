@@ -16,12 +16,13 @@ GPU_ROW = ("0, NVIDIA GeForce RTX 5070, 610.57.04, 97, 41, 8368, 12227, 71, 231.
 class FakeGpu:
     def __init__(self, rows):
         self.rows = rows
+        self.closed = 0
 
     def read(self):
         return self.rows
 
     def close(self):
-        pass
+        self.closed += 1
 
 
 def write(path: Path, text: str) -> None:
@@ -85,6 +86,22 @@ def test_two_samples_give_the_rates_btop_shows(tmp_path):
     assert point["cpu"] == 75.0 and point["gpu_temp"] == 71 and round(point["vram"]) == 68 and point["net_rx"] == 2**20
     assert sampler.history(since=102.0) == []  # the page asks only for what it has not got
     assert sampler.payload()["specs"]["gpus"][0]["name"] == "NVIDIA GeForce RTX 5070"
+
+
+def test_a_paused_sampler_stops_nvidia_smi_and_takes_no_rate_across_the_pause(tmp_path):
+    gpu = FakeGpu([])
+    sampler = SystemSampler(proc=tmp_path / "proc", sys=tmp_path / "sys", gpu=gpu)
+    machine(tmp_path, idle=1000, busy=1000, core_busy=500, read_sectors=0, rx=0, ticks=0)
+    sampler.sample(now=100.0)
+    sampler.pause()
+    sampler.pause()
+    assert sampler.paused and gpu.closed == 1
+    sampler.resume()
+    assert not sampler.paused
+    machine(tmp_path, idle=1100, busy=1300, core_busy=750, read_sectors=0, rx=0, ticks=0)
+    assert sampler.sample(now=400.0)["cpu"]["pct"] is None and sampler.history() == []
+    machine(tmp_path, idle=1200, busy=1400, core_busy=800, read_sectors=0, rx=0, ticks=0)
+    assert sampler.sample(now=402.0)["cpu"]["pct"] == 50.0
 
 
 def test_a_gpu_row_reads_as_numbers_with_its_reasons_to_slow_down():

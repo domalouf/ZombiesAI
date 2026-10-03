@@ -7,6 +7,11 @@ zombies/training/live/:
     runs.json     every 60 s  every run's curves: the payload the static training page is built from
     stream.json   every 5 s   the stream overlay's numbers and its page's details (viz/stream.py)
 
+That is while something trains. With nothing training, the training PC only looks for a trainer every few
+seconds (a read of /proc) and reports every 5 minutes, its sampler asleep in between; a trainer starting, or the
+last one ending, is reported at once. machine.json and stream.json carry `every_s`, how soon the next report is
+due, so the pages tell "not training" from "offline".
+
 The other gaming PCs, which play for the learner (rl/fleet.py), push one file each beside them:
 
     machine-<id>.json  every 5 s  that machine, and what its worker is doing: waiting, or playing for which run
@@ -45,6 +50,7 @@ LEARNER_LABEL = "Training PC"
 WORKER_FIELDS = ("state", "run", "actors", "alive", "sent", "dropped", "version", "episodes", "last_round",
                  "best_round")
 WORKER_STALE_S = 30.0  # the worker rewrites its status every 5-10 s; older than this, it is not running
+WARMUP_S = 10.0  # an idle learner wakes its sampler this long before reporting: a sample to take rates from
 
 
 def machine_id(value: str) -> str:
@@ -173,12 +179,17 @@ class LivePublisher:
 
     With `worker` (a machine id), this is one of the PCs that play for the learner: it writes and pushes only its
     own machine-<id>.json, with what its worker is doing read from `worker_status` -- never runs.json or
-    stream.json, which are the learner's."""
+    stream.json, which are the learner's.
+
+    The learner with nothing training reports only every `idle_every_s` (0: every tick), the sampler paused between;
+    `every_s` is how often tick() is called, which the pages are told while something trains."""
 
     def __init__(self, repo: Path, out_dir: Path, dest: str | None, *, sampler: SystemSampler,
                  runs_every_s: float = 60.0, stream_run: str | None = None, ssh: str = "ssh", run=subprocess.run,
-                 say=print, label: str | None = None, worker: str | None = None, worker_status: Path | None = None):
+                 say=print, label: str | None = None, worker: str | None = None, worker_status: Path | None = None,
+                 every_s: float = 5.0, idle_every_s: float = 300.0):
         self.repo, self.out_dir, self.dest, self.sampler = repo, out_dir, dest, sampler
+        self.every_s, self.idle_every_s = every_s, idle_every_s
         self.worker = machine_id(worker) if worker else None
         self.label = (label or (self.worker or LEARNER_LABEL))[:40]
         self.worker_status = worker_status
@@ -192,6 +203,8 @@ class LivePublisher:
         self.runs: dict | None = None
         self.runs_at = 0.0
         self.run_paths: dict[str, str] = {}  # a run's directory -> its public name, as of the last runs.json
+        self.training = False  # whether the last report had anything training
+        self.reported_at: float | None = None
         self.failing: str | None = "not tried yet"  # None is pushing fine; a string is why it is not
 
     def tick(self, now: float | None = None) -> None:
@@ -205,22 +218,36 @@ class LivePublisher:
             if self.dest:
                 self.push()
             return
-        if self.runs is None or now - self.runs_at >= self.runs_every_s:
-            payload = build_payload(run_roots(self.repo))
-            self.run_paths = payload["run_paths"]
-            writing = live_trainers(self.run_paths)
-            self.runs, self.runs_at = public_runs(payload, writing), now
-            self.stream.choose(self.run_paths, writing)
-            _write(self.out_dir / "runs.json", self.runs)
         # Reading /proc is cheap; reading every run's metrics is not, so the names come from the last runs.json.
         trainers = live_trainers(self.run_paths)
+        training = bool(trainers)
+        if self.idle_every_s and not training and not self.training and self.reported_at is not None:
+            due_in = self.reported_at + self.idle_every_s - now
+            if due_in > 0:
+                if due_in <= WARMUP_S:
+                    self.sampler.resume()
+                return
+        # A trainer starting is named, and one ending shows its last curves, as soon as it happens.
+        if self.runs is None or training != self.training or now - self.runs_at >= self.runs_every_s:
+            payload = build_payload(run_roots(self.repo))
+            self.run_paths = payload["run_paths"]
+            trainers = live_trainers(self.run_paths)
+            self.runs, self.runs_at = public_runs(payload, trainers), now
+            self.stream.choose(self.run_paths, trainers)
+            _write(self.out_dir / "runs.json", self.runs)
+        every_s = self.every_s if training or not self.idle_every_s else self.idle_every_s
         machine = public_system(self.sampler.payload())
-        machine["at"] = now
+        machine["at"], machine["every_s"] = now, every_s
         machine["runs_at"] = self.runs_at
         machine["training"] = training_now(trainers, self.runs)
         machine["label"], machine["role"] = self.label, "learner"
         _write(self.out_dir / "machine.json", machine)
-        _write(self.out_dir / "stream.json", self.stream.payload(self.runs, trainers, now))
+        _write(self.out_dir / "stream.json", {**self.stream.payload(self.runs, trainers, now), "every_s": every_s})
+        self.training, self.reported_at = training, now
+        if training or not self.idle_every_s:
+            self.sampler.resume()
+        else:
+            self.sampler.pause()
         if self.dest:
             self.push()
 

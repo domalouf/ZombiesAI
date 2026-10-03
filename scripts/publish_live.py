@@ -4,6 +4,9 @@ its training runs and the stream's numbers to the site every few seconds (viz/li
     uv run python scripts/publish_live.py --dest zombies-live@lts.lan:     # every 5 s, until Ctrl-C
     uv run python scripts/publish_live.py --once                           # write the files, push nothing
 
+With nothing training it only checks for a trainer every 5 s and reports every --idle-every (5 min), sampling
+nothing in between; a run starting or ending is on the site within one --every.
+
 On a PC that plays for the learner (scripts/fleet_worker.py), --worker <id> pushes only that machine and what its
 worker is doing, as live/machine-<id>.json; the page shows it once deploy/deploy.sh is run with LIVE_MACHINES=<id>:
 
@@ -31,6 +34,8 @@ def main() -> None:
                         help="rsync destination: the site's zombies/training/live/ (default: $ZOMBIES_LIVE_DEST)")
     parser.add_argument("--every", type=float, default=5.0, help="seconds between pushes (default: 5)")
     parser.add_argument("--runs-every", type=float, default=60.0, help="seconds between rebuilds of runs.json")
+    parser.add_argument("--idle-every", type=float, default=300.0,
+                        help="with nothing training, seconds between pushes (default: 300; 0 pushes every --every)")
     parser.add_argument("--out", type=Path, help="staging directory (default: $XDG_RUNTIME_DIR/zombiesai-live)")
     parser.add_argument("--once", action="store_true", help="sample, write the files once, and push only with --dest")
     parser.add_argument("--stream-run", help="the run the stream overlay's numbers come from (default: the one "
@@ -55,7 +60,7 @@ def main() -> None:
     sampler = SystemSampler().start()
     publisher = LivePublisher(REPO, out, args.dest, sampler=sampler, runs_every_s=args.runs_every,
                               stream_run=args.stream_run, label=args.label, worker=args.worker,
-                              worker_status=args.worker_status)
+                              worker_status=args.worker_status, every_s=args.every, idle_every_s=args.idle_every)
     time.sleep(2.5)  # the sampler's first rates need two samples
     try:
         if args.once:

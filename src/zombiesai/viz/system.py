@@ -270,6 +270,11 @@ class GpuStream:
     def close(self) -> None:
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)  # reaped, not left a zombie until the next start
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.next_try = 0.0  # closed on purpose, not dying: the next read() may start it again straight away
 
 
 # ------------------------------------------------------------------------------------------------ the sampler
@@ -295,7 +300,8 @@ def specs(proc: Path = Path("/proc"), sys: Path = Path("/sys"), gpus: list[dict]
 
 class SystemSampler:
     """Samples every `interval_s` on a thread of its own and keeps `history_s` of the headline numbers.
-    `snapshot()` is the latest whole sample; `history(since)` the headline points after `since`."""
+    `snapshot()` is the latest whole sample; `history(since)` the headline points after `since`.
+    `pause()` stops the sampling (and nvidia-smi) until `resume()`; the history keeps the gap as a gap."""
 
     def __init__(self, interval_s: float = 2.0, history_s: float = 1800.0, top: int = 15,
                  proc: Path = Path("/proc"), sys: Path = Path("/sys"), gpu: GpuStream | None = None,
@@ -309,6 +315,8 @@ class SystemSampler:
         self._specs: dict | None = None
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
+        self._awake = threading.Event()
+        self._awake.set()
 
     def start(self) -> "SystemSampler":
         if self._thread is None:
@@ -318,11 +326,27 @@ class SystemSampler:
 
     def _loop(self) -> None:
         while True:
+            self._awake.wait()
             try:
                 self.sample()
             except Exception:  # one bad read (a sensor that vanished) must not end the sampling for good
                 pass
             time.sleep(self.interval_s)
+
+    @property
+    def paused(self) -> bool:
+        return not self._awake.is_set()
+
+    def pause(self) -> None:
+        if self.paused:
+            return
+        self._awake.clear()
+        self.gpu.close()
+        with self._lock:
+            self._prev = None  # a rate over the whole pause would be an average, not what it is doing now
+
+    def resume(self) -> None:
+        self._awake.set()
 
     def specs(self) -> dict:
         if self._specs is None or (not self._specs["gpus"] and self.latest and self.latest["gpus"]):

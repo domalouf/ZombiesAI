@@ -56,8 +56,16 @@ def test_runs_json_is_scrubbed_and_running_means_a_trainer_is_writing_it():
 
 
 class FakeSampler:
+    paused = False
+
     def payload(self, since=0.0):
         return SYSTEM
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
 
 
 def test_a_tick_writes_both_files_and_pushes_them_saying_only_when_that_changes(tmp_path, monkeypatch):
@@ -70,7 +78,8 @@ def test_a_tick_writes_both_files_and_pushes_them_saying_only_when_that_changes(
         calls.append(argv)
         return subprocess.CompletedProcess(argv, next(codes), stderr="rsync: connection refused\n")
 
-    pub = LivePublisher(tmp_path, tmp_path / "out", "lts:", sampler=FakeSampler(), run=fake_rsync, say=said.append)
+    pub = LivePublisher(tmp_path, tmp_path / "out", "lts:", sampler=FakeSampler(), run=fake_rsync, say=said.append,
+                        idle_every_s=0)
     for t in (100.0, 105.0, 110.0, 170.0):
         pub.tick(now=t)
     machine = json.loads((tmp_path / "out" / "machine.json").read_text())
@@ -83,6 +92,46 @@ def test_a_tick_writes_both_files_and_pushes_them_saying_only_when_that_changes(
     assert "ControlMaster=auto" in calls[0][calls[0].index("-e") + 1]
     assert [s.split("  ", 1)[1] for s in said] == ["pushing to lts:", "push failing: rsync: connection refused",
                                                    "pushing to lts:"]
+
+
+def test_with_nothing_training_it_reports_every_few_minutes_and_sleeps_between(tmp_path, monkeypatch):
+    built, trainers = [], []
+    monkeypatch.setattr(live_site, "build_payload",
+                        lambda roots: built.append(1) or {"runs": [run("rl8")], "run_paths": {"/r/rl8": "rl8"}})
+    monkeypatch.setattr(live_site, "run_roots", lambda repo: [])
+    monkeypatch.setattr(live_site, "live_trainers", lambda paths: list(trainers))
+    pushed = []
+    sampler = FakeSampler()
+    pub = LivePublisher(tmp_path, tmp_path / "out", "lts:", sampler=sampler, say=lambda m: None,
+                        run=lambda argv, **kw: pushed.append(argv) or subprocess.CompletedProcess(argv, 0, stderr=""))
+    machine = lambda: json.loads((tmp_path / "out" / "machine.json").read_text())
+
+    pub.tick(now=100.0)  # the first report goes out at once, then the sampler sleeps
+    assert len(pushed) == 1 and machine()["every_s"] == 300.0 and sampler.paused
+    stream = json.loads((tmp_path / "out" / "stream.json").read_text())
+    assert stream["every_s"] == 300.0 and stream["at"] == 100.0
+    for t in (105.0, 200.0, 385.0):
+        pub.tick(now=t)
+    assert len(pushed) == 1 and sampler.paused
+    pub.tick(now=395.0)  # due in 5 s: wake the sampler so the report has rates
+    assert len(pushed) == 1 and not sampler.paused
+    pub.tick(now=400.0)
+    assert len(pushed) == 2 and machine()["at"] == 400.0 and sampler.paused
+
+    trainers.append({"run": "rl8", "script": "train_rl.py", "elapsed_s": 1.0})
+    runs_before = len(built)
+    pub.tick(now=405.0)  # a trainer started: reported at once, runs.json rebuilt to name it, every 5 s from now
+    assert len(pushed) == 3 and len(built) == runs_before + 1 and not sampler.paused
+    assert machine()["every_s"] == 5.0 and machine()["training"][0]["run"] == "rl8"
+    pub.tick(now=410.0)
+    assert len(pushed) == 4 and len(built) == runs_before + 1
+
+    trainers.clear()
+    pub.tick(now=415.0)  # it ended: said at once, with its final curves, and back to sleep
+    assert len(pushed) == 5 and len(built) == runs_before + 2 and sampler.paused
+    assert machine()["training"] == [] and machine()["every_s"] == 300.0
+    pub.tick(now=420.0)
+    assert len(pushed) == 5
 
 
 def test_a_worker_says_only_what_it_is_doing_and_goes_quiet_when_it_stops(tmp_path):

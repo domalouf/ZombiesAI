@@ -1,12 +1,14 @@
 <script>
 /* Live on the site: the gaming PC pushes live/machine.json every 5 s and live/runs.json every minute
    (scripts/publish_live.py); this page reads them from its own site and nowhere else. When the PC stops
-   pushing -- asleep, off, not publishing -- the page says so and keeps the last numbers it had.
+   pushing -- asleep, off, not publishing -- the page says so and keeps the last numbers it had. With nothing
+   training it reports only every few minutes; each file's every_s says how soon the next is due.
    The other gaming PCs, which play for it (rl/fleet.py), push live/machine-<id>.json each; the ids are baked
    into the page when it is built (window.LIVE_MACHINES), since a static site cannot be asked what is there. */
 sysview.opts.full = false;  // a public process list is names and load: no ids, users or command lines
-const pub = { at: null, runsAt: null, failed: false, selected: 0 };
-const OFFLINE_AFTER_S = 30;
+const pub = { at: null, every: 0, idle: false, runsAt: null, failed: false, selected: 0 };
+const OFFLINE_AFTER_S = 30;  // past when the next report was due
+const liveOfflineAfter = (every) => OFFLINE_AFTER_S + (every || 0);
 const MACHINES = [{ id: null, file: "machine.json", data: null }].concat(
   (window.LIVE_MACHINES || []).map((id) => ({ id, file: `machine-${id}.json`, data: null })));
 const FLEET = MACHINES.length > 1;
@@ -24,9 +26,12 @@ function liveStatus() {
   if (age == null) {
     verdict = { level: "warning", text: "! offline" };
     text = "The PC is not reporting. The runs below are as they stood when this page was published.";
-  } else if (age > OFFLINE_AFTER_S) {
+  } else if (age > liveOfflineAfter(pub.every)) {
     verdict = { level: "warning", text: "! offline" };
     text = `The PC last reported ${fmtDuration(age)} ago; these are its last numbers.`;
+  } else if (pub.idle) {
+    verdict = { level: "good", text: "OK online" };
+    text = `Nothing is training, so the PC checks in every ${fmtDuration(pub.every)}; last ${fmtDuration(age)} ago.`;
   } else {
     verdict = { level: "good", text: "OK live" };
     text = `Updated ${Math.round(age)}s ago, straight from the PC it trains on.`;
@@ -42,7 +47,10 @@ function liveStatus() {
    Every name here is live-prefixed: this script shares one global scope with the dashboard's, which has its own
    machineCard and machineLabel for the "Each machine" charts, and a function declared twice is silently replaced. */
 const liveMachineAge = (m) => m.data && m.data.at != null ? Math.max(0, Date.now() / 1000 - m.data.at) : null;
-const liveMachineUp = (m) => { const age = liveMachineAge(m); return age != null && age <= OFFLINE_AFTER_S; };
+const liveMachineUp = (m) => {
+  const age = liveMachineAge(m);
+  return age != null && age <= liveOfflineAfter(m.data.every_s);
+};
 const liveMachineName = (m) => (m.data && m.data.label) || m.id || "The training PC";
 
 function liveMachineDoing(m) {
@@ -156,6 +164,8 @@ async function pollLive() {
   const m = MACHINES[0].data;
   if (m) {
     pub.at = m.at;
+    pub.every = m.every_s || 0;
+    pub.idle = !(m.training || []).length && pub.every > OFFLINE_AFTER_S;
     renderTrainingNow(m.training);
     if (m.runs_at && m.runs_at !== pub.runsAt) {
       pub.runsAt = m.runs_at;

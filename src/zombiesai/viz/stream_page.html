@@ -472,7 +472,7 @@ function renderStatus() {
   const d = state.data;
   const age = d && d.at ? Math.max(0, Date.now() / 1000 - d.at) : null;
   let flag, text;
-  if (state.fetchedAt && age != null && age <= OFFLINE_AFTER_S) {
+  if (state.fetchedAt && age != null && age <= OFFLINE_AFTER_S + (d.every_s || 0)) {
     flag = el("span", { class: "flag good", text: "LIVE" });
     text = `Numbers updated ${Math.round(age)}s ago, straight from the PC it trains on.`;
   } else {
