@@ -240,7 +240,7 @@ def settings_differences(ours: dict, theirs: dict | None) -> list[str]:
 
 
 def provenance() -> dict:
-    from zombiesai.store.episode_store import git_provenance
+    from zombiesai.provenance import git_provenance
 
     return {"spec_version": spec.SPEC_VERSION, **git_provenance()}
 

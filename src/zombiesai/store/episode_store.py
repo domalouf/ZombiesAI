@@ -1,8 +1,6 @@
 """One on-disk episode format (runs/<run_id>/ep_<n>/) shared by agent runs and human demos."""
 
-import functools
 import json
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from zombiesai import spec
+from zombiesai.provenance import git_provenance  # noqa: F401 -- where it lived before
 from zombiesai.reward import REWARD_TERMS
 
 FLAG_BAD_STEP = 1
@@ -19,20 +18,6 @@ FLAG_ROUND_COMPLETE = 8
 FLAG_GAIN_CLIPPED = 16
 
 _FRAME_BYTES = int(np.prod(spec.PIXELS_SHAPE))
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-@functools.cache
-def git_provenance() -> dict:
-    def git(*args: str) -> str:
-        return subprocess.run(
-            ["git", *args], cwd=_REPO_ROOT, capture_output=True, text=True, check=True
-        ).stdout.strip()
-
-    try:
-        return {"sha": git("rev-parse", "HEAD"), "dirty": bool(git("status", "--porcelain"))}
-    except (OSError, subprocess.CalledProcessError):
-        return {"sha": "unknown", "dirty": None}
 
 
 def episode_dir(run_dir: str | Path, index: int) -> Path:

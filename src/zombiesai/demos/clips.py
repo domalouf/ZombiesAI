@@ -39,7 +39,7 @@ from pathlib import Path
 import numpy as np
 
 from zombiesai import spec
-from zombiesai.store.episode_store import git_provenance
+from zombiesai.provenance import git_provenance
 
 FLAG_BAD_STEP = 1  # capture overrun, dropped frame, or a step spanning a cut: excluded from training
 FLAG_LOW_CONFIDENCE = 2  # pseudo-label below the keep threshold
