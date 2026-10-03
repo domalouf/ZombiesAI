@@ -10,7 +10,7 @@ runs.json every few seconds and pushes to the site's zombies/training/live/:
     ppo      the run's training progress and its policy-health numbers, from the same payload as runs.json
 
 The games come from the run's `episodes.jsonl`, one line per finished game (rl/parallel_ppo.py). Which run:
-the one `--stream-run` names, else one a trainer is writing now (a real-game run before a sim rehearsal), else
+the one `--stream-run` names, else one a trainer is writing now (a real-game run before a rehearsal), else
 the run whose games were written last. Averages are over the last `WINDOW` games, so the overlay says how the
 agent plays now and not how it played a day ago; the best round is the run's best.
 
@@ -193,7 +193,7 @@ def pick_run(run_paths: dict[str, str], trainers: list[dict], prefer: str | None
     if prefer:
         return (prefer, by_name[prefer]) if prefer in by_name else None
     writing = [t for t in trainers if t.get("run") in by_name]
-    writing.sort(key=lambda t: bool(t.get("sim")))  # the real game first: it is what the stream shows
+    writing.sort(key=lambda t: bool(t.get("rehearsal")))  # the real game first: it is what the stream shows
     if writing:
         return writing[0]["run"], by_name[writing[0]["run"]]
     if not by_name:

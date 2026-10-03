@@ -445,7 +445,7 @@ function commandPreview() {
   const f = launch.built;
   const t = launchTree();
   const parts = ["train_rl.py", f.init.value, "--actors", f.actors.value, "--out", `runs/${f.name.value.trim()}`];
-  if (f.env.value === "sim") parts.push("--env", "sim", "--sim-hardness", f.hardness.value);
+  if (f.env.value === "synthetic") parts.push("--env", "synthetic");
   const changed = changedSettings();
   for (const s of t ? t.settings : []) if (s.name in changed) parts.push(...flagOf(s, changed[s.name]));
   if (f.extra.value.trim()) parts.push(f.extra.value.trim());
@@ -467,7 +467,7 @@ function estimate() {
     parts.push(`${fmtCompact(steps)} steps take about ${fmtDuration(est)} at ~${fmtValue(speed.per_game * games)} steps/s ` +
                `(${speed.run} went ${fmtValue(speed.per_game)} a second per game)`);
   } else {
-    parts.push(`${fmtCompact(steps)} steps; no earlier ${f.env.value === "sim" ? "NachtSim" : "real-game"} run here to estimate the time from`);
+    parts.push(`${fmtCompact(steps)} steps; no earlier ${f.env.value === "synthetic" ? "rehearsal" : "real-game"} run here to estimate the time from`);
   }
   if (limitMin > 0) {
     const ends = est == null ? limitMin * 60 : Math.min(est, limitMin * 60);
@@ -493,7 +493,7 @@ function readiness() {
       return ["warning", "!", `${settingLabel(s)} needs ${s.kind === "int" ? "a whole number" : s.kind === "float" ? "a number" : "a value"}.`, false];
     }
   }
-  if (f.env.value === "sim" || /(^|\s)--env[ =]sim(\s|$)/.test(f.extra.value)) return ["good", "OK", "A NachtSim run: no games needed.", true];
+  if (f.env.value === "synthetic" || /(^|\s)--env[ =]synthetic(\s|$)/.test(f.extra.value)) return ["good", "OK", "A rehearsal on the synthetic stand-in: no games needed.", true];
   if (!t.fleet) return ["serious", "!!", `${t.label} has no fleet yet: scripts/instances.py up --n ${actors}`, false];
   if (t.busy.length) return ["warning", "!", `${t.busy[0]} is already playing this fleet. Stop it first.`, false];
   if (t.fleet.running < actors) {
@@ -511,7 +511,6 @@ function refreshLauncher() {
   mount(f.state, [el("span", { class: "icon", text: icon }), document.createTextNode(text)]);
   f.start.disabled = !ok || launch.busy;
   f.estimate.textContent = estimate();
-  f.hardnessField.hidden = f.env.value !== "sim";
   for (const b of f.envChips) b.setAttribute("aria-pressed", String(b.dataset.env === f.env.value));
   for (const b of f.presets) b.setAttribute("aria-pressed", String(Boolean(f.steps) && Number(b.dataset.steps) === Number(f.steps.value)));
   let changed = 0;
@@ -612,11 +611,9 @@ function buildLauncher() {
   f.actors = el("input", { type: "number", min: "1", max: "16", oninput: (e) => { e.target.dataset.touched = "1"; refresh(); } });
   f.name = el("input", { type: "text", spellcheck: "false", oninput: () => { f.name.dataset.touched = "1"; refresh(); } });
   f.env = el("input", { type: "hidden", value: "real" });
-  f.envChips = [["real", "Real games"], ["sim", "NachtSim rehearsal"]].map(([env, label]) =>
+  f.envChips = [["real", "Real games"], ["synthetic", "Synthetic rehearsal"]].map(([env, label]) =>
     el("button", { class: "chip seg", type: "button", "data-env": env, onclick: () => { f.env.value = env; refresh(); } },
       [document.createTextNode(label)]));
-  f.hardness = el("input", { type: "number", min: "0", max: "1", step: "0.05", value: "0.5", oninput: refresh });
-  f.hardnessField = field("Sim hardness (0 to 1)", f.hardness);
   f.limit = el("select", { onchange: refresh }, TIME_LIMITS.map(([m, label]) => el("option", { value: String(m), text: label })));
   f.stepsRow = el("label", { class: "field" });
   f.presets = STEP_PRESETS.map(([n, label]) => el("button", { class: "chip seg", type: "button", "data-steps": String(n),
@@ -637,7 +634,7 @@ function buildLauncher() {
       field("Checkout", f.tree), field("Start from", f.init, "wide"), field("Name", f.name),
     ]),
     el("div", { class: "launch-row" }, [el("span", { class: "caption", text: "Plays" }), ...f.envChips, f.env]),
-    el("div", { class: "fields" }, [field("Games", f.actors), f.hardnessField]),
+    el("div", { class: "fields" }, [field("Games", f.actors)]),
     el("div", { class: "subhead", text: "How long it runs" }),
     el("div", { class: "fields" }, [f.stepsRow, field("Stop after", f.limit)]),
     el("div", { class: "launch-row" }, [el("span", { class: "caption", text: "Steps" }), ...f.presets]),
@@ -686,7 +683,7 @@ async function startRun() {
   f.tail.hidden = true;
   const answer = await command("/api/start", {
     tree: f.tree.value, init: f.init.value, name: f.name.value.trim(), actors: parseInt(f.actors.value, 10),
-    env: f.env.value, sim_hardness: f.env.value === "sim" ? Number(f.hardness.value) : null,
+    env: f.env.value,
     settings: changedSettings(), stop_after_min: Number(f.limit.value), extra: f.extra.value });
   launch.busy = false;
   if (answer.ok) {

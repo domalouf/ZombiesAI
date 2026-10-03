@@ -34,7 +34,7 @@ def main() -> None:
     parser.add_argument("--out", type=Path, help="staging directory (default: $XDG_RUNTIME_DIR/zombiesai-live)")
     parser.add_argument("--once", action="store_true", help="sample, write the files once, and push only with --dest")
     parser.add_argument("--stream-run", help="the run the stream overlay's numbers come from (default: the one "
-                                             "training now, the real game before the sim)")
+                                             "training now, the real game before a rehearsal)")
     parser.add_argument("--worker", metavar="ID", default=os.environ.get("ZOMBIES_LIVE_WORKER"),
                         help="this PC plays for the learner: push only live/machine-<ID>.json (a-z, 0-9, -; "
                              "$ZOMBIES_LIVE_WORKER)")

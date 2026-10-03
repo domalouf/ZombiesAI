@@ -15,7 +15,7 @@ SITE_DESCRIPTION = ("Learning curves, optimiser health and reward-hacking gates 
                     "Untoten.")
 SITE_INTRO = (
     "How the reinforcement-learning agent's training is going. Every run its trainers have written — "
-    "PPO on NachtSim, behavioural cloning from human play, and the inverse dynamics model that labels "
+    "PPO on the real game, behavioural cloning from human play, and the inverse dynamics model that labels "
     "footage nobody logged input for. A snapshot, rebuilt when the page is published."
 )
 
@@ -73,7 +73,7 @@ def main() -> None:
             payload,
             args.site,
             intro=SITE_INTRO,
-            links=[("← domalouf.com", "/"), ("The agent playing", "/zombies/"), ("Code on GitHub", REPO_URL)],
+            links=[("← domalouf.com", "/"), ("Live stream", "/zombies/live/"), ("Code on GitHub", REPO_URL)],
             description=SITE_DESCRIPTION,
         )
         summarize(payload)

@@ -20,7 +20,7 @@ from zombiesai.viz.stream import StreamFeed, demo_games, stream_payload, write_s
 from zombiesai.viz.supervise import build_payload, live_trainers, run_roots
 
 REPO = Path(__file__).resolve().parents[1]
-LINKS = [("← domalouf.com", "/"), ("The agent in simulation", "/zombies/"), ("Training Room", "/zombies/training/"),
+LINKS = [("← domalouf.com", "/"), ("Training Room", "/zombies/training/"),
          ("Code on GitHub", "https://github.com/domalouf/ZombiesAI")]
 DESCRIPTION = "Watch a reinforcement-learning agent learn Nacht der Untoten live on Twitch, and how its PPO training is going."
 

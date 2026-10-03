@@ -7,7 +7,7 @@ from pathlib import Path
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run", type=Path, help="run directory, e.g. runs/ppo-nacht-state-s1")
+    parser.add_argument("run", type=Path, help="run directory, e.g. runs/rl1")
     parser.add_argument("--rows", type=int, default=20)
     args = parser.parse_args()
 

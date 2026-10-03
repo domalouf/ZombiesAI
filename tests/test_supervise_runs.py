@@ -28,7 +28,7 @@ class RLConfig:
     bindings: str = "configs/waw_bindings.json"
     hear: bool = True  # a checkpoint trained with audio hears its own instance's sink
     listen: str = ""  # host:port other PCs' workers send their games to
-    sim: dict = field(default_factory=dict)
+    synthetic: dict = field(default_factory=dict)
 '''
 
 # Stands in for scripts/train_rl.py: writes metrics while it runs and, on Ctrl-C (SIGINT), says so and writes its
@@ -100,7 +100,7 @@ def test_a_run_that_would_fail_or_collide_is_refused_before_anything_starts(repo
     (repo / "runs" / "instances").mkdir()
     (repo / "runs" / "instances" / "fleet.json").write_text(json.dumps({"n": 4, "display_base": 190}))
     assert "0 of the fleet's games are running" in refused()
-    busy = [{"pid": 1, "run": "rl9", "cwd": str(repo), "sim": False}]
+    busy = [{"pid": 1, "run": "rl9", "cwd": str(repo), "rehearsal": False}]
     assert "nowhere" in start_run(repo, "nowhere", **ok)["error"]  # not a checkout of this repo
     supervise_fleet = supervise.fleet_of
     try:
@@ -113,16 +113,16 @@ def test_a_run_that_would_fail_or_collide_is_refused_before_anything_starts(repo
 
 def test_a_started_run_is_found_and_a_graceful_stop_leaves_its_checkpoint(repo, tmp_path_factory):
     supervisor = Supervisor(repo, tmp_path_factory.mktemp("state"))
-    started = supervisor.start("main", "runs/rl1/checkpoint.pt", 2, "rl2", "--env sim")
+    started = supervisor.start("main", "runs/rl1/checkpoint.pt", 2, "rl2", "--env synthetic")
     assert started.get("ok"), started
     pid, log = started["pid"], Path(started["log"])
     try:
         assert log == repo / "runs" / "rl2.log" and "started from the dashboard" in log.read_text()
         assert wait_for(lambda: "upd 3" in log.read_text())
         [trainer] = [t for t in supervisor.live()["trainers"] if t["pid"] == pid]
-        assert trainer["run"] == "rl2" and trainer["sim"] and trainer["tree"] == repo.name
+        assert trainer["run"] == "rl2" and trainer["rehearsal"] and trainer["tree"] == repo.name
         assert trainer["stopping_s"] is None and not trainer["can_force"]
-        assert "args" in trainer and "--actors 2 --out runs/rl2 --env sim" in trainer["args"]
+        assert "args" in trainer and "--actors 2 --out runs/rl2 --env synthetic" in trainer["args"]
 
         assert "ask it to stop first" in supervisor.stop(pid, force=True)["error"]
         assert supervisor.stop(pid) == {"ok": True}
@@ -136,7 +136,7 @@ def test_a_started_run_is_found_and_a_graceful_stop_leaves_its_checkpoint(repo, 
 
 
 def test_the_run_gets_its_own_checkouts_code_and_outlives_the_dashboard(repo, tmp_path_factory):
-    started = start_run(repo, "main", "runs/rl1/checkpoint.pt", 1, "rl3", "--env sim", [])
+    started = start_run(repo, "main", "runs/rl1/checkpoint.pt", 1, "rl3", "--env synthetic", [])
     proc = started["proc"]
     try:
         environ = Path(f"/proc/{proc.pid}/environ").read_bytes().split(b"\0")
@@ -162,7 +162,7 @@ def test_every_process_below_a_trainer_is_found_for_a_forced_stop():
 
 def test_the_settings_are_the_trainers_own_fields_with_their_defaults_and_comments(repo):
     settings = {s["name"]: s for s in trainer_settings(repo)}
-    # not init/env/sim, and not listen: a run started here has no fleet token, and train_rl.py would refuse it
+    # not init/env/synthetic, and not listen: a run started here has no fleet token, and train_rl.py would refuse it
     assert list(settings) == ["total_steps", "lr", "target_kl", "seed", "bindings", "hear"]
     assert "not a setting" in setting_flags(list(settings.values()), {"listen": ":47860"})[1]
     assert settings["total_steps"] == {"name": "total_steps", "flag": "--total-steps", "kind": "int",
@@ -186,13 +186,13 @@ def test_only_changed_settings_become_flags_and_bad_values_are_refused(repo):
 
 
 def test_the_estimate_uses_the_newest_runs_speed_per_game(repo):
-    for name, env, sps, games in (("rl1", "real-waw", 50, 4), ("sim1", "nacht-render", 400, 8)):
+    for name, env, sps, games in (("rl1", "real-waw", 50, 4), ("rehearsal1", "synthetic", 400, 8)):
         (repo / "runs" / name).mkdir(exist_ok=True)
         (repo / "runs" / name / "config.json").write_text(json.dumps({"env": env, "n_actors": games}))
         (repo / "runs" / name / "metrics.jsonl").write_text(json.dumps({"update": 1, "sps": sps}) + "\n")
     speeds = recent_speeds(repo)
     assert speeds["real"] == {"run": "rl1", "sps": 50, "games": 4, "per_game": 12.5}
-    assert speeds["sim"]["per_game"] == 50.0
+    assert speeds["synthetic"]["per_game"] == 50.0
 
 
 def test_the_estimate_skips_a_run_trained_on_several_pcs(repo):
@@ -214,12 +214,12 @@ def test_the_estimate_skips_a_run_trained_on_several_pcs(repo):
 def test_a_run_starts_with_its_settings_as_flags_and_stops_itself_at_its_time_limit(repo, tmp_path_factory):
     state = tmp_path_factory.mktemp("state")
     supervisor = Supervisor(repo, state)
-    started = supervisor.start("main", "runs/rl1/checkpoint.pt", 2, "rl4", "", env="sim", sim_hardness=0.25,
+    started = supervisor.start("main", "runs/rl1/checkpoint.pt", 2, "rl4", "", env="synthetic",
                                settings={"total_steps": 500000, "lr": 5e-5, "hear": False}, stop_after_min=0.05)
     assert started.get("ok"), started
     pid, log = started["pid"], Path(started["log"])
     try:
-        assert started["command"].endswith("--out runs/rl4 --env sim --sim-hardness 0.25 --total-steps 500000 --no-hear")
+        assert started["command"].endswith("--out runs/rl4 --env synthetic --total-steps 500000 --no-hear")
         assert abs(started["stop_at"] - (time.time() + 3)) < 2
         [trainer] = [t for t in supervisor.live()["trainers"] if t["pid"] == pid]
         assert trainer["stop_at"] == started["stop_at"]
@@ -238,9 +238,9 @@ def test_a_run_starts_with_its_settings_as_flags_and_stops_itself_at_its_time_li
 
 def test_a_time_limit_must_be_sane_and_settings_must_belong_to_the_trainer(repo, tmp_path_factory):
     supervisor = Supervisor(repo, tmp_path_factory.mktemp("state"))
-    common = dict(tree="main", init="runs/rl1/checkpoint.pt", actors=1, name="rl5", extra="", env="sim")
+    common = dict(tree="main", init="runs/rl1/checkpoint.pt", actors=1, name="rl5", extra="", env="synthetic")
     assert "time limit" in supervisor.start(**common, stop_after_min=-1)["error"]
     assert "time limit" in supervisor.start(**common, stop_after_min=60 * 24 * 8)["error"]
     assert "not a setting" in supervisor.start(**common, settings={"init": "x"})["error"]
-    assert "real or sim" in supervisor.start(**{**common, "env": "moon"})["error"]
+    assert "real or synthetic" in supervisor.start(**{**common, "env": "moon"})["error"]
     assert not (repo / "runs" / "rl5").exists()

@@ -5,8 +5,8 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Stencil+Display:wght@800&family=Red+Hat+Mono:wght@400;500&family=Sofia+Sans+Condensed:wght@400;600;700&display=swap">
 <!--/fonts-->
 <style>
-  /* Same bunker slate as the replay viewer: this is the other half of the same room. Series colours are
-     the validated dark categorical slots -- the chalk palette is chrome, and never carries data. */
+  /* Bunker slate. Series colours are the validated dark categorical slots -- the chalk palette is chrome,
+     and never carries data. */
   :root {
     --ground: #1a211f;
     --panel: #212a27;
@@ -564,7 +564,7 @@ function tiles() {
   return el("div", { class: "tiles" }, [
     runTile("Runs", String(runs.length), `${live.length} running, ${runs.filter((r) => r.status === "done").length} finished`),
     runTile("Steps trained", fmtCompact(sum((r) => r.stats.steps)), "environment steps across every run"),
-    runTile("Episodes played", fmtCompact(sum((r) => r.stats.episodes)), "games finished in simulation"),
+    runTile("Episodes played", fmtCompact(sum((r) => r.stats.episodes)), "games finished, real or rehearsal"),
     runTile("Training time", fmtDuration(sum((r) => r.elapsed_s)), "wall clock, summed"),
     fastest ? runTile("Fastest", fmtCompact(fastest) + "/s", "steps per second") : null,
   ]);
@@ -668,11 +668,11 @@ function blankSlate() {
   return el("div", { class: "blank" }, [
     el("p", { text: `No run in ${DATA.root} has written a metrics.jsonl yet. Start one and this page fills in:` }),
     el("pre", { text: [
-      "# the PPO correctness check, about five minutes on CPU",
-      "uv run python scripts/train_ppo.py cartpole",
+      "# behavioural cloning from your recordings",
+      "uv run python scripts/train_bc.py data/demos --out runs/bc1",
       "",
-      "# the real thing",
-      "uv run python scripts/train_ppo.py nacht-state",
+      "# then PPO on the real game, four instances",
+      "uv run python scripts/train_rl.py runs/bc1/bc.pt --actors 4",
       "",
       "# rebuild this page every 30s while it trains",
       "uv run python scripts/dashboard.py --watch 30",

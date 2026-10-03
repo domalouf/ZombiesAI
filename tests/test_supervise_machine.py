@@ -92,12 +92,12 @@ def test_the_fleet_starts_and_stops_through_its_own_script_one_operation_at_a_ti
 
 def test_games_a_run_is_playing_are_not_stopped_under_it(repo, tmp_path_factory, monkeypatch):
     supervisor = Supervisor(repo, tmp_path_factory.mktemp("state"))
-    playing = [{"pid": 7, "run": "rl9", "cwd": str(repo), "sim": False, "tree": repo.name, "stopping_s": None,
+    playing = [{"pid": 7, "run": "rl9", "cwd": str(repo), "rehearsal": False, "tree": repo.name, "stopping_s": None,
                 "can_force": False}]
     monkeypatch.setattr(supervisor, "live", lambda: {"trainers": playing})
     assert supervisor.fleet_action("main", "down") == {"error": "rl9 is playing these games: stop it first"}
     assert not (repo / "runs" / "instances" / "down.log").exists()
-    playing[0]["sim"] = True  # a NachtSim run plays no game
+    playing[0]["rehearsal"] = True  # a rehearsal on the synthetic stand-in plays no game
     assert supervisor.fleet_action("main", "down") == {"ok": True}
 
 

@@ -53,16 +53,17 @@ def test_the_tail_reads_only_new_whole_lines_and_starts_over_on_a_new_file(tmp_p
     assert tail.read(None) == []
 
 
-def test_the_stream_follows_the_real_game_being_trained_before_a_sim_rehearsal(tmp_path):
+def test_the_stream_follows_the_real_game_being_trained_before_a_rehearsal(tmp_path):
     paths = {}
-    for name in ("rl-sim", "rl-real", "rl-old", "bc1"):
+    for name in ("rl-rehearsal", "rl-real", "rl-old", "bc1"):
         (tmp_path / name).mkdir()
         if name != "bc1":
             (tmp_path / name / "episodes.jsonl").write_text(json.dumps(game(1)) + "\n")
         paths[str(tmp_path / name)] = name
-    trainers = [{"run": "rl-sim", "sim": True}, {"run": "rl-real", "sim": False}, {"run": "bc1", "sim": False}]
+    trainers = [{"run": "rl-rehearsal", "rehearsal": True}, {"run": "rl-real", "rehearsal": False},
+                {"run": "bc1", "rehearsal": False}]
     assert pick_run(paths, trainers)[0] == "rl-real"
-    assert pick_run(paths, [])[0] in ("rl-sim", "rl-real", "rl-old")  # nothing training: the last games written
+    assert pick_run(paths, [])[0] in ("rl-rehearsal", "rl-real", "rl-old")  # nothing training: the last games written
     assert pick_run(paths, trainers, prefer="rl-old")[0] == "rl-old"
     assert pick_run(paths, trainers, prefer="bc1") is None  # it plays no games
 

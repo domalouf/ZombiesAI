@@ -142,7 +142,7 @@ def live_trainers(run_paths: dict[str, str], proc: Path = Path("/proc")) -> list
             "args": " ".join(argv[argv.index(script) + 1:]),
             "tree": cwd.name,
             "cwd": str(cwd),
-            "sim": env_flag == "sim",  # a sim run plays no game, so it does not hold the fleet
+            "rehearsal": env_flag == "synthetic",  # a rehearsal plays no game, so it does not hold the fleet
             "run": run_paths.get(run_dir) if run_dir else None,
             "elapsed_s": None if started is None else round(time.time() - started, 1),
             "log": str(log) if log else None,
@@ -331,7 +331,7 @@ MAX_TIME_LIMIT_MIN = 7 * 24 * 60
 # listen has a flag, but train_rl.py exits at once with it unless ZOMBIES_FLEET_TOKEN is set, which a run started
 # from here has only if the dashboard itself was started with it: a run on several PCs is started by hand, as its
 # workers on the other PCs are (docs/rl.md, "Several PCs").
-NOT_SETTINGS = {"init", "env", "n_actors", "fleet_root", "sim", "listen"}
+NOT_SETTINGS = {"init", "env", "n_actors", "fleet_root", "synthetic", "listen"}
 LEARNING = {"lr", "ent_coef", "kl_coef", "kl_decay", "kl_min", "target_kl", "clip_coef", "gamma", "gae_lambda",
             "update_epochs", "minibatch_size", "batch_steps", "segment_steps", "vf_coef", "max_grad_norm",
             "max_policy_lag", "critic_warmup_updates", "reward_scale"}
@@ -447,7 +447,7 @@ def setting_flags(settings: list[dict], values: dict) -> tuple[list[str], str | 
 
 def recent_speeds(tree: Path) -> dict:
     """How fast this tree's newest runs went, per game, for the form's estimate of how long a run takes: the last
-    logged steps per second of the newest real-game run and of the newest NachtSim run."""
+    logged steps per second of the newest real-game run and of the newest synthetic rehearsal."""
     speeds = {}
     logs = sorted((tree / "runs").glob("*/metrics.jsonl"), key=lambda f: f.stat().st_mtime, reverse=True)
     for log in logs[:12]:
@@ -462,7 +462,7 @@ def recent_speeds(tree: Path) -> dict:
             # machines joining and leaving in between. The runs started here use this PC alone, so only those
             # say how fast one would go.
             continue
-        env = "real" if config.get("env") == "real-waw" else "sim" if config.get("env") == "nacht-render" else None
+        env = {"real-waw": "real", "synthetic": "synthetic"}.get(config.get("env"))
         games, sps = config.get("n_actors"), last.get("sps")
         if env and env not in speeds and isinstance(games, int) and games > 0 and isinstance(sps, (int, float)) and sps > 0:
             speeds[env] = {"run": log.parent.name, "sps": sps, "games": games, "per_game": sps / games}
@@ -493,7 +493,7 @@ def launch_options(repo: Path, trainers: list[dict]) -> dict:
     for label, tree in trees(repo):
         if not (tree / TRAINER).exists() or not checkpoints(tree):  # nothing to start from: not a place to run
             continue
-        busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
+        busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["rehearsal"]]
         options.append({"label": label, "checkpoints": checkpoints(tree)[:40], "next": next_run_name(tree),
                         "fleet": fleet_of(tree), "busy": busy, "settings": trainer_settings(tree),
                         "speeds": recent_speeds(tree)})
@@ -502,8 +502,7 @@ def launch_options(repo: Path, trainers: list[dict]) -> dict:
 
 
 def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, extra: str,
-              trainers: list[dict], *, settings: dict | None = None, env: str = "real",
-              sim_hardness: float | None = None) -> dict:
+              trainers: list[dict], *, settings: dict | None = None, env: str = "real") -> dict:
     """Start `scripts/train_rl.py` in a tree, as a session of its own (the dashboard can stop and start again
     without taking the run with it), writing runs/<name>/ and printing to runs/<name>.log. Refuses what would
     fail or collide: a fleet with too few games up, a fleet another trainer is already playing, a name in use.
@@ -525,22 +524,23 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
         return {"error": f"more options: {error}"}
     if any(a in ("--out", "--actors") or a.startswith(("--out=", "--actors=")) for a in extra_args):
         return {"error": "set the name and the number of games in their own fields"}
-    if env not in ("real", "sim"):
-        return {"error": "the environment is real or sim"}
+    if env not in ("real", "synthetic"):
+        return {"error": "the environment is real or synthetic"}
     flags, problem = setting_flags(trainer_settings(tree), settings or {})
     if problem:
         return {"error": problem}
-    if env == "sim":
-        flags = ["--env", "sim"] + (["--sim-hardness", str(float(sim_hardness))] if sim_hardness is not None else []) + flags
-    sim = env == "sim" or ("--env" in extra_args[:-1] and extra_args[extra_args.index("--env") + 1] == "sim")
-    if not sim:
+    if env == "synthetic":
+        flags = ["--env", "synthetic"] + flags
+    rehearsal = env == "synthetic" or ("--env" in extra_args[:-1]
+                                       and extra_args[extra_args.index("--env") + 1] == "synthetic")
+    if not rehearsal:
         fleet = fleet_of(tree)
         if fleet is None:
             return {"error": f"{tree_label} has no fleet (runs/instances/fleet.json): scripts/instances.py up"}
         if fleet["running"] < actors:
             return {"error": f"{fleet['running']} of the fleet's games are running and the run needs {actors}: "
                              f"start them with scripts/instances.py up --n {max(actors, fleet['n'])}"}
-        busy = [t for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
+        busy = [t for t in trainers if t["cwd"] == str(tree) and not t["rehearsal"]]
         if busy:
             return {"error": f"{busy[0]['run'] or 'a run'} (pid {busy[0]['pid']}) is already playing this fleet"}
 
@@ -688,7 +688,7 @@ class Supervisor:
                 if not status["running"] and time.time() - op["ended"] > 60:  # an old result stops being news
                     self.fleet_ops.pop(label, None)
                     status = None
-            busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["sim"]]
+            busy = [t["run"] or f"pid {t['pid']}" for t in trainers if t["cwd"] == str(tree) and not t["rehearsal"]]
             out.append({"label": label, **fleet, "busy": busy, "op": status})
         return {"fleets": out, "recommended": RECOMMENDED_GAMES}
 
@@ -719,13 +719,13 @@ class Supervisor:
         return launch_options(self.repo, self.live()["trainers"])
 
     def start(self, tree: str, init: str, actors: int, name: str, extra: str, *, settings: dict | None = None,
-              env: str = "real", sim_hardness: float | None = None, stop_after_min: float = 0.0) -> dict:
+              env: str = "real", stop_after_min: float = 0.0) -> dict:
         """Start a run; with `stop_after_min`, stop it gracefully (as Ctrl-C) that many minutes in, whichever of
         that and its step budget comes first."""
         if not 0 <= stop_after_min <= MAX_TIME_LIMIT_MIN:
             return {"error": f"a time limit is between 0 (none) and {MAX_TIME_LIMIT_MIN} minutes"}
         result = start_run(self.repo, tree, init, actors, name, extra, self.live()["trainers"], settings=settings,
-                           env=env, sim_hardness=sim_hardness)
+                           env=env)
         if "proc" in result:
             self.started.append(result.pop("proc"))
         if result.get("ok") and stop_after_min > 0:
@@ -961,14 +961,13 @@ class Handler(BaseHTTPRequestHandler):
             settings = body.get("settings") or {}
             try:
                 stop_after_min = float(body.get("stop_after_min") or 0)
-                hardness = None if body.get("sim_hardness") in (None, "") else float(body["sim_hardness"])
             except (TypeError, ValueError):
-                return self._json({"error": "the time limit and the sim hardness are numbers"}, HTTPStatus.BAD_REQUEST)
-            if not isinstance(settings, dict) or (hardness is not None and not 0 <= hardness <= 1):
+                return self._json({"error": "the time limit is a number"}, HTTPStatus.BAD_REQUEST)
+            if not isinstance(settings, dict):
                 return self._json({"error": "bad settings"}, HTTPStatus.BAD_REQUEST)
             result = s.start(str(body.get("tree", "")), str(body.get("init", "")), actors,
                              str(body.get("name", "")).strip(), str(body.get("extra", "")), settings=settings,
-                             env=str(body.get("env", "real")), sim_hardness=hardness, stop_after_min=stop_after_min)
+                             env=str(body.get("env", "real")), stop_after_min=stop_after_min)
             return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
         if self.path == "/api/fleet":
             try:

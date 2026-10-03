@@ -30,12 +30,12 @@ from zombiesai.viz.stream import StreamFeed
 from zombiesai.viz.supervise import build_payload, live_trainers, run_roots
 from zombiesai.viz.system import SystemSampler
 
-SITE_LINKS = [("← domalouf.com", "/"), ("The agent playing", "/zombies/"), ("Live stream", "/zombies/live/"),
+SITE_LINKS = [("← domalouf.com", "/"), ("Live stream", "/zombies/live/"),
               ("Code on GitHub", "https://github.com/domalouf/ZombiesAI")]
 LIVE_INTRO = (
     "How the reinforcement-learning agent's training is going, live from the gaming PC it trains on: the machine "
-    "as it works, the runs training right now, and every run its trainers have written -- PPO on NachtSim and the "
-    "real game, behavioural cloning from human play, and the inverse dynamics model."
+    "as it works, the runs training right now, and every run its trainers have written -- PPO on the real game, "
+    "behavioural cloning from human play, and the inverse dynamics model."
 )
 PROC_FIELDS = ("name", "cpu", "rss", "mem_pct", "threads")
 # A worker machine's id is its file name on the site and nothing else: short, lower case, no dots or slashes.

@@ -1,7 +1,8 @@
 """Read every run under runs/ and write a self-contained HTML dashboard of how training is going.
 
-Deliberately stdlib-only. A training run's log is JSON on disk; reading it should not need torch,
-numpy or gymnasium, so this can be pointed at a runs/ directory copied off the training box.
+Deliberately stdlib-only. A training run's log is JSON on disk; reading it should not need torch or numpy,
+so this can be pointed at a runs/ directory copied off the training box -- any run directory with a
+metrics.jsonl, whichever trainer wrote it.
 """
 
 import ipaddress
@@ -18,13 +19,11 @@ TEMPLATE = Path(__file__).with_name("dashboard_template.html")
 FONTS = Path(__file__).with_name("fonts")
 
 # The gates training is judged against, quoted from PLAN.md so the dashboard argues from the plan and
-# not from taste. The shares are M7's anti-hacking gate for T1; the returns are M2's correctness checks.
+# not from taste: M7's anti-hacking gate for T1.
 GATES = {
     "max_term_share": {"limit": 0.60, "short": "largest term", "label": "no single reward term above 60% of return"},
     "repair_share": {"limit": 0.25, "short": "repairs", "label": "repairs below 25% of points earned"},
 }
-# Mirrors PRESETS in rl/envs.py, which is the source of truth but imports gymnasium.
-SOLVED_AT = {"cartpole": 475.0, "lunarlander": 200.0}
 
 # The validated dark categorical slots, in their fixed order. A run keeps its slot for the life of the
 # page: hiding one must never repaint the others.
@@ -69,7 +68,7 @@ MACHINE_SERIES = (
 # pooled for that curve instead.
 STALE_WINDOW = 10
 LATE_WARN_PCT = 10.0  # MachineStats.BAD_STEP_WARN in rl/parallel_ppo.py
-# Charts are scoped to one of these at a time. Plotting CartPole's return beside NachtSim's would put two
+# Charts are scoped to one of these at a time. A rehearsal's return beside the real game's would put two
 # different units on one axis, and a 500k-step run beside a 20M-step one squashes the short one to nothing.
 GROUP_LABEL = {"bc": "behavioural cloning", "idm": "inverse dynamics"}
 # The one each kind leads with, and the x it is plotted against.
@@ -266,14 +265,8 @@ def _progress(kind: str, config: dict, rows: list[dict]) -> tuple[float | None, 
     """Fraction done and the text that says it, from whatever the trainer's config promised."""
     last = rows[-1] if rows else {}
     if kind == "ppo":
-        total, per = _num(config.get("total_steps")), None
-        if _num(config.get("rollout_steps")) and _num(config.get("num_envs")):
-            per = config["rollout_steps"] * config["num_envs"]
-        step = _num(last.get("step"))
-        if total and per and _num(last.get("update")):
-            updates = total // per
-            done = min(1.0, last["update"] / updates) if updates else None
-            return done, f"update {last['update']:,} of {updates:,}"
+        # Steps, not updates: an RL update gathers whole segments, so its size is a target, not a constant.
+        total, step = _num(config.get("total_steps")), _num(last.get("step"))
         if total and step:
             return min(1.0, step / total), f"{step:,} of {total:,} steps"
         return None, f"{step:,} steps" if step else "no updates logged"
@@ -384,17 +377,12 @@ def _stats(run: dict) -> dict:
     for key in ("return_mean", "round_reached_mean", "val.accuracy.mean_balanced", "val.mean_balanced"):
         if key in series:
             out[key] = {"last": series[key]["last"], "best": series[key]["best"]}
-    solved_at = SOLVED_AT.get(run["env"] or "")
-    if solved_at is not None and "return_mean" in series:
-        out["solved_at"] = solved_at
-        # PPO's own rule: the mean over the trailing 100 episodes, which is exactly what return_mean is.
-        out["solved"] = series["return_mean"]["last"] >= solved_at
     return out
 
 
 def _notes(run: dict) -> list[dict]:
     """Verdicts, each one tied to a number on the page. Levels: good, warning, serious, critical, info."""
-    notes, series, stats = [], run["series"], run["stats"]
+    notes, series = [], run["series"]
     head = series.get(run["headline"] or "")
     if head and head.get("trend"):
         t = head["trend"]
@@ -404,14 +392,6 @@ def _notes(run: dict) -> list[dict]:
                 "level": word,
                 "text": f"{head['label'].lower()} is {t['verdict']}: {_fmt(t['rise'], signed=True)} over the last "
                 f"{_span_text(t['span'], run['x_key'])}, against a spread of {_fmt(t['spread'])}",
-            }
-        )
-    if "solved" in stats:
-        notes.append(
-            {
-                "level": "good" if stats["solved"] else "warning",
-                "text": f"{run['env']} counts as solved at {stats['solved_at']:g}; "
-                f"the last 100 episodes average {series['return_mean']['last']:.1f}",
             }
         )
     pairs = (("max_term_share_mean", "max_term_share"), ("repair_share_mean", "repair_share"))
