@@ -9,12 +9,12 @@ There are two routes in, and they do different jobs.
 
 ## Route A — record your own play, with input logging
 
-`scripts/record_demo.py --source screen` captures the screen at the decision rate and logs raw mouse counts
+`scripts/record_demo.py` captures the game's window at the decision rate and logs raw mouse counts
 and key transitions on the same clock, then writes a clip whose every frame is paired with the action you
 took while looking at it.
 
 ```sh
-uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 \
+uv run python scripts/record_demo.py --counts-per-degree 6.4 --minutes 20 \
     --notes "camping the help room, deliberately bad positioning after round 8"
 
 # On the Linux machine, with its standing settings (window, bindings, counts per degree, --wait, --audio):
@@ -50,10 +50,9 @@ weapon swap), so they and the mouse under Super never become labels. Closing the
 recorder stops it as cleanly as Ctrl-C: the clip is closed with its labels, and a clip that was killed
 outright can still be re-quantized, because its start time is written before the first step.
 
-The command is the same on either OS. Add `--wait` to launch it from a terminal elsewhere: it starts once the
-game window can be captured, after a three-second countdown ([`linux.md`](./linux.md) says why). On Linux the pixels come from the game's XWayland window and the input
-log from `/dev/input/event*`, which reports the same device counts Windows Raw Input does. The Linux setup
-those two need -- group membership, a udev rule, and flat pointer acceleration -- is in
+Add `--wait` to launch it from a terminal elsewhere: it starts once the game window can be captured, after a
+three-second countdown ([`linux.md`](./linux.md) says why). The pixels come from the game's XWayland window
+and the input log from `/dev/input/event*`, which reports the mouse's own counts. The setup those two need -- group membership, a udev rule, and flat pointer acceleration -- is in
 [`linux.md`](./linux.md), along with the spike order and what to check when the engine ignores the virtual
 mouse.
 
@@ -71,9 +70,8 @@ model that makes Route B possible. Two things decide whether the labels are wort
   `scripts/calibrate_mouse.py` measures it for you by turning the view and watching the pixels move.
 - **Raw counts, not cursor deltas.** In a mouse-look FPS the cursor is captured and re-centred, so cursor
   positions carry no information about how far you turned. `demos/evdev_input.py` reads the kernel's
-  event devices and `demos/win32_input.py` reads Windows Raw Input
-  (`WM_INPUT`), which reports the device's own relative counts — the same unit the agent's synthetic mouse
-  will emit. That symmetry is the reason a human's action means anything to the policy.
+  event devices, which report the device's own relative counts — the same unit the agent's synthetic mouse
+  emits. That symmetry is the reason a human's action means anything to the policy.
 - **The wheel is a button.** WaW cycles weapons on the mouse wheel, so each notch is logged as a tap of
   `wheelup`/`wheeldown`, and the default bindings (and `configs/waw_bindings.json`) map both to `swap`.
   Several notches inside one decision are still one `swap` label.
@@ -101,21 +99,21 @@ label confidence, what your hands did, and — the one that matters — whether 
 direction the image actually moved (`yaw_flow_agreement`, criteria in `FlowCheck`). It reports three
 things. The **lag** at which yaw and image motion agree best (Spearman rank correlation over lags −3…+3) is
 the closed-loop delay measured from your own recording: 0 on the real game (demo_0000 peaks sharply there),
-the sim's own input latency on `--source sim`. A peak confidently elsewhere means the input log and the
+or a source's own declared input latency (the synthetic stand-in's, in the tests). A peak confidently elsewhere means the input log and the
 capture are out of step in time — stop and fix it, because no amount of training absorbs a timing bug. The
 **px per degree** of image shift, as a horizontal FOV, catches a wrong `--counts-per-degree`, which no
-correlation can see: WaW reads 81–96° at 16:9, the sim 80°, and a 2× error lands outside 62–110°. That one
+correlation can see: WaW reads 81–96° at 16:9, and a 2× error lands outside 62–110°. That one
 is fixed with `requantize`, not by re-recording. The rank correlation itself only has to clear 0.3: on real
 footage the optical-flow estimate locks onto fog, zombies and the gun often enough that 0.7 is a good
 recording (demo_0000 scores 0.74, where the old Pearson threshold of 0.9 read 0.52 and cried wolf).
 
-### Game audio (`--audio`, Linux)
+### Game audio (`--audio`)
 
 `--audio` also keeps the sound, which a policy trained with `train_bc.py --audio` hears (PLAN.md, risk 11;
 see "Hearing" under Behavioural cloning). A recording made without it can never be given it later.
 
 ```sh
-uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 --audio
+uv run python scripts/record_demo.py --counts-per-degree 6.4 --minutes 20 --audio
 ```
 
 - **What is recorded:** the default sink's *monitor* through `parec` (PipeWire via pipewire-pulse, or
@@ -138,18 +136,16 @@ uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --m
 - **Reading it:** `clip.audio_for_step(k, window_s=0.2)` is the 200 ms that had played by the time step k's
   frame was grabbed -- causal, like the frame -- as `(9600, 2)` int16, silence where nothing was captured.
   `clip.audio()` gives the whole stream with `sample_at(t)` / `time_of(sample)` on the monotonic clock.
-- **Windows:** not implemented. `demos/audio.py` takes any stream with `read() -> (bytes, t_mono)`, so WASAPI
-  loopback slots in as one more class.
 
 **Play deliberately varied games.** Camping, trains, bad positioning, early deaths, running out of ammo. A
 policy cloned from expert-only play has no idea what to do the moment it drifts off-distribution. The
 DAgger loop that rescues it is the live player: take the controls while it plays and your fix is recorded as
 training data (Route C below).
 
-**On Linux, `--source sim` records NachtSim instead**, with a scripted agent at the controls, writing exactly
-the same format. It is how the recording path stays testable without a Windows box, and how you can have
-labelled clips before you have recorded anything real. It is not a substitute for real footage: the sim's
-raycast view is a crude stand-in, and visual sim-to-real transfer is a non-goal (`sim_lies.md`).
+The recording path is tested without the game: `zombiesai/synthetic.py`'s `SyntheticSource` is a scripted
+player in a stand-in world, read by the recorder exactly as a human at the game is, so CI checks the labels,
+the pairing of frame and action, and the flow check on every commit. It is a test fixture, not training data:
+nothing learned on its pixels transfers to World at War's.
 
 ## Route B — video nobody logged input for
 
@@ -171,9 +167,8 @@ It is allowed to see the frames on *both* sides of a decision, which makes its j
 policy's: a turn to the right is visible as the scene sliding left, and a reload is visible as the animation
 that follows it. So a small amount of labelled play buys labels for an unbounded amount of unlabelled video.
 
-The catch, and it is worth being blunt about it: **an IDM trained on NachtSim renders will not label real
-World at War footage.** The sim's view is untextured flat shading with a made-up font. Route B needs an IDM
-trained on Route A recordings of the real game — half an hour of logged play is a reasonable start, and it
+The catch, and it is worth being blunt about it: **the IDM is only as good as the real recordings it was
+trained on.** Route B needs an IDM trained on Route A recordings of the real game — half an hour of logged play is a reasonable start, and it
 is spent far better there than on half an hour of demonstrations.
 
 ## Route C — correct the policy while it plays
@@ -228,10 +223,9 @@ Packing takes about half a minute and never runs during the recording; Ctrl-C le
 aspect ratio needs new ones.
 
 Frames and labels are versioned separately on purpose. A spec change that touches the HUD layout must not
-invalidate a weekend of ingested video; one that moves the yaw bins must invalidate its labels. Recorded
-*episodes* (`store/episode_store.py`) read as clips too, via `clips.clip_from_episode`, so a BC run can mix
-human video with sim episodes — and the episodes bring Monte-Carlo returns and auxiliary targets the video
-cannot.
+invalidate a weekend of ingested video; one that moves the yaw bins must invalidate its labels. A clip whose
+source knew its rewards can also carry per-step `mc_return`, `aux_dpoints` and `aux_damage` columns, the
+value and auxiliary heads' targets, which video cannot supply.
 
 ## Behavioural cloning
 
@@ -239,8 +233,8 @@ cannot.
 uv run python scripts/train_bc.py data/clips/session1 data/demos --out runs/bc1
 uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2        # plus your corrections
 uv run python scripts/train_bc.py data/demos --val-clips data/demos/demo_0001 --out runs/bc3   # fixed held-out clip
-uv run python scripts/eval_bc.py runs/bc1/bc.pt --clips data/demos-heldout --episodes 20
-uv run python scripts/watch.py --checkpoint runs/bc1/bc.pt      # watch it play NachtSim
+uv run python scripts/eval_bc.py runs/bc1/bc.pt --clips data/demos-heldout
+uv run python scripts/play_real.py runs/bc1/bc.pt --minutes 3   # watch it play the real game
 ```
 
 The policy sees a causal stack of 4 decision frames — nothing you could not see, in nothing but pixels — and
@@ -266,7 +260,8 @@ predicts the eight action heads. Details that are decisions rather than defaults
 - **A value head fitted to Monte-Carlo returns, plus auxiliary heads for "did I just score" and "am I being
   hit."** They cost nothing at BC time, they hand M7's RL run a critic that is already worth something, and
   they force the encoder to represent exactly what a value function needs. They train only on the clips whose
-  source could supply the targets.
+  source could supply the targets -- which human recordings cannot yet: that waits on rewards read off their
+  HUD crops.
 - **Prev-action conditioning is off by default.** It is the sufficient statistic for a delayed MDP and it
   belongs in the real environment — but in BC it is also the single strongest predictor of the label, and a
   policy that learns to copy its last action scores beautifully per frame and stands still in the game. Turn
@@ -299,7 +294,7 @@ pixel features in the mixer.
 - **Clips without audio still train**, with their audio *masked*: the embedding is multiplied by a has-audio
   flag that also goes into the mixer. Excluding them would throw away vision data (demo_0000 is a third of
   the footage); padding them with silence would teach that silence means "nothing is coming". The mask also
-  lets a hearing policy play deaf — in the sim, or when the live stream dies.
+  lets a hearing policy play deaf when the live stream dies.
 - **Random ±6 dB gain** on training features, so the policy does not hinge on where the volume sat.
 - **Causal and aligned.** Gunfire shows up 25-30 ms after the fire button in the recorded audio and never
   before it (demo_0001, demo_0002), i.e. in the step after the press.
@@ -317,17 +312,19 @@ pixel features in the mixer.
 ## Reading the evaluation
 
 Per-frame accuracy lies. A policy at 70% per-frame accuracy can be one that never pulls the trigger, because
-"don't fire" is the majority label. `eval_bc.py` reports four things instead:
+"don't fire" is the majority label. `eval_bc.py` reports three things instead, on held-out recordings:
 
 1. **Balanced per-head accuracy against the majority baseline.** If a head does not beat its baseline, it has
    learned nothing, whatever the raw number says.
    Training also logs each head's plain held-out cross-entropy (`val.nll` in `metrics.jsonl`, no class
    weights or focal term), which moves before the accuracies do and shows overfitting first.
-2. **Rollout statistics within 2× of the human's** — fire duty cycle, mean |yaw|/s, reload rate, how often a
-   button is pressed at all. Measured from *sampled* actions, because that is what the policy will do in the
-   game; an argmax policy systematically under-fires.
+2. **Behaviour statistics within 2× of the human's** — fire duty cycle, mean |yaw|/s, reload rate, how often a
+   button is pressed at all. Measured from *sampled* actions on the human's own frames, because that is what
+   the policy will do in the game; an argmax policy systematically under-fires.
 3. **The action-inertia check** — its copy rate against the human's own action autocorrelation.
-4. **Rounds survived in NachtSim**, which is a smoke test and not a score.
+
+Rounds survived are the real game's to say: `play_real.py` plays a checkpoint, and an RL run's
+`episodes.jsonl` records every game's round.
 
 A few failures and what they usually mean:
 
@@ -346,10 +343,10 @@ A few failures and what they usually mean:
   and ammo from a clip's HUD crops (docs/hud.md) into `hud.npz`, but BC does not consume it and there is
   no reward on real footage yet. Ingested video and recordings made before the crops existed have no
   crops; `--lowres` reads only the round from their frames.
-- **Nothing here has been run against the game.** The Linux capture path is tested against a real X
-  server and the dispatcher's output round-trips through the same decoder a recording uses, but an X
-  server in CI is not World at War under Proton, and `win32_input.py` has never run on Windows at all.
-  Spikes S1-S3 exist to check exactly this; treat the first session as one.
+- **CI never touches the game.** The capture path is tested against a real X server and the dispatcher's
+  output round-trips through the same decoder a recording uses, but an X server in CI is not World at War
+  under Proton. After a change to capture or input, the spikes (S1-S3) and a short recording's quality check
+  are the real test.
 - **The IDM is trained per-game, not per-project.** An IDM fit to your sensitivity and your bindings labels
   your footage. Someone else's video, at a different sensitivity, needs its own `counts_per_degree` at
   minimum — and, if the difference is large, its own IDM.
