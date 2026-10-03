@@ -31,11 +31,13 @@ from zombiesai.rl.parallel_ppo import RLConfig, train
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("init", type=Path, help="the BC checkpoint to start from (or an RL checkpoint to continue)")
+    parser.add_argument("init", type=Path, help="the BC checkpoint to start from, an RL checkpoint to continue, "
+                                                 "or 'fresh' for a new pixel+audio policy with no BC prior")
     parser.add_argument("--env", choices=("real", "synthetic"), default="real",
                         help="real: this machine's game instances; synthetic: no game, a rehearsal of the plumbing")
-    parser.add_argument("--actors", type=int, default=4, help="one per game instance (real) or rehearsal process; "
-                                                                 "0 with --listen: only other machines play")
+    parser.add_argument("--actors", default="4", help="one per game instance (real) or rehearsal process; "
+                                                         "0 with --listen: only other machines play; auto: as many "
+                                                         "games as this PC can carry beside the learner")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--fleet", default=RLConfig.fleet_root, help="the fleet's root (scripts/instances.py)")
     for f in fields(RLConfig):
@@ -49,6 +51,14 @@ def main() -> None:
             parser.add_argument(flag, type=kind, default=f.default)
     args = parser.parse_args()
 
+    if args.actors == "auto":
+        from zombiesai.rl.capacity import games_for, probe
+
+        verdict = games_for(probe(args.fleet), learner=True)
+        print(f"--actors auto: {verdict}")
+        args.actors = verdict.games
+    else:
+        args.actors = int(args.actors)
     values = {f.name: getattr(args, f.name) for f in fields(RLConfig)
               if f.name not in ("init", "env", "n_actors", "fleet_root", "synthetic")}
     config = RLConfig(init=str(args.init), env=args.env, n_actors=args.actors, fleet_root=args.fleet, **values)

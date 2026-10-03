@@ -254,6 +254,23 @@ A worker can be left running (`deploy/zombiesai-worker.service`). It waits for a
 the learner starts, and stops its actors (every key released) when it hasn't heard from the learner for 60 s.
 Then it waits for the next run. The games stay up between runs, as they do on the learner.
 
+**Zero-config joining** (`rl/discovery.py`, `rl/capacity.py`). A worker started without `--learner` listens for
+the learner's beacon -- a UDP broadcast on port 47861 every ~2 s, HMAC-signed with the fleet token, so a foreign
+or forged one is ignored -- and joins it (`--run <name>` picks one when several announce; the newest wins
+otherwise). If the learner moves to another PC (`train_rl.py <its last checkpoint.pt> --listen` there), the
+workers find it again the same way. `--actors auto` (the worker's default; also `train_rl.py --actors auto`) sizes
+the PC from its free RAM, VRAM and cores, minus a share for the desktop and the learner, and the worker starts the
+games itself if they are not up (`--down-after MIN` takes them down again after a quiet spell). With
+`--yield-to-games` it leaves the run, keys released and games stopped, while the PC's owner is playing a Steam
+game or `~/.config/zombiesai/pause` exists, and comes back a minute after the PC is free. Open UDP 47861
+(broadcast) and TCP 47860 on the LAN.
+
+```sh
+# A new gaming PC, start to finish: clone the repo at ~/Projects/ZombiesAI, uv sync, Plutonium installed, then
+printf 'ZOMBIES_FLEET_TOKEN=%s\n' '<token>' > ~/.config/zombiesai/fleet.env && chmod 600 ~/.config/zombiesai/fleet.env
+cp deploy/zombiesai-worker.service ~/.config/systemd/user/ && systemctl --user enable --now zombiesai-worker
+```
+
 **What the learner refuses**, at hello, before a single segment:
 
 - **A different commit or spec version.** The actor code, reward shaping and observation layout must be the

@@ -1,9 +1,10 @@
-# Keep this gaming PC playing for the learner: it waits for a run, joins it, stops its games' actors when the
-# learner goes away, and waits for the next one (scripts/fleet_worker.py; docs/rl.md, "Several PCs"). A user
-# unit, like zombiesai-live; the games themselves are started with scripts/instances.py up, and stay up.
+# Keep this gaming PC playing for the learner whenever it is free: it finds the learner on the LAN by its beacon,
+# starts as many games as the PC can carry, joins the run, steps aside while you play (or while
+# ~/.config/zombiesai/pause exists), and waits for the next run when the learner goes away
+# (scripts/fleet_worker.py; docs/rl.md, "Several PCs"). A user unit, like zombiesai-live.
 #
 #   mkdir -p ~/.config/zombiesai
-#   printf 'ZOMBIES_FLEET_TOKEN=%s\nZOMBIES_FLEET_LEARNER=%s\n' '<token>' '<learner-host>.lan' > ~/.config/zombiesai/fleet.env
+#   printf 'ZOMBIES_FLEET_TOKEN=%s\n' '<token>' > ~/.config/zombiesai/fleet.env   # the learner is found by beacon
 #   chmod 600 ~/.config/zombiesai/fleet.env
 #   cp deploy/zombiesai-worker.service ~/.config/systemd/user/
 #   systemctl --user daemon-reload && systemctl --user enable --now zombiesai-worker
@@ -16,7 +17,7 @@ After=network-online.target
 [Service]
 EnvironmentFile=%h/.config/zombiesai/fleet.env
 WorkingDirectory=%h/Projects/ZombiesAI
-ExecStart=/usr/bin/uv run --no-sync python -u scripts/fleet_worker.py --actors 4
+ExecStart=/usr/bin/uv run --no-sync python -u scripts/fleet_worker.py --actors auto --yield-to-games
 # A refusal (another commit, other settings) exits; trying again every minute picks up a fix once it is made.
 Restart=always
 RestartSec=60

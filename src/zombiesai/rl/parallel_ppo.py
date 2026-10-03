@@ -175,6 +175,11 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     if not config.listen and config.n_actors < 1:
         raise ValueError("no actors: give this machine some, or listen for other machines' (--listen)")
     run_dir.mkdir(parents=True, exist_ok=False)
+    # init="fresh": a new pixel+audio policy saved as run_dir/init.pt, with no prior to anchor to (rl/learner.py).
+    # Done before anything reads config.init, so the actors and the fleet's workers start from that file.
+    from zombiesai.rl.learner import prepare_init
+
+    config = prepare_init(config, run_dir)
     (run_dir / "config.json").write_text(json.dumps(
         {**asdict(config), "env": config.env_name, "algorithm": "ppo-finetune", "spec_version": spec.SPEC_VERSION},
         indent=2))
@@ -350,9 +355,10 @@ def _print_row(row: dict, say) -> None:
         parts.append(f"critic warm-up, value loss {row.get('value_loss', float('nan')):.3f}")
     else:
         ev = row.get("explained_variance")
+        kl_ref = row.get("kl_ref")  # absent with no prior to anchor to (init="fresh")
         parts.append(f"ent {row.get('entropy', float('nan')):.2f} kl {row['approx_kl']:.4f} "
-                     f"kl_bc {row.get('kl_ref', float('nan')):.3f} clip {row.get('clipfrac', float('nan')):.2f} "
-                     f"ev {'-' if ev is None else f'{ev:.2f}'}")
+                     + (f"kl_bc {kl_ref:.3f} " if isinstance(kl_ref, float) and math.isfinite(kl_ref) else "")
+                     + f"clip {row.get('clipfrac', float('nan')):.2f} ev {'-' if ev is None else f'{ev:.2f}'}")
     if row.get("bad_step_frac"):
         parts.append(f"bad {row['bad_step_frac']:.1%}")
     say(" | ".join(parts))
