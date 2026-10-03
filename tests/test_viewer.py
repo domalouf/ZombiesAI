@@ -121,3 +121,83 @@ def test_show_replaces_the_old_viewers_places_each_on_the_workspace_then_goes_th
     assert "[workspace 7 silent; float; size " in dispatched[0] and "--watch :60 " in dispatched[0]
     assert "--watch :61 " in dispatched[1]
     assert dispatched[2] == 'hl.dsp.focus({ workspace = "7" })'
+
+
+def test_the_agent_view_is_the_policy_frame_in_whole_pixels_in_the_top_right_corner():
+    import numpy as np
+
+    from zombiesai.demos import frames as fr
+    from zombiesai.realgame.viewer import AgentInset
+
+    rng = np.random.default_rng(0)
+    frame = rng.integers(0, 256, (1440, 2560, 4), dtype=np.uint8)
+    seen = fr.to_policy_frame(frame, channels=fr.BGRX)
+    inset = AgentInset(1440, 2560)
+    out = inset.draw(frame.copy())
+    assert inset.scale == 5 and (inset.h, inset.w) == (360, 640)
+    assert inset.x + inset.w + inset.BORDER + inset.MARGIN == 2560
+    drawn = out[inset.y:inset.y + inset.h, inset.x:inset.x + inset.w, 2::-1]  # BGRX back to RGB
+    assert np.array_equal(drawn[::inset.scale, ::inset.scale], seen)
+    assert np.array_equal(drawn, seen.repeat(5, axis=0).repeat(5, axis=1))
+    assert (out[inset.y - 1, inset.x:inset.x + inset.w, :3] == 255).all()  # the border
+    assert np.array_equal(out[inset.bottom:], frame[inset.bottom:])  # nothing below it touched
+
+
+def test_a_read_only_grab_is_drawn_on_a_copy():
+    import numpy as np
+
+    from zombiesai.realgame.viewer import AgentInset
+
+    frame = np.zeros((720, 1280, 4), dtype=np.uint8)
+    frame.flags.writeable = False
+    out = AgentInset(720, 1280).draw(frame)
+    assert out is not frame and not frame.any() and out.any()
+
+
+def test_with_a_socket_mpv_listens_for_the_overlay_and_without_one_draws_nothing():
+    assert "--input-ipc-server=/run/v.sock" in mpv_command(2560, 1440, "t", "/run/v.sock")
+    assert "--osd-level=0" in mpv_command(2560, 1440, "t")
+
+
+def test_the_stream_panel_shows_the_overlays_four_numbers_as_it_formats_them():
+    from zombiesai.realgame.viewer import stats_panel
+
+    stats = {"games": 1234, "window": 100, "best_round": 9, "avg_round": 4.6, "accuracy": 0.0318,
+             "avg_survival_s": 432, "avg_points": 1234.5, "avg_kills": 7.25}
+    events = "\n".join(stats_panel(stats, "rl9", True, 1440))
+    for text in ("ZOMBIES AI \u00b7 PPO \u00b7 rl9", "TRAINING LIVE", "}9", "}4.6", "}3.2%", "}7:12", "}1,234", "}7.2", "Avg kills",
+                 "last 100 of 1,234 games"):
+        assert text in events
+    assert "TRAINING LIVE" not in "\n".join(stats_panel(stats, "rl9", False, 1440))
+    assert "Waiting for the first game" in "\n".join(stats_panel(None, None, False, 1440))
+
+
+def test_the_hud_marks_say_what_the_parser_read_or_why_not():
+    from zombiesai.hud.parse import HudReading
+    from zombiesai.realgame.viewer import hud_marks
+
+    boxes = {"points_ammo": (2180, 1170, 380, 270), "round": (0, 1160, 320, 280)}
+    events = "\n".join(hud_marks(boxes, HudReading(points=500, points_status=0, round=3, round_status=0), 1440))
+    assert "reward reads: 500 pts" in events and "round 3" in events
+    events = "\n".join(hud_marks(boxes, HudReading(points_status=2, round_status=1), 1440))
+    assert "reward reads: ?" in events and "round \u2013" in events
+
+
+def test_text_from_outside_cannot_open_an_ass_tag():
+    from zombiesai.realgame.viewer import _ass
+
+    assert "{" not in _ass("{\\an5}x") and "\\" not in _ass("a\\b")
+
+
+def test_the_sound_is_the_instances_sink_monitor_and_dies_with_the_viewer():
+    from zombiesai.realgame.viewer import loopback_command
+
+    command = loopback_command("zombiesai_2", "zombiesai-view:62")
+    assert command[0] == "pw-loopback" and "target.object=zombiesai_2 stream.capture.sink=true" in " ".join(command)
+    assert command[-1] == 'media.name="zombiesai-view:62"'
+    command = viewer_command(Screen(":62", 2560, 1440), run_dir="/r/rl9", sink="zombiesai_2")
+    assert command.endswith("--fps 30 --run /r/rl9 --sink zombiesai_2") and '"' not in command
+
+
+def test_the_viewer_command_says_so_only_when_the_agent_view_is_off():
+    assert viewer_command(Screen(":61", 2560, 1440), agent_view=False).endswith("--fps 30 --no-agent-view")

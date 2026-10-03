@@ -17,6 +17,10 @@ rules allow. This is the last step: which of those changes pay, and as what.
   what it did, though. A small gain (at most `max_repair_points`) that settles within `repair_window_steps` of
   a `use` press, with the trigger untouched all that while, is a repair. That keeps the plan's board-farming
   defences -- the 0.2 weight, the per-round cap, the repair-share alarm -- working on the real game.
+* **Kills** are counted, not paid for separately (their points already pay): a settled gain of at least
+  `KILL_MIN_POINTS` that is not a repair holds a kill, since a hit is 10 and a kill 50-100 (hud/track.py). It is
+  a lower bound -- two kills settling in one roll of the counter count once -- and double points' 20-point hits
+  can sum past it. The HUD has no kill counter to do better with.
 
 Not here yet: `damage_event` (no damage detector reads the real screen) and ammo rebuys (a rebuy costs half
 the gun, which collides with other prices). Both stay zero rather than guessed.
@@ -31,6 +35,7 @@ from zombiesai import spec
 from zombiesai.hud.track import Tracked
 from zombiesai.reward import StepSignals
 
+KILL_MIN_POINTS = 50
 DOOR_PRICES = (1000,)
 WALL_WEAPON_PRICES = (200, 600, 1200)
 USE = spec.BUTTONS.index("use")
@@ -56,7 +61,8 @@ class HudSignals:
         self._recent: deque[tuple[bool, bool]] = deque(maxlen=self.config.repair_window_steps)
         self._round = -1
         self._doors = 0
-        self.events: dict[str, int] = {"gain": 0, "repair": 0, "spend": 0, "implausible": 0, "rounds": 0}
+        self.events: dict[str, int] = {"gain": 0, "repair": 0, "spend": 0, "implausible": 0, "rounds": 0,
+                                       "kill": 0}
         self.points_gained = 0
         self.died = False
 
@@ -77,6 +83,8 @@ class HudSignals:
                 self.events["repair"] += 1
             else:
                 self.events["gain"] += 1
+                if delta >= KILL_MIN_POINTS:
+                    self.events["kill"] += 1
         elif kind == "spend" and delta < 0:
             self.events["spend"] += 1
             price = -delta

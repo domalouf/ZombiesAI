@@ -21,6 +21,17 @@ def test_settled_gains_pay_and_implausible_changes_do_not():
     assert s.events["gain"] == 1 and s.events["implausible"] == 1 and s.points_gained == 60
 
 
+def test_a_gain_of_a_kills_size_counts_a_kill_and_a_hit_or_a_repair_does_not():
+    s = HudSignals()
+    for points in (10, 60, 100, 130, 20):
+        s.step(tracked("gain", points), FIRE)
+    assert s.events["kill"] == 3 and s.events["gain"] == 5
+    s = HudSignals()
+    s.step(tracked(), USE)
+    s.step(tracked("gain", 50), IDLE)  # rebuilding, trigger untouched: a repair, however it adds up
+    assert s.events["repair"] == 1 and s.events["kill"] == 0
+
+
 def test_a_small_gain_after_pressing_use_without_firing_is_a_repair():
     s = HudSignals()
     s.step(tracked(), USE)

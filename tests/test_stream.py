@@ -17,8 +17,26 @@ def test_the_overlay_numbers_are_the_runs_best_and_the_recent_games_means():
     s = summarize(games, window=4)
     assert s["best_round"] == 9 and s["games"] == 5 and s["window"] == 4  # best over the run, not the window
     assert s["avg_round"] == 2.0 and s["avg_survival_s"] == 120.0 and s["accuracy"] == 0.2
+    assert s["avg_points"] is None  # no game said what it earned
     assert summarize([]) == {"games": 0, "window": 0, "best_round": None, "avg_round": None, "accuracy": None,
-                             "avg_survival_s": None}
+                             "avg_survival_s": None, "avg_points": None, "avg_kills": None}
+
+
+def test_average_points_are_what_the_recent_games_earned():
+    games = [game(1, points_gained=p) for p in (5000, 0, 10, 50, 150)]
+    assert summarize(games, window=4)["avg_points"] == 52.5
+
+
+def test_average_kills_skip_games_from_before_kills_were_counted():
+    games = [game(1), game(1, kills=3), game(1, kills=0), game(1, kills=2)]
+    assert summarize(games)["avg_kills"] == 1.67
+    assert summarize([game(1)])["avg_kills"] is None
+
+
+def test_the_scoreboards_kills_are_never_averaged_with_the_hud_estimate():
+    games = [game(1, kills=0, end_kills=4), game(1, kills=2, end_kills=None), game(1, end_kills=3)]
+    assert summarize(games)["avg_kills"] == 3.5  # the game without a scoreboard read is left out, not estimated
+    assert summarize([game(1, kills=2), game(1, kills=1, end_kills=None)])["avg_kills"] == 1.5  # an older run
 
 
 def test_accuracy_weighs_games_by_their_shots_and_ignores_games_without_counts():

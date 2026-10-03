@@ -438,6 +438,7 @@ class RealGameEnv:
             "points_gained": self.signals.points_gained,
             "shots": self.shots,
             "hits": self.signals.events["gain"],
+            "kills": self.signals.events["kill"],
             "end_points": end.points if end else None,
             "end_kills": end.kills if end else None,
             "end_headshots": end.headshots if end else None,

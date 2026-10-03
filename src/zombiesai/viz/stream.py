@@ -4,6 +4,11 @@ Both read one file, stream.json, which the live publisher (viz/live_site.py) wri
 runs.json every few seconds and pushes to the site's zombies/training/live/:
 
     stats    the four the overlay shows: best round, average round, shot accuracy, average survival time
+             (and the average points and kills a game earned, which the live viewer shows: realgame/viewer.py.
+             Kills are the game-over scoreboard's (`end_kills`, realgame/end_screen.py), averaged over the games
+             it was read in; only a window with no such game -- an older run -- falls back to the HUD-gain
+             estimate (`kills`, a lower bound). The two are never mixed in one average, so the number cannot
+             change definition mid-window. A run with neither averages to "no value", not 0)
     recent   the last games, newest first, for the page's table
     rounds   how many games ended in each round
     curves   the round, survival and accuracy as rolling means over the games, for the page's charts
@@ -103,6 +108,12 @@ def _mean(values) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def average_kills(games: list[dict]) -> float | None:
+    """The scoreboard's kills over the games it was read in; the HUD estimate only if it was read in none."""
+    read = [g.get("end_kills") for g in games if _num(g.get("end_kills")) is not None]
+    return _mean(read) if read else _mean(g.get("kills") for g in games)
+
+
 def summarize(games: list[dict], window: int = WINDOW) -> dict:
     """The overlay's four numbers. The best round is the run's; the rest are over the last `window` games."""
     recent = games[-window:]
@@ -114,6 +125,8 @@ def summarize(games: list[dict], window: int = WINDOW) -> dict:
         "avg_round": _r(_mean(g.get("round_reached") for g in recent), 2),
         "accuracy": _r(accuracy(recent), 4),
         "avg_survival_s": _r(_mean(g.get("seconds") for g in recent), 1),
+        "avg_points": _r(_mean(g.get("points_gained") for g in recent), 1),
+        "avg_kills": _r(average_kills(recent), 2),
     }
 
 
