@@ -56,17 +56,16 @@ Done: instances in parallel on one PC, the real-game env with HUD reward and res
 labelled video, PPO fine-tuning across several PCs, the live dashboard, site and stream overlay. Linux-only
 cleanup and a ~4.5x cheaper actor step (1440p) landed on branch `linux-pixels-fleet`.
 
-In progress on their own branches (`~/Projects/zai-wt/`):
+Also merged: the PPO update staged on the GPU once with mixed precision; RL from a fresh pixel+audio network
+(`train_rl.py fresh`); LAN discovery of the learner, `--actors auto`, workers that start their own games and step
+aside while someone is gaming.
 
-- `agent/gpu-train` — PPO update staged on the GPU once with mixed precision; RL from a fresh pixel+audio
-  network (`init=fresh`); BC loader speedups.
-- `agent/fleet` — LAN discovery of the learner, `--actors auto` from the PC's hardware, workers that start their
-  own games and step aside while someone is gaming.
-- `agent/actor-runtime` — one inference process per PC so actors do not each load torch (~600 MB each).
+Still on its own branch (`~/Projects/zai-wt/actor-runtime`, early, not wired in): one inference process per PC so
+actors do not each load torch (~600 MB each). Not done at all: the BC data-loader speedups.
 
 ## Next
 
-1. Finish and merge the three branches above.
+1. Finish the per-PC inference process; speed up the BC data loader.
 2. A damage detector (the red vignette) so being hit costs something before it kills.
 3. The prompt reader (door / weapon / ammo prices) for ammo rebuys and affordance signals.
 4. The eval gate on the real game: `round_reached` of the frozen policy over 20 games against BC's.
