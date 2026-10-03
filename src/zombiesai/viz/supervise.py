@@ -320,7 +320,10 @@ def ram_status() -> dict:
 # ------------------------------------------------------------------------------------------------ starting runs
 
 TRAINER = Path("scripts") / "train_rl.py"
-RL_CONFIG = Path("src") / "zombiesai" / "rl" / "parallel_ppo.py"
+# Where RLConfig is defined: rl/config.py now, rl/parallel_ppo.py in trees from before the split. The first one
+# that defines it wins, so a worktree on an older commit still shows its own settings.
+RL_CONFIG_SOURCES = (Path("src") / "zombiesai" / "rl" / "config.py",
+                     Path("src") / "zombiesai" / "rl" / "parallel_ppo.py")
 RUN_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,47}")
 FORCE_AFTER_S = 30.0  # a graceful stop gets this long before the page offers to force one
 MAX_TIME_LIMIT_MIN = 7 * 24 * 60
@@ -365,13 +368,19 @@ def trainer_settings(tree: Path) -> list[dict]:
     """RLConfig's fields as the form offers them, read from the tree's own source with `ast` (no torch, no import
     of anything), so a setting added to the trainer appears here without the dashboard changing. Each has the
     flag train_rl.py makes of it, a kind, the code's default, the field's comment as a hint, and a group."""
-    try:
-        source = (tree / RL_CONFIG).read_text()
-        module = ast.parse(source)
-    except (OSError, SyntaxError):
+    source, config = "", None
+    for path in RL_CONFIG_SOURCES:
+        try:
+            source = (tree / path).read_text()
+            module = ast.parse(source)
+        except (OSError, SyntaxError):
+            continue
+        config = next((n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "RLConfig"), None)
+        if config is not None:
+            break
+    if config is None:
         return []
     lines = source.splitlines()
-    config = next((n for n in module.body if isinstance(n, ast.ClassDef) and n.name == "RLConfig"), None)
     settings = []
     for node in config.body if config else []:
         if not (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None):
