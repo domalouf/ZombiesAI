@@ -1,5 +1,6 @@
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -271,3 +272,113 @@ def test_a_steam_client_fleet_without_any_profile_has_no_config(tmp_path):
     inst.save_fleet(config)
     (Path(config.root) / "config.cfg").write_text('seta sensitivity "2"\n')
     assert inst.game_config(config.root) is None
+
+
+class FakeInstance:
+    """An instance that never launches anything: up() marks its game running, its window shows at once."""
+
+    def __init__(self, index: int, running: bool = False, log: list | None = None):
+        self.spec = type("Spec", (), {"index": index})()
+        self.running, self.log = running, log if log is not None else []
+
+    def game_running(self) -> bool:
+        return self.running
+
+    def up(self) -> None:
+        self.log.append(("up", self.spec.index))
+        self.running = True
+
+    def down(self) -> None:
+        self.log.append(("down", self.spec.index))
+        self.running = False
+
+    def window(self):
+        return type("Window", (), {"id": 0x400000 + self.spec.index})()
+
+    def sink(self):
+        log = self.log
+
+        class Sink:
+            def focus(self, window):
+                log.append(("focus", window))
+
+            def close(self):
+                pass
+
+        return Sink()
+
+
+def test_bring_up_starts_what_is_missing_one_game_at_a_time():
+    log: list = []
+    instances = [FakeInstance(0, running=True, log=log), FakeInstance(1, log=log), FakeInstance(2, log=log)]
+    slept: list = []
+    assert inst.bring_up(instances, stagger_s=5.0, say=lambda m: None, sleep=slept.append) == 2
+    # The running game is only checked (up() is idempotent); each new one has its window focused.
+    assert log == [("up", 0), ("up", 1), ("focus", 0x400001), ("up", 2), ("focus", 0x400002)]
+    assert slept  # the stagger after game 1, none after the last
+
+
+def test_bring_up_gives_up_between_games_when_asked():
+    log: list = []
+    instances = [FakeInstance(i, log=log) for i in range(3)]
+    asked = iter([False, False, True, True, True, True])
+    assert inst.bring_up(instances, stagger_s=0.0, say=lambda m: None, should_stop=lambda: next(asked),
+                         sleep=lambda s: None) == 1
+    assert [e for e in log if e[0] == "up"] == [("up", 0)]
+
+
+def test_a_window_that_never_comes_is_waited_for_then_left(tmp_path):
+    from zombiesai.demos.x11_capture import WindowNotFound
+
+    instance = FakeInstance(0)
+
+    def no_window():
+        raise WindowNotFound("not yet")
+
+    instance.window = no_window
+    now = [0.0]
+
+    def sleep(s):
+        now[0] += s
+
+    said: list = []
+    assert not inst.wait_for_window(instance, 5.0, say=said.append, sleep=sleep, clock=lambda: now[0])
+    assert now[0] >= 5.0 and "no game window after 5 s" in said[0]
+
+
+def test_ensure_fleet_grows_the_saved_fleet_and_starts_only_what_the_run_needs(tmp_path, monkeypatch):
+    config = fake_install(tmp_path, client="plutonium")
+    inst.save_fleet(replace(config, n=2, width=1920, height=1080))
+    started: list = []
+    log: list = []
+
+    def fake_fleet(cfg, *, say=print):
+        started.append(cfg)
+        return [FakeInstance(i, running=i == 0, log=log) for i in range(cfg.n)]
+
+    monkeypatch.setattr(inst, "fleet", fake_fleet)
+    got = inst.ensure_fleet(config.root, 3, say=lambda m: None, stagger_s=0.0)
+    assert got.n == 3 and inst.load_fleet(config.root).n == 3
+    assert (got.width, got.height, got.client) == (1920, 1080, "plutonium")  # its own settings kept
+    assert [e for e in log if e[0] == "up"] == [("up", 0), ("up", 1), ("up", 2)]
+    log.clear()
+    assert inst.ensure_fleet(config.root, 1, say=lambda m: None).n == 3  # never shrinks
+    assert [e for e in log if e[0] == "up"] == [("up", 0)]
+
+
+def test_ensure_fleet_on_a_pc_without_one_makes_the_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(inst, "fleet", lambda cfg, say=print: [FakeInstance(i) for i in range(cfg.n)])
+    root = tmp_path / "fleet"
+    got = inst.ensure_fleet(root, 2, say=lambda m: None, stagger_s=0.0)
+    assert got == FleetConfig(n=2, root=str(root)) and inst.load_fleet(root) == got
+
+
+def test_take_down_stops_every_game_and_counts_the_running_ones(tmp_path, monkeypatch):
+    assert inst.take_down(tmp_path / "none") == 0
+    config = fake_install(tmp_path)
+    inst.save_fleet(config)
+    log: list = []
+    monkeypatch.setattr(inst, "fleet", lambda cfg, say=print: [FakeInstance(i, running=i < 2, log=log)
+                                                              for i in range(cfg.n)])
+    assert inst.take_down(config.root, say=lambda m: None) == 2
+    assert log == [("down", 0), ("down", 1), ("down", 2)]
