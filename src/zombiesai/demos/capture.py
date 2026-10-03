@@ -1,12 +1,20 @@
-"""Frame sources for the demo recorder, real and fake.
+"""Frame sources for the recorder and the real-game env: the game's X11 window, and a fake for CI.
 
 The plan insists that the real env loop be runnable end to end on Linux with fake adapters, and the same
 insistence applies here: the recorder's timing, alignment and writing are the parts most likely to be
-subtly wrong, and they are all testable without a game. `ClipPlayback` is this module's FakeCapture and
-`SimSource` its FakeCapture-with-a-player -- between them the whole recording path runs in CI.
+subtly wrong, and they are all testable without a game. `ClipPlayback` is this module's FakeCapture, and
+`ReplayInput` plays a recorded input log back beside it -- between them the whole recording path runs in CI.
 
 A source answers `read()` with one policy-sized frame. Cropping and downsampling happen here rather than
 later so that nothing downstream ever sees a frame whose geometry it has to guess at.
+
+**Linux and X11 only.** The game runs under Proton as an XWayland client -- on the desktop, or in a rootful
+Xwayland of its own per instance (realgame/instances.py) -- so its window is read with MIT-SHM
+(demos/x11_capture.py). The Windows backends (Desktop Duplication, mss) are gone with the Windows host.
+
+**One step's capture is one pass over the frame.** The X server writes the window into a shared segment, and
+the policy frame and every HUD crop are computed from that BGRX buffer where it lies (demos/frames.py): no
+full-frame RGB copy, no float32 copy. That was ~26 ms of every 66.7 ms tick at 1440p; it is now ~2.5 ms.
 """
 
 import time
@@ -16,7 +24,6 @@ import numpy as np
 
 from zombiesai.demos import frames as fr
 from zombiesai.demos.clips import load_clip
-from zombiesai.demos.inputs import InputConfig, synthesize
 
 
 class CaptureLost(RuntimeError):
@@ -33,11 +40,10 @@ FROZEN_READS = 3
 
 
 class ScreenCapture:
-    """Desktop capture behind one `grab()`: X11/XWayland on Linux, DXGI Desktop Duplication on Windows.
+    """The game's X11 window -- by title or id, on `display` or $DISPLAY -- as policy frames and HUD crops.
 
-    Borderless windowed is the assumption on Windows, as the plan requires -- DirectX 9 exclusive fullscreen
-    generally cannot be captured by Desktop Duplication at all. On Linux the game is an XWayland client, so
-    capture targets its window by title or id and the compositor never enters the picture.
+    `region` (left, top, width, height) narrows the grab to part of the window; the server then sends only
+    those pixels. `monitor` is accepted for old callers and ignored: a window is captured, not a monitor.
     """
 
     def __init__(
@@ -52,6 +58,8 @@ class ScreenCapture:
         hud_regions: dict | None = None,
         hud_scale: float = 1.0,
     ):
+        if backend not in ("auto", "x11"):
+            raise ValueError(f"capture backend {backend!r} is gone: capture is X11 only (docs/linux.md)")
         self.region, self.fit, self.monitor = region, fit, monitor
         self.window, self.display = window, display
         # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
@@ -64,81 +72,30 @@ class ScreenCapture:
         self.last_stale = False
         self.stale_reason: str | None = None
         self._box: tuple[int, int, int, int] | None = None
-        self._last: np.ndarray | None = None
-        self._shape: tuple[int, ...] | None = None  # full-resolution shape of the first good grab
+        self._shape: tuple[int, int] | None = None  # (height, width) of the first good grab
         self._policy: np.ndarray | None = None  # the last good policy frame, returned again while stale
-        self.backend = backend if backend != "auto" else self._pick()
-        self._open()
+        self.backend = "x11"
+        from zombiesai.demos.x11_capture import X11Grabber
 
-    def _pick(self) -> str:
-        import importlib.util
-        import os
-        import sys
-
-        if sys.platform == "win32" and importlib.util.find_spec("dxcam") is not None:
-            return "dxcam"
-        # An explicit display or window is a statement of intent; otherwise DISPLAY says whether there is an
-        # X server (which on a Wayland session means XWayland, which is where the game will be).
-        if sys.platform.startswith("linux") and (self.display or self.window is not None or os.environ.get("DISPLAY")):
-            return "x11"
-        if importlib.util.find_spec("mss") is not None:
-            return "mss"
-        raise RuntimeError(
-            "no capture backend: on Linux set DISPLAY (the game runs under XWayland), "
-            "on Windows pip install dxcam, or install mss"
-        )
-
-    def _open(self) -> None:
-        if self.backend == "dxcam":
-            import dxcam
-
-            self._camera = dxcam.create(output_color="RGB")
-        elif self.backend == "x11":
-            from zombiesai.demos.x11_capture import X11Grabber
-
-            # The region goes to the server, which sends back only those pixels; cropping here instead would
-            # copy the whole screen across the socket every tick to throw most of it away.
-            self._grabber = X11Grabber(window=self.window, display=self.display, region=self.region)
-        else:
-            import mss
-
-            self._sct = mss.mss()
+        # The region goes to the server, which sends back only those pixels; cropping here instead would copy
+        # the whole window across to throw most of it away.
+        self._grabber = X11Grabber(window=self.window, display=self.display, region=self.region)
 
     def grab(self) -> np.ndarray:
-        """One full-resolution RGB frame, repeating the last one if the compositor had no new frame."""
-        if self.backend == "x11":
-            self._last = self._grabber.grab()
-            return self._last
-        if self.backend == "dxcam":
-            frame = self._camera.grab(region=self.region)
-            if frame is None:
-                if self._last is None:
-                    raise RuntimeError("capture produced no frame at all; is the game running?")
-                return self._last
-            self._last = np.asarray(frame, dtype=np.uint8)
-            return self._last
-        box = (
-            {"left": self.region[0], "top": self.region[1], "width": self.region[2], "height": self.region[3]}
-            if self.region
-            else self._sct.monitors[self.monitor]
-        )
-        shot = self._sct.grab(box)
-        self._last = np.asarray(shot, dtype=np.uint8)[:, :, 2::-1]  # BGRA -> RGB
-        return self._last
+        """One full-resolution RGB frame, a copy of its own. Not what `read()` uses: converting a 1440p frame
+        to RGB costs more than everything `read()` does with it."""
+        return self._grabber.grab()
 
     def is_capturable(self) -> bool:
-        """Whether a grab would give a live picture now. Only X11 can say no: its window can be on another
-        workspace, whereas the other backends grab a monitor that is always there.
+        """Whether a grab would give a live picture now: the window can be on another workspace.
 
         A grab that succeeds is not enough on its own -- a window on a hidden workspace can still be grabbed,
         and returns its last frame forever (see FROZEN_READS). So the picture must also have changed since
         the previous question, which is why the first question after opening always answers no."""
-        if self.backend != "x11":
-            return True
         if not self._grabber.is_capturable():
             self._probe = None
             return False
-        sample = np.ascontiguousarray(self.grab()[::16, ::16])
+        sample = np.ascontiguousarray(self._grabber.grab_bgrx()[::16, ::16, :3])
         live = self._probe is not None and not np.array_equal(sample, self._probe)
         self._probe = sample
         return live
@@ -153,31 +110,32 @@ class ScreenCapture:
         has been destroyed raises `CaptureLost`, since no amount of waiting brings that XID back.
         """
         try:
-            frame = self.grab()
+            frame = self._grabber.grab_bgrx()  # a view of the shared segment: read it before the next grab
         except Exception as error:
             if self._policy is None or not self._transient(error):
                 raise
             return self._stale(str(error))
-        if self._shape is not None and frame.shape != self._shape:
+        shape = frame.shape[:2]
+        if self._shape is not None and shape != self._shape:
             # The window came back at another size. The policy frame would survive a rescale, but the crop box
             # was frozen on the first frame and the HUD crops' shapes are fixed for the life of a clip (the
             # writer refuses a change, rightly: the crops would no longer mean the same pixels). So a resized
             # window is an outage like any other until it is put back, and the recorder gives up on it after
             # its outage limit rather than splicing two geometries into one clip.
-            height, width = self._shape[:2]
+            height, width = self._shape
             return self._stale(
-                f"the window is now {frame.shape[1]}x{frame.shape[0]}; the recording started at {width}x{height}"
+                f"the window is now {shape[1]}x{shape[0]}; the recording started at {width}x{height}"
             )
         if self._box is None:
             # Detected once, on the first frame, and then frozen: a crop that drifts mid-recording would
             # change what the pixels mean halfway through the clip.
-            self._box = fr.crop_box(*frame.shape[:2], fr.detect_bars(frame), self.fit)
+            self._box = fr.crop_box(*shape, fr.detect_bars(frame[..., fr.BGRX]), self.fit)
         if self.hud_regions:
             from zombiesai.demos.hud_crops import crop_regions
 
-            self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale)
-        self._shape = frame.shape
-        policy = fr.to_policy_frame(frame, self._box, self.fit)
+            self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale, channels=fr.BGRX)
+        self._shape = shape
+        policy = fr.to_policy_frame(frame, self._box, self.fit, channels=fr.BGRX)
         self._frozen = self._frozen + 1 if self._policy is not None and np.array_equal(policy, self._policy) else 0
         self._policy = policy
         if self._frozen >= FROZEN_READS - 1:
@@ -188,10 +146,8 @@ class ScreenCapture:
         return self._policy
 
     def _transient(self, error: Exception) -> bool:
-        """Whether a failed grab is worth waiting out. Only the X11 path can tell the difference; anything
-        it cannot vouch for is treated as the fault it looks like."""
-        if self.backend != "x11":
-            return False
+        """Whether a failed grab is worth waiting out: a window that cannot be read right now is; a destroyed
+        one raises `CaptureLost`; anything else is treated as the fault it looks like."""
         from zombiesai.demos.x11_capture import WindowGone, WindowUnavailable
 
         if isinstance(error, WindowGone):
@@ -206,17 +162,11 @@ class ScreenCapture:
         out = {"kind": "screen", "backend": self.backend, "region": self.region, "fit": self.fit, "box": self._box}
         if self.hud_regions:
             out["hud"] = {"regions": {k: list(v) for k, v in self.hud_regions.items()}, "scale": self.hud_scale}
-        if self.backend == "x11":
-            out["source"] = self._grabber.describe()
+        out["source"] = self._grabber.describe()
         return out
 
     def close(self) -> None:
-        if self.backend == "dxcam":
-            self._camera.release()
-        elif self.backend == "x11":
-            self._grabber.close()
-        else:
-            self._sct.close()
+        self._grabber.close()
 
 
 class FollowWindow:
@@ -313,59 +263,6 @@ class ClipPlayback:
 
     def close(self) -> None:
         pass
-
-
-class SimSource:
-    """NachtSim in render mode with an agent at the controls, emitting both frames and the raw input events
-    that agent would have produced.
-
-    It is how the recording path is exercised without Windows, and how labelled clips for training the
-    inverse dynamics model are generated before anyone has recorded a real demo. What it is *not* is a
-    substitute for real footage: the raycast view is a crude stand-in and visual sim-to-real transfer is a
-    non-goal (docs/sim_lies.md).
-    """
-
-    def __init__(self, agent, *, seed: int = 0, hardness: float = 0.5, max_steps: int = 18_000,
-                 input_config: InputConfig | None = None):
-        from zombiesai.sim.nacht_sim import NachtSim, SimConfig
-
-        self.input_config = input_config or InputConfig(counts_per_degree=10.0)
-        self.env = NachtSim(SimConfig(hardness=hardness, max_steps=max_steps, obs_profile="render"))
-        self.agent = agent
-        self.seed = seed
-        self.obs, _ = self.env.reset(seed=seed)
-        self.agent.reset()
-        self.done = False
-        self.info: dict = {}
-        self.steps = 0
-
-    def read(self) -> np.ndarray:
-        return np.asarray(self.obs["pixels"], dtype=np.uint8)
-
-    def agent_obs(self) -> dict:
-        """What the *player* sees. A scripted agent reads the state vector, a BC policy reads the pixels;
-        the clip stores only the pixels either way, because that is all a human had."""
-        return {**self.obs, "state": self.env.state()}
-
-    def drain(self, start: float, end: float) -> list[dict]:
-        """Advance the sim by one decision and return the events the agent's action is made of."""
-        if self.done:
-            return []
-        action = np.asarray(self.agent.act(self.agent_obs()))
-        events = synthesize(action, start, end - start, self.input_config)
-        self.obs, _, terminated, truncated, self.info = self.env.step(action)
-        self.done = terminated or truncated
-        self.steps += 1
-        return events
-
-    def describe(self) -> dict:
-        # The sim's input latency is drawn per episode; the yaw-versus-flow check needs it to know which lag a
-        # correctly paired recording should peak at.
-        return {"kind": "sim", "seed": self.seed, "agent": type(self.agent).__name__,
-                "latency_steps": int(self.env.timing.latency_steps)}
-
-    def close(self) -> None:
-        self.env.close()
 
 
 class ReplayInput:

@@ -30,21 +30,27 @@ def value(k: int) -> int:
 class ScriptedGrabber:
     """Stands in for X11Grabber: each grab plays the next entry of a script. An int is a good frame filled
     with `value(int)`, a (height, width, int) tuple is a good frame at another size, LOST is the BadMatch a
-    workspace switch produces, and GONE is a destroyed window. Past the end of the script the source is done."""
+    workspace switch produces, and GONE is a destroyed window. Past the end of the script the source is done.
+    Frames come as X hands them over, BGRX."""
 
     script: list = []
 
     def __init__(self, window=None, display=None, region=None):
         self.steps = iter(type(self).script)
 
-    def grab(self):
+    def grab_bgrx(self):
         step = next(self.steps)  # StopIteration ends a recording, as it does for ClipPlayback
         if step == LOST:
             raise WindowUnavailable("grabbing window 0x4800006: BadMatch on request 130.4")
         if step == GONE:
             raise WindowGone("window 0x4800006 no longer exists")
         height, width, k = step if isinstance(step, tuple) else (HEIGHT, WIDTH, step)
-        return np.full((height, width, 3), value(k), np.uint8)
+        frame = np.full((height, width, 4), value(k), np.uint8)
+        frame[..., 3] = 255  # X's padding byte: never read as colour
+        return frame
+
+    def grab(self):
+        return np.ascontiguousarray(self.grab_bgrx()[..., 2::-1])
 
     def describe(self):
         return {"kind": "x11", "window": "0x4800006"}
@@ -352,3 +358,73 @@ def test_before_any_window_exists_it_is_stale_and_has_nothing_to_write():
     source.read()
     source.read()
     assert not source.last_stale and source.has_frame and source.last_hud is not None
+
+
+class SharedSegment:
+    """Stands in for X11Grabber over MIT-SHM: every grab rewrites one padded BGRX buffer and hands back a view."""
+
+    def __init__(self, frames, pad=64):
+        self.frames = iter(frames)
+        h, w = frames[0].shape[:2]
+        self.rows = np.zeros((h, w * 4 + pad), np.uint8)
+
+    def __call__(self, window=None, display=None, region=None):
+        return self
+
+    def grab_bgrx(self):
+        h, w = self.rows.shape[0], (self.rows.shape[1] - 64) // 4
+        view = self.rows[:, : w * 4].reshape(h, w, 4)
+        view[...] = next(self.frames)
+        return view
+
+    def describe(self):
+        return {"kind": "x11"}
+
+    def close(self):
+        pass
+
+
+def test_a_read_from_the_shared_bgrx_buffer_is_the_rgb_path_and_keeps_nothing_of_it(monkeypatch):
+    """The policy frame and crops come straight off the shared segment, and must be exactly what converting
+    to RGB first would give -- and must not change when the next grab overwrites the segment."""
+    from zombiesai.demos import frames as fr
+    from zombiesai.demos.hud_crops import crop_regions
+    from zombiesai.realgame.console import CONSOLE_REGION
+    from zombiesai.realgame.scoreboard import SCOREBOARD_REGION
+
+    rng = np.random.default_rng(0)
+    frames = [rng.integers(0, 256, (1440, 2560, 4), dtype=np.uint8) for _ in range(2)]
+    regions = {**HUD_REGIONS, "console": CONSOLE_REGION, "scores": SCOREBOARD_REGION}
+    monkeypatch.setattr(x11_capture, "X11Grabber", SharedSegment(frames))
+    source = ScreenCapture(hud_regions=regions, hud_scale=0.5)
+    policy, crops = source.read(), source.last_hud
+    rgb = np.ascontiguousarray(frames[0][..., 2::-1])
+    np.testing.assert_array_equal(policy, fr.to_policy_frame(rgb, (0, 0, 1440, 2560)))
+    want = crop_regions(rgb, regions, 0.5)
+    kept = {k: v.copy() for k, v in crops.items()}
+    source.read()  # overwrites the segment
+    np.testing.assert_array_equal(policy, fr.to_policy_frame(rgb, (0, 0, 1440, 2560)))
+    for name in regions:
+        np.testing.assert_array_equal(crops[name], want[name])
+        np.testing.assert_array_equal(crops[name], kept[name])
+
+
+def test_grab_bgrx_fails_and_recovers_as_grab_does():
+    x = FakeXlib()
+    grabber = fake_grabber(x)
+
+    def read_bgrx():
+        if not (x.exists and x.viewable):
+            raise X11Error(f"grabbing window 0x{grabber.window:x}: BadMatch on request 130.4")
+        return np.zeros((x.height, x.width, 4), np.uint8)
+
+    grabber._read_bgrx = read_bgrx
+    assert grabber.grab_bgrx().shape == (HEIGHT, WIDTH, 4)
+    x.viewable = False
+    with pytest.raises(WindowUnavailable, match="not viewable"):
+        grabber.grab_bgrx()
+    x.viewable = True
+    assert grabber.grab_bgrx().shape == (HEIGHT, WIDTH, 4)
+    x.exists = False
+    with pytest.raises(WindowGone):
+        grabber.grab_bgrx()

@@ -98,12 +98,12 @@ def test_a_window_that_no_longer_exists_raises_rather_than_waiting_forever():
         fake_grabber(FakeXlib(exists=False)).is_capturable()
 
 
-def test_screen_capture_on_a_monitor_backend_is_always_capturable():
+@pytest.mark.parametrize("backend", ["dxcam", "mss"])
+def test_the_windows_capture_backends_are_gone_and_say_so(backend):
     from zombiesai.demos.capture import ScreenCapture
 
-    capture = ScreenCapture.__new__(ScreenCapture)
-    capture.backend = "mss"
-    assert capture.is_capturable()
+    with pytest.raises(ValueError, match="X11 only"):
+        ScreenCapture(backend=backend)
 
 
 def test_a_window_destroyed_while_waiting_is_gone_not_an_error(monkeypatch):
