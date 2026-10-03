@@ -6,8 +6,6 @@ which reads this class from source -- viz/supervise.py), so a comment on a field
 
 from dataclasses import dataclass, field
 
-import torch
-
 
 @dataclass
 class RLConfig:
@@ -48,13 +46,19 @@ class RLConfig:
     actor_restarts: int = 20  # per actor, before the run gives up on it
     # Other PCs' games (rl/fleet.py): "host:port" to accept their workers on, "" for this machine's games only
     listen: str = ""
+    # Who runs this machine's actors' policy (rl/inference.py)
+    inference: str = "server"  # "server": one process per PC, on actor_device, for every actor; "local": one per actor
+    inference_timeout_ms: float = 40.0  # an action the server has not sent back by then is a neutral one, a bad step
+    synthetic_hz: float = 0.0  # pace the synthetic stand-in as the real game is paced (15); 0: as fast as it runs
 
     @property
     def env_name(self) -> str:
         return "real-waw" if self.env == "real" else self.env
 
 
-def resolve_device(name: str) -> torch.device:
+def resolve_device(name: str) -> "torch.device":
+    import torch  # here, not at the top: the actors read RLConfig and must never import torch (rl/inference.py)
+
     if name == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(name)

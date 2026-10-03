@@ -735,7 +735,8 @@ class FleetWorker:
                 self._status("stopped")
 
     def session(self, hello: dict, stop: threading.Event) -> None:
-        from zombiesai.rl.parallel_ppo import RLConfig, actor_main
+        from zombiesai.rl.parallel_ppo import RLConfig
+        from zombiesai.rl.pool import ActorPool
 
         name = Path(str(hello["run"])).name
         if name in ("", ".", ".."):
@@ -763,13 +764,8 @@ class FleetWorker:
         (run_dir / "config.json").write_text(json.dumps({**asdict(config), "first_actor": hello["first_actor"]}, indent=2))
         self.say(f"joined run {hello['run']} as actors {hello['first_actor']}..{hello['first_actor'] + config.n_actors - 1}")
 
-        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-            os.environ[var] = "1"  # as train() does, before the actors import numpy
-        ctx = mp.get_context("spawn")
-        out = ctx.Queue(maxsize=max(8, 4 * config.n_actors))
-        actors_stop = ctx.Event()
-        procs: dict[int, mp.Process] = {}
-        restarts = {i: 0 for i in range(config.n_actors)}
+        pool = ActorPool(config, run_dir, say=self.say)  # the actors and their inference server, as train() has
+        out, procs = pool.out, pool.procs
         outbox: queue_mod.Queue = queue_mod.Queue(maxsize=max(4, 2 * config.n_actors))
         state = {"last_ok": time.time(), "version": -1, "sent": 0, "dropped": 0, "gone": None, "episodes": 0,
                  "last_round": None, "best_round": None}
@@ -827,19 +823,12 @@ class FleetWorker:
                     pass
                 session_over.wait(5.0)
 
-        def spawn(i: int) -> None:
-            p = ctx.Process(target=actor_main, args=(i, config, str(run_dir), out, actors_stop), daemon=True,
-                            name=f"actor-{i}")
-            p.start()
-            procs[i] = p
-
         threads = [threading.Thread(target=f, daemon=True, name=f"fleet-{f.__name__}")
                    for f in (send_segments, pull_weights, heartbeat)]
         for t in threads:
             t.start()
-        for i in range(config.n_actors):
-            spawn(i)
         try:
+            pool.start()
             while not stop.is_set() and not session_over.is_set():
                 if time.time() - state["last_ok"] > self.options.lost_s:
                     state["gone"] = f"no word from the learner for {self.options.lost_s:.0f}s"
@@ -863,15 +852,7 @@ class FleetWorker:
                     self.say(f"  actor {i} episode {payload.get('episode')}: round {payload.get('round_reached', '?')}")
                 elif kind == "error":
                     self.say(f"  actor {i} failed:\n{payload}")
-                for j, p in list(procs.items()):
-                    if not p.is_alive() and not actors_stop.is_set():
-                        if restarts[j] >= config.actor_restarts:
-                            self.say(f"  actor {j} has died {restarts[j]} times; leaving it down")
-                            del procs[j]
-                            continue
-                        restarts[j] += 1
-                        self.say(f"  actor {j} is down; restarting it ({restarts[j]}/{config.actor_restarts})")
-                        spawn(j)
+                pool.tend()
                 if not procs:
                     state["gone"] = "every actor here is down"
                     break
@@ -879,16 +860,7 @@ class FleetWorker:
             stop.set()
         finally:
             session_over.set()
-            actors_stop.set()
-            deadline = time.time() + 20
-            while any(p.is_alive() for p in procs.values()) and time.time() < deadline:
-                try:  # keep draining so no actor blocks on a full queue while it shuts down
-                    out.get(timeout=0.2)
-                except queue_mod.Empty:
-                    pass
-            for p in procs.values():
-                if p.is_alive():
-                    p.terminate()
+            pool.close()  # stops the actors (every key released), draining their queue, then the server
             for t in threads:
                 t.join(timeout=self.options.poll_s + 1)
             self.say(f"left run {hello['run']}: {state['sent']} segments sent, {state['dropped']} dropped"

@@ -4,10 +4,10 @@ several games at once.
 The shape of it:
 
 * **Actors** -- one process per game instance (`realgame/instances.py`), or per synthetic stand-in for a
-  rehearsal (`zombiesai/synthetic.py`).
-  Each runs its own copy of the policy on a CPU thread (0.5 ms a decision for the BC net, so the games and the
-  learner have the GPU to themselves), acts in real time, and ships **segments** of up to `segment_steps`
-  decisions to the learner. A segment ends early at an episode's end, so no segment spans a reset, and it
+  rehearsal (`zombiesai/synthetic.py`), and one **inference server** per machine that runs the policy for all of
+  them (rl/inference.py; the actors never import torch -- `inference="local"` gives each its own copy again).
+  rl/pool.py starts and restarts them. An actor acts in real time and ships **segments** of up to
+  `segment_steps` decisions to the learner. A segment ends early at an episode's end, so no segment spans a reset, and it
   carries the frames before its first step that the frame stack reaches back into -- the learner builds each
   step's stack by index arithmetic, frames stored once (PLAN.md, "Frames stored once, not stacked").
 * **The learner** gathers `batch_steps` decisions, recomputes values with its current network (actors' values
@@ -15,7 +15,8 @@ The shape of it:
   the episode was *terminated* -- and runs the clipped PPO update. The behaviour log-probs the actors recorded
   are the ratio's denominator, which is what makes a slightly stale segment still a correct sample. Segments
   more than `max_policy_lag` versions stale are dropped rather than corrected. New weights go to
-  `weights.pt` (atomically); actors pick them up between segments, never inside a tick.
+  `weights.pt` (atomically); the server picks them up between batches, so a segment's steps may come from
+  several versions -- each step's log-prob is its own, and the segment is labelled with the oldest.
 * **Where it starts matters more than anything here.** It starts from a BC checkpoint, and two things keep
   RL from wrecking what BC learned before it has learned anything itself:
 
@@ -42,9 +43,7 @@ lived, how many shots it fired and landed -- which the stream overlay is built f
 
 import json
 import math
-import multiprocessing as mp
 import numbers
-import os
 import queue as queue_mod
 import time
 from collections import deque
@@ -68,6 +67,7 @@ from zombiesai.rl.actors import (  # noqa: F401
 )
 from zombiesai.rl.config import RLConfig, resolve_device  # noqa: F401
 from zombiesai.rl.learner import Learner, RunningStd, compute_gae, kl_to_reference, root_prior  # noqa: F401
+from zombiesai.rl.pool import ActorPool
 from zombiesai.rl.segments import FrameHistory, Segment, stack_indices  # noqa: F401
 from zombiesai.rl.weights import WeightFollower, publish  # noqa: F401
 
@@ -195,26 +195,10 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
         fleet.set_weights(version, run_dir / "weights.pt")
         host, port = fleet.address
         say(f"listening for other machines' games on {host}:{port}")
-    # One thread of work per actor. Actors inherit this environment when spawned, before they import numpy:
-    # otherwise OpenBLAS starts a thread per core in every actor (the frame resize is a matrix product), and
-    # four actors' pools fighting over 12 threads made 95% of real-game steps late.
-    for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
-        os.environ[var] = "1"
-    ctx = mp.get_context("spawn")
-    out = ctx.Queue(maxsize=max(8, 4 * config.n_actors))
-    stop = ctx.Event()
-    procs: dict[int, mp.Process] = {}
-    restarts = {i: 0 for i in range(config.n_actors)}
-
-    def spawn(i: int) -> None:
-        p = ctx.Process(target=actor_main, args=(i, config, str(run_dir), out, stop), daemon=True,
-                        name=f"actor-{i}")
-        p.start()
-        procs[i] = p
-
-    for i in range(config.n_actors):
-        spawn(i)
-    say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors here from {config.init}")
+    pool = ActorPool(config, run_dir, say=say)
+    say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors here from {config.init}"
+        + (f", acting through one inference server on {config.actor_device}"
+           if config.inference == "server" and config.n_actors else ""))
     machines = None
     if fleet is not None:
         from zombiesai.rl.fleet import ACTOR_BLOCK
@@ -227,11 +211,14 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     batch: list[Segment] = []
     batch_n = step = episodes = dropped = 0
     lags: list[int] = []
+    waited: list[np.ndarray] = []  # how long each action took the policy to give, since the last update
+    timeouts = 0
     start = time.time()
     checkpoint = run_dir / "checkpoint.pt"
     try:
+        pool.start()
         while step < config.total_steps:
-            kind, i, payload = _next_item(out, fleet.inbox if fleet is not None else None)
+            kind, i, payload = _next_item(pool.out, fleet.inbox if fleet is not None else None)
             if kind == "segment":
                 lag = version - payload.version
                 if machines is not None:
@@ -251,25 +238,20 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                                               **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}},
                                              default=_json_scalar) + "\n")
                 say(episode_line(i, payload))
+            elif kind == "latency":
+                waited.append(payload["ms"])
+                timeouts += int(payload["timeouts"])
             elif kind == "error":
                 say(f"  actor {i} failed:\n{payload}")
-            for j, p in list(procs.items()):
-                if not p.is_alive() and not stop.is_set():
-                    if restarts[j] >= config.actor_restarts:
-                        say(f"  actor {j} has died {restarts[j]} times; leaving it down")
-                        del procs[j]
-                        continue
-                    restarts[j] += 1
-                    say(f"  actor {j} is down; restarting it ({restarts[j]}/{config.actor_restarts})")
-                    spawn(j)
-            if not procs and fleet is None:
+            pool.tend()
+            if not pool.procs and fleet is None:
                 raise RuntimeError("every actor is down")
             if batch_n >= config.batch_steps:
                 stats = learner.update(batch)
                 step += batch_n
                 version += 1
                 publish(run_dir / "weights.pt", learner.net, version)
-                alive = sum(p.is_alive() for p in procs.values())
+                alive = pool.alive()
                 per_machine = None
                 if fleet is not None:
                     per_machine = machines.flush()
@@ -284,6 +266,10 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 row = {"update": learner.updates, "step": step, "sps": int(step / max(time.time() - start, 1e-9)),
                        "episodes": episodes, "version": version, "dropped_segments": dropped,
                        "policy_lag_mean": float(np.mean(lags)) if lags else 0.0, "actors_alive": alive, **stats}
+                if waited:  # this machine's actors: the wait for each action, and the ones that never came
+                    ms = np.concatenate(waited)
+                    row.update(policy_ms_p50=round(float(np.percentile(ms, 50)), 3),
+                               policy_ms_p99=round(float(np.percentile(ms, 99)), 3), policy_timeouts=timeouts)
                 if fleet is not None:
                     row["machines"] = (1 if config.n_actors else 0) + len(fleet.alive())
                     row["per_machine"] = per_machine
@@ -294,24 +280,16 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                             row[f"{key}_mean"] = float(np.mean(vals))
                 log.write(json.dumps(row) + "\n")
                 _print_row(row, say)
-                batch, batch_n, lags = [], 0, []
+                batch, batch_n, lags, waited, timeouts = [], 0, [], [], 0
                 if learner.updates % config.checkpoint_every == 0:
                     learner.checkpoint(checkpoint, step, {"episodes": episodes})
     except KeyboardInterrupt:
         say("interrupted: stopping the actors")
     finally:
-        stop.set()
+        pool.stop.set()
         if fleet is not None:
             fleet.close()  # the workers stop their games when they lose us
-        deadline = time.time() + 20
-        while any(p.is_alive() for p in procs.values()) and time.time() < deadline:
-            try:  # keep draining so no actor blocks on a full queue while it shuts down
-                out.get(timeout=0.2)
-            except queue_mod.Empty:
-                pass
-        for p in procs.values():
-            if p.is_alive():
-                p.terminate()
+        pool.close()
         log.close()
         episode_log.close()
         learner.checkpoint(checkpoint, step, {"episodes": episodes})
