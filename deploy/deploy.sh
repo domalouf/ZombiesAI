@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Build the NachtSim replay page, the training dashboard and the stream's page, and publish them to
-# https://domalouf.com/zombies/ (the agent playing), /zombies/training/ (how it learned) and /zombies/live/
-# (the Twitch stream, with the overlay OBS draws on it at /zombies/live/overlay/).
+# Build the training dashboard and the stream's page, and publish them to https://domalouf.com/zombies/training/
+# (how it is learning) and /zombies/live/ (the Twitch stream, with the overlay OBS draws on it at
+# /zombies/live/overlay/). The bare /zombies/ sends visitors on to the Training Room.
 #
 # Same pattern as the site's other project pages: rsync a static directory into a
 # sub-dir of the site's web root on the server (~/site/www/, which the MyWebsite repo's nginx serves).
@@ -11,8 +11,6 @@
 #
 # Config via environment (optional):
 #   DEPLOY_DEST     rsync destination  (default: lts:site/www/zombies/)
-#   CHECKPOINT  trained policy     (default: runs/ppo-nacht-state-s1/checkpoint.pt)
-#   SEED        which game to show (default: 10030, one of its round-4 games)
 #   TWITCH_CHANNEL  the channel /zombies/live/ embeds (default: none, a placeholder until there is a stream).
 #                   The site's CSP must let the player in: frame-src https://player.twitch.tv.
 #   LIVE_MACHINES   the other gaming PCs' ids, space-separated (default: none): the Training Room shows each one's
@@ -22,16 +20,22 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest="${DEPLOY_DEST:-lts:site/www/zombies/}"
-checkpoint="${CHECKPOINT:-runs/ppo-nacht-state-s1/checkpoint.pt}"
-seed="${SEED:-10030}"
 
 log() { printf '==> %s\n' "$*"; }
 
 cd "$repo"
 
-log "building the replay page (checkpoint=$checkpoint, seed=$seed)"
 rm -rf site/zombies
-uv run python scripts/build_site.py --checkpoint "$checkpoint" --seed "$seed" --out site/zombies
+mkdir -p site/zombies
+# /zombies/ has no page of its own; links to it land on the Training Room. A meta refresh, not a script: the
+# site's CSP allows no inline script.
+cat > site/zombies/index.html <<'HTML'
+<!doctype html>
+<meta charset="utf-8">
+<title>ZombiesAI</title>
+<meta http-equiv="refresh" content="0; url=training/">
+<a href="training/">The Training Room</a>
+HTML
 
 # The dashboard reads only the JSON each trainer wrote, so this step needs no checkpoint and no GPU.
 # --site strips the local paths a config carries (clip filenames and the like) and ships the fonts as
@@ -50,4 +54,4 @@ log "publishing site/zombies/ -> $dest"
 # training/live/ from it: those files are the training PC's, pushed there and not built here.
 rsync -av --delete --filter='P training/live/' site/zombies/ "$dest"
 
-log "done — https://domalouf.com/zombies/, /zombies/training/ and /zombies/live/"
+log "done — https://domalouf.com/zombies/training/ and /zombies/live/"

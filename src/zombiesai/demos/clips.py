@@ -1,11 +1,10 @@
 """The clip store: contiguous runs of real gameplay frames at the decision rate, with or without actions.
 
-An episode (`store/episode_store.py`) is something an agent did in an environment that answered back with
-rewards. A clip is the other thing this project learns from: a stretch of footage a human produced, where
-there is no reward, no HUD parse worth trusting yet, and the actions are either logged from the human's own
-input device or guessed later by the inverse dynamics model. Keeping the two formats apart is what lets
-ingested video carry honest metadata -- where the pixels came from, how they were cropped, how much the
-labels are worth -- instead of being forced into fields an episode needs and a video does not have.
+A clip is what this project learns from: a stretch of footage, where the actions are logged from a human's own
+input device, guessed later by the inverse dynamics model, or -- in a policy's own run -- sent by the policy.
+It carries honest metadata about each: where the pixels came from, how they were cropped, how much the labels
+are worth. A source that also knows rewards (an RL actor's recorded episode) writes them as extra per-step
+columns, and the trainers take what each clip has (`Clip.extra`).
 
     <root>/<clip_id>/
       frames.u8    (T, 72, 128, 3) uint8, decision rate, area-averaged
@@ -65,7 +64,7 @@ def frame_contract() -> dict:
 
 
 class ClipWriter:
-    """Appends frames (and optionally their actions) as they are captured, decoded, or simulated."""
+    """Appends frames (and optionally their actions) as they are captured, decoded, or played."""
 
     def __init__(self, path: str | Path, *, source: dict, label_source: str = "none", config: dict | None = None):
         if label_source not in LABEL_SOURCES:
@@ -262,8 +261,9 @@ class Clip:
     def extra(self, key: str) -> np.ndarray | None:
         """Optional per-step target (`mc_return`, `aux_dpoints`, `aux_damage`); None when this clip has none.
 
-        Video a human recorded has pixels and, after labelling, actions -- and nothing else. Sim episodes
-        have all three. The trainers ask rather than assume, and train the heads the data can supply."""
+        Video a human recorded has pixels and, after labelling, actions -- and nothing else. A source that
+        knows its rewards can write all three. The trainers ask rather than assume, and train the heads the data
+        can supply."""
         return None if self.labels is None else self.labels.get(key)
 
     @property
@@ -491,45 +491,3 @@ def monte_carlo_returns(rewards: np.ndarray, gamma: float, bootstrap: float = 0.
 # Delta-points buckets for the auxiliary head: nothing, a hit, a kill, a big round-clearing swing. The
 # boundaries are in points, from the game's own scoring table (10 a hit, 60 a body kill, 100 a headshot).
 DPOINTS_EDGES = (1.0, 50.0, 130.0)
-
-
-def clip_from_episode(path: str | Path, gamma: float = 0.995) -> Clip:
-    """View a recorded episode (agent or demo) as a labelled clip, so one dataset can span both formats.
-
-    An episode brings more than actions: its rewards give Monte-Carlo returns for the value head, and its
-    reward terms give the two auxiliary targets -- "did I just score" and "am I being hit" -- that make the
-    encoder represent what a value function will need.
-    """
-    from zombiesai.reward import REWARD_TERMS
-    from zombiesai.store.episode_store import load_episode
-
-    episode = load_episode(path)
-    if episode.frames is None:
-        raise ValueError(f"{path} has no frames.u8; record it with the render observation profile")
-    n = min(len(episode.frames), episode.n_steps)
-    flags = (episode.meta["flags"][:n].astype(np.uint8) & FLAG_BAD_STEP).copy()
-    flags[0] |= FLAG_CLIP_START
-    labels = {
-        "action": episode.meta["action"][:n].astype(np.uint8),
-        "confidence": np.ones(n, dtype=np.float32),
-        "yaw_deg": np.zeros(n, dtype=np.float32),
-        "pitch_deg": np.zeros(n, dtype=np.float32),
-        "flags": flags,
-    }
-    if "reward" in episode.meta:
-        labels["mc_return"] = monte_carlo_returns(episode.meta["reward"][:n], gamma)
-    if "reward_terms" in episode.meta:
-        terms = episode.meta["reward_terms"][:n]
-        gain = terms[:, REWARD_TERMS.index("gain")] * 100.0  # back to points; reward divides by points_scale
-        labels["aux_dpoints"] = np.digitize(gain, DPOINTS_EDGES).astype(np.uint8)
-        labels["aux_damage"] = (terms[:, REWARD_TERMS.index("damage")] < 0).astype(np.uint8)
-    manifest = {
-        "spec_version": episode.manifest["spec_version"],
-        "frame_contract": frame_contract(),
-        "action_nvec": list(spec.ACTION_NVEC),
-        "source": {"kind": "episode", "path": str(path), "is_demo": episode.manifest.get("is_demo", False)},
-        "label_source": "input_log" if episode.manifest.get("is_demo") else "agent",
-        "status": episode.manifest.get("status", "closed"),
-        "n_steps": n,
-    }
-    return Clip(Path(path), manifest, episode.frames[:n], labels)
