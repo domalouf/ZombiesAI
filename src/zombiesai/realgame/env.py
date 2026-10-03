@@ -28,6 +28,11 @@ The episode summary also carries an estimate of how well it shoots, for the stre
 `shots` are the magazine marks that went away between two good reads while the fire button was held, and
 `hits` the settled non-repair gains -- every one of those is at least one bullet that landed, but a counter
 still rolling from one hit when the next lands settles as a single gain, so `hits / shots` is a floor.
+
+An episode that ends in a death also carries the game's own count, off the game-over scoreboard
+(realgame/end_screen.py): `end_points`, `end_kills` and `end_headshots`. They are looked at for up to
+`end_screen_s` before the summary goes out, out of the `after_death_s` the reset waits anyway, and taken
+only once two looks in a row agree; otherwise, and for every other kind of end, they are None.
 """
 
 import time
@@ -77,6 +82,10 @@ class EnvConfig:
     max_relaunches: int = 2  # per reset, before giving up
     first_look_s: float = 3.0  # the first reset of a run: is a fresh game already on?
     after_death_s: float = 4.0  # let the game-over screen play before typing into the console
+    # Of that, how long the game-over scoreboard is looked at for its numbers (`end_screen`), a look every
+    # `end_screen_every_s`.
+    end_screen_s: float = 1.5
+    end_screen_every_s: float = 0.1
     # A map loaded from the console stops at "Click to Start the Mission". Enter starts it too, without firing
     # a shot; it is tapped every `start_key_every_s` while a reset waits (it does nothing in a live game).
     start_key: str | None = "enter"
@@ -108,7 +117,8 @@ class RealGameEnv:
     into a `HudReading` (default `HudParser().parse`), `focus()` gives the game window input focus and says
     whether there is one, `console(command)` types into the game's console, `press(key)` taps one key,
     `console_open()` says whether the last frame shows the console, `downed()` whether it shows the player
-    down (co-op's scoreboard), and `restart()` relaunches the game. `hearing`, if given, is a `LiveAudio` on this instance's own sink."""
+    down (co-op's scoreboard), `end_screen()` reads the game-over scoreboard's numbers from a fresh grab (an
+    `end_screen.EndScreen`, or None), and `restart()` relaunches the game. `hearing`, if given, is a `LiveAudio` on this instance's own sink."""
 
     def __init__(
         self,
@@ -122,6 +132,7 @@ class RealGameEnv:
         press=None,
         console_open=None,
         downed=None,
+        end_screen=None,
         hearing=None,
         config: EnvConfig | None = None,
         clock=time.monotonic,
@@ -135,7 +146,8 @@ class RealGameEnv:
         self.capture, self.dispatcher, self.reader = capture, dispatcher, reader
         self.focus = focus or (lambda: True)
         self.console, self.restart, self.hearing, self.press = console, restart, hearing, press
-        self.console_open, self.downed = console_open, downed
+        self.console_open, self.downed, self.end_screen = console_open, downed, end_screen
+        self._end_screen_s = 0.0  # spent looking at the last game-over screen, out of `after_death_s`
         self._down_run = 0
         self._next_clear = 0.0
         self.pitch = 0.0  # degrees from level, as sent
@@ -206,7 +218,7 @@ class RealGameEnv:
         line -- and more than `max_relaunches` of those raise `ResetFailed`."""
         self.dispatcher.release_all()
         if self._ended_by_death:
-            self._pump_for(self.config.after_death_s)
+            self._pump_for(max(0.0, self.config.after_death_s - self._end_screen_s))
         obs = self._await_fresh_game(self.config.first_look_s) if not self._needs_restart else None
         tries = relaunches = 0
         quick = self.config.quick_start_command is not None and self._needs_restart
@@ -392,10 +404,30 @@ class RealGameEnv:
         if terminated or truncated:
             self.dispatcher.release_all()
             self._ended_by_death = terminated
-            info["episode"] = self.summary(reason)
+            info["episode"] = self.summary(reason, self._read_end_screen() if terminated else None)
         return obs, result.reward, terminated, truncated, info
 
-    def summary(self, reason: str | None = None) -> dict:
+    def _read_end_screen(self):
+        """The game-over scoreboard's numbers, once two looks in a row agree within `end_screen_s`; else None."""
+        self._end_screen_s = 0.0
+        if self.end_screen is None:
+            return None
+        start = self.clock()
+        last = None
+        while True:
+            read = self.end_screen()
+            if read is not None and last is not None and read.values == last.values:
+                break
+            last = read
+            if self.clock() - start >= self.config.end_screen_s:
+                read = None
+                break
+            self._pump_for(self.config.end_screen_every_s)
+        self._end_screen_s = self.clock() - start
+        return read
+
+    def summary(self, reason: str | None = None, end=None) -> dict:
+        """The episode so far; `end` is the game-over scoreboard's `EndScreen`, when there is one."""
         stats = self.shaper.stats
         return {
             "reason": reason,
@@ -406,6 +438,9 @@ class RealGameEnv:
             "points_gained": self.signals.points_gained,
             "shots": self.shots,
             "hits": self.signals.events["gain"],
+            "end_points": end.points if end else None,
+            "end_kills": end.kills if end else None,
+            "end_headshots": end.headshots if end else None,
             "bad_steps": self.bad_steps,
             "repair_share": stats.repair_share(),
             "max_term_share": stats.max_term_share(),

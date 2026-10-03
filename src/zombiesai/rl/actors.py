@@ -28,6 +28,7 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
     from zombiesai.realgame.env import RealGameEnv
     from zombiesai.realgame.instances import Instance, load_fleet, specs
     from zombiesai.realgame.console import console_open
+    from zombiesai.realgame.end_screen import read_end_screen
     from zombiesai.realgame.scoreboard import scoreboard_shown
     from zombiesai.realgame.xtest import console_command, tap_key
 
@@ -59,6 +60,7 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
                        restart=instance.restart_game, press=lambda key: tap_key(sink, key, hold_s=0.15),
                        console_open=shows_console,
                        downed=lambda: scoreboard_shown((capture.last_hud or {}).get("scores")),
+                       end_screen=lambda: read_end_screen(capture.grab()),
                        hearing=hearing, say=lambda m: print(f"[actor {index}] {m}", flush=True))
 
 

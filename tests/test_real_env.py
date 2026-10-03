@@ -266,3 +266,58 @@ def test_shots_are_magazine_marks_gone_while_the_trigger_is_held():
     for _, action in steps:
         env.step(action)
     assert env.summary()["shots"] == 11 and env.summary()["hits"] == 0
+
+
+def _die(env, game):
+    """Play from a fresh game to a settled death; the terminal step's info."""
+    game.points = [550] * 5 + [520] * 6
+    for _ in range(20):
+        _, _, terminated, truncated, info = env.step(IDLE)
+        if terminated or truncated:
+            return info
+    raise AssertionError("no death")
+
+
+def test_a_death_carries_the_game_over_scoreboard_once_two_looks_agree():
+    from zombiesai.realgame.end_screen import EndScreen
+
+    looks = iter([None, EndScreen(550, 3, 1, 0.9), EndScreen(550, 4, 1, 0.9), EndScreen(550, 4, 1, 0.8)])
+    env, game, _, _, clock = make_env([500] * 4, end_screen=lambda: next(looks))
+    env.reset()
+    t = clock.t
+    episode = _die(env, game)["episode"]
+    assert (episode["end_points"], episode["end_kills"], episode["end_headshots"]) == (550, 4, 1)
+    # four looks, a tick apart: what they took comes out of the wait before the restart
+    assert env._end_screen_s == pytest.approx(3 * env.config.end_screen_every_s, abs=0.05)
+    assert clock.t > t
+
+
+def test_a_scoreboard_that_never_reads_twice_alike_gives_no_numbers():
+    from zombiesai.realgame.end_screen import EndScreen
+
+    n = {"looks": 0}
+
+    def flicker():
+        n["looks"] += 1
+        return EndScreen(550, n["looks"], 0, 0.9)  # never the same twice
+
+    env, game, _, _, _ = make_env([500] * 4, end_screen=flicker)
+    env.reset()
+    episode = _die(env, game)["episode"]
+    assert episode["end_points"] is None and episode["end_kills"] is None and episode["end_headshots"] is None
+    assert env._end_screen_s >= env.config.end_screen_s
+    assert n["looks"] <= env.config.end_screen_s / env.config.end_screen_every_s + 2
+
+
+def test_an_end_that_is_not_a_death_does_not_look_for_the_scoreboard():
+    def never():
+        raise AssertionError("looked")
+
+    env, game, _, _, _ = make_env([500] * 4, end_screen=never)
+    env.reset()
+    game.points = [503] * 3 + [517] * 3 + [529] * 3 + [529]  # hud_lost: truncated
+    for _ in range(12):
+        _, _, terminated, truncated, info = env.step(IDLE)
+        if truncated:
+            break
+    assert truncated and not terminated and info["episode"]["end_kills"] is None

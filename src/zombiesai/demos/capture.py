@@ -223,6 +223,18 @@ class FollowWindow:
     def is_capturable(self) -> bool:
         return self._capture is not None and self._capture.is_capturable()
 
+    def grab(self) -> np.ndarray | None:
+        """One full-resolution RGB frame of the window (see `ScreenCapture.grab`), or None while there is no
+        window to grab. A failed grab is left for the next `read()` to deal with."""
+        from zombiesai.demos.x11_capture import X11Error
+
+        if self._capture is None:
+            return None
+        try:
+            return self._capture.grab()
+        except X11Error:
+            return None
+
     def describe(self) -> dict:
         return {"kind": "follow-window", **(self._capture.describe() if self._capture is not None else {})}
 
