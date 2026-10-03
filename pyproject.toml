@@ -1,36 +1,31 @@
 [project]
 name = "zombiesai"
 version = "0.1.0"
-description = "RL agent for CoD: World at War's Nacht der Untoten, from screen capture and synthetic input only"
+description = "An agent for CoD: World at War's Nacht der Untoten that learns from the real game's pixels and audio on Linux: behavioural cloning, then PPO across many game instances and PCs"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2.0",
     "gymnasium>=1.1",
     "scipy>=1.13",
-    "pyyaml>=6.0",
     "torch>=2.8",
 ]
 
 [dependency-groups]
 dev = ["pytest>=8"]
-# LunarLander, used only to validate the from-scratch algorithms (M2/M3).
-classic = ["gymnasium[box2d]>=1.1"]
-# Screen capture for recording demos on the gaming PC (uv sync --group capture). Nothing needs it to train,
-# evaluate, or ingest video -- only to record a human playing. dxcam is Desktop Duplication and is faster;
-# mss is the fallback and works anywhere. Video ingest needs the ffmpeg binary, not a Python package.
-capture = ["mss>=9.0", "dxcam>=0.0.5; sys_platform == 'win32'"]
+# Screen capture (X11, MIT-SHM) and raw input (evdev) are ctypes and file reads: no package. Video ingest
+# needs the ffmpeg binary, not a Python package.
 
 [tool.uv]
-default-groups = ["dev", "classic"]
+default-groups = ["dev"]
 
-# The RTX 5070 is Blackwell (sm_120) and needs a CUDA 12.8+ build; the default PyPI wheel can't see it.
-# Linux and Windows are both possible hosts for the game (docs/linux.md), so both get the CUDA index. A
-# CPU-only machine still resolves -- it just downloads the CUDA libraries and never uses them.
+# The RTX 5070 is Blackwell (sm_120) and needs a CUDA 12.8+ build; the default PyPI wheel can't see it. The
+# gaming PCs run Linux, so Linux gets the CUDA index; a CPU-only Linux box still resolves -- it just downloads
+# the CUDA libraries and never uses them. Anything else (a laptop reading the dashboard) gets the CPU build.
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu128", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
-    { index = "pytorch-cpu", marker = "sys_platform != 'win32' and sys_platform != 'linux'" },
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+    { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
 ]
 
 [[tool.uv.index]]

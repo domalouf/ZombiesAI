@@ -1,4 +1,5 @@
-# The test suite, on the one platform it is designed to run without a game: Linux.
+# The test suite, on Linux -- the only platform the project runs on -- with no game: the synthetic stand-in
+# (src/zombiesai/synthetic.py) plays wherever a test needs one.
 #
 # Two system dependencies decide whether this is a real gate or a comfortable lie. The video-ingest tests
 # skip themselves without ffmpeg, and the capture tests skip themselves without an X server -- so a runner
