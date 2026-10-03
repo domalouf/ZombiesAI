@@ -11,7 +11,12 @@ Layout notes that are decisions, not defaults:
 * A stack of decision frames is folded into the channel dimension, so 4 frames x RGB is 12 input channels.
 * GroupNorm after each convolution: it costs nothing at this size and it is the plasticity insurance the
   high-replay-ratio regime later needs, which is cheaper to have from the start than to retrofit.
+* Training runs it in mixed precision where the GPU has the tensor cores for it (`Precision`): bf16 on Ampere
+  and later (the learner PC's RTX 5070), fp16 with a gradient scaler on Turing (the 2080 Ti, whose bf16 is
+  emulated and slower than fp32), fp32 on the CPU. Losses and the action distribution stay in fp32.
 """
+
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -58,7 +63,10 @@ class PixelEncoder(nn.Module):
 
     def forward(self, pixels: torch.Tensor) -> torch.Tensor:
         x = stack_to_nchw(pixels) if pixels.dim() > 4 or pixels.shape[-1] == 3 else pixels
-        return self.fc(self.conv(x.float() / 255.0))
+        # Straight from uint8 to the dtype the first convolution will run in: under autocast a float32 copy of
+        # the stack would only be made to be cast again, and it is the largest tensor in the forward pass.
+        dtype = torch.get_autocast_dtype(x.device.type) if torch.is_autocast_enabled(x.device.type) else torch.float32
+        return self.fc(self.conv(x.to(dtype).div_(255.0)))
 
 
 class AudioEncoder(nn.Module):
@@ -162,6 +170,39 @@ class PixelActorCritic(nn.Module):
 
     def value(self, pixels: torch.Tensor, vector: torch.Tensor | None = None) -> torch.Tensor:
         return self.critic(self.features(pixels, vector)).squeeze(-1)
+
+
+@dataclass(frozen=True)
+class Precision:
+    """How a training loop runs the network: `mode` is "bf16", "fp16" or "off" (fp32).
+
+    Both halves are always used, so the fp32 path is the same code: a disabled autocast is a no-op, and a
+    disabled GradScaler scales by nothing and steps the optimizer as `opt.step()` would."""
+
+    mode: str
+    device_type: str
+
+    def autocast(self):
+        dtype = {"bf16": torch.bfloat16, "fp16": torch.float16}.get(self.mode, torch.float32)
+        return torch.autocast(self.device_type, dtype=dtype, enabled=self.mode != "off")
+
+    def grad_scaler(self) -> torch.amp.GradScaler:
+        # fp16 has 5 exponent bits: small gradients underflow to zero unless the loss is scaled up first.
+        return torch.amp.GradScaler(self.device_type, enabled=self.mode == "fp16")
+
+
+def precision(amp: str, device: torch.device | str) -> Precision:
+    """`amp` is "auto", "off", "bf16" or "fp16". "auto" is bf16 where the GPU computes it natively, else fp16;
+    the CPU always trains in fp32. (`torch.cuda.is_bf16_supported()` says yes on Turing too, where bf16 is
+    emulated -- hence `including_emulation=False`.)"""
+    device = torch.device(device)
+    if amp not in ("auto", "off", "bf16", "fp16"):
+        raise ValueError(f"amp must be auto, off, bf16 or fp16, got {amp!r}")
+    if device.type != "cuda" or amp == "off":
+        return Precision("off", device.type)
+    if amp == "auto":
+        amp = "bf16" if torch.cuda.is_bf16_supported(including_emulation=False) else "fp16"
+    return Precision(amp, device.type)
 
 
 # Observations with an encoder of their own rather than a place in the flat vector.

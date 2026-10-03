@@ -48,6 +48,7 @@ class RLConfig:
     actor_restarts: int = 20  # per actor, before the run gives up on it
     # Other PCs' games (rl/fleet.py): "host:port" to accept their workers on, "" for this machine's games only
     listen: str = ""
+    amp: str = "auto"  # learner precision: auto (bf16 where native, else fp16 with loss scaling), off, bf16, fp16
 
     @property
     def env_name(self) -> str:

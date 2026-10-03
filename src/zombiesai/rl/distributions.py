@@ -21,6 +21,8 @@ class FactoredCategorical:
     """Independent per-head categoricals: log-probs and entropies add, so each head gets its own gradient term."""
 
     def __init__(self, logits: torch.Tensor, nvec: tuple[int, ...]):
+        # Always fp32: PAD_LOGIT is -inf in fp16, and a mixed-precision network's logits are fp16 or bf16.
+        logits = logits.float()
         # All heads share one padded tensor so each op below runs once, not once per head.
         index, width = _layout(tuple(nvec))
         grid = logits.new_full((*logits.shape[:-1], len(nvec) * width), PAD_LOGIT)
