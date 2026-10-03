@@ -21,50 +21,6 @@ from zombiesai.rl.weights import WeightFollower
 # ------------------------------------------------------------------------------------------------ actor envs
 
 
-class SimActorEnv:
-    """NachtSim's rendered view behind the real environment's interface, as fast as it will go."""
-
-    def __init__(self, sim: dict, seed: int):
-        from zombiesai.sim.nacht_sim import NachtSim, SimConfig
-
-        self.env = NachtSim(SimConfig(**{**sim, "obs_profile": "render"}))
-        self.seed = seed
-        self.episodes = 0
-        self.capture = None
-
-    def reset(self):
-        obs, info = self.env.reset(seed=self.seed * 100_003 + self.episodes)
-        self.episodes += 1
-        self._ret, self._len = 0.0, 0
-        self._shots = self._hits = 0
-        self._rs, self._seen = None, (0, 0)
-        return {"pixels": obs["pixels"]}, info
-
-    def _count_shots(self) -> None:
-        """The sim keeps shots per round (RoundStats, replaced at each round start); this sums them per game."""
-        rs = self.env.rs
-        if rs is not self._rs:
-            self._rs, self._seen = rs, (0, 0)
-        self._shots += rs.shots - self._seen[0]
-        self._hits += rs.shot_hits - self._seen[1]
-        self._seen = (rs.shots, rs.shot_hits)
-
-    def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(np.asarray(action))
-        self._ret += reward
-        self._len += 1
-        self._count_shots()
-        out = {"bad": False}
-        if terminated or truncated:
-            out["episode"] = {"return": self._ret, "length": self._len, "shots": self._shots, "hits": self._hits,
-                              "seconds": info.get("episode_time_s"),
-                              **{k: info[k] for k in ("round_reached", "repair_share", "max_term_share") if k in info}}
-        return {"pixels": obs["pixels"]}, float(reward), bool(terminated), bool(truncated), out
-
-    def close(self) -> None:
-        self.env.close()
-
-
 def make_real_env(config: RLConfig, index: int, audio_features=None):
     """The game on instance `index` of the fleet at `config.fleet_root`, as a RealGameEnv."""
     from zombiesai.demos.inputs import DEFAULT_BINDINGS
@@ -107,8 +63,12 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
 
 
 def make_actor_env(config: RLConfig, index: int, audio_features=None):
-    if config.env == "sim":
-        return SimActorEnv(config.sim, config.seed + index)
+    if config.env == "synthetic":
+        from zombiesai.synthetic import SyntheticActorEnv
+
+        hears = audio_features is not None and config.hear
+        return SyntheticActorEnv(config.seed + index, config.synthetic or None,
+                                 audio_shape=audio_features.shape if hears else None)
     if config.env == "real":
         return make_real_env(config, index, audio_features)
     raise ValueError(f"unknown env {config.env!r}")
@@ -236,6 +196,6 @@ def _offer(out, item, timeout_s: float = 0.25) -> bool:
 def _episode_writer(run_dir: Path, index: int, episode: int, env):
     from zombiesai.demos.clips import ClipWriter
 
-    source = env.capture.describe() if getattr(env, "capture", None) is not None else {"kind": "sim"}
+    source = env.capture.describe() if getattr(env, "capture", None) is not None else {"kind": "synthetic"}
     return ClipWriter(run_dir / "episodes" / f"a{index}_ep{episode:05d}", source={**source, "actor": index},
                       label_source="play", config={"decision_hz": spec.DECISION_HZ})

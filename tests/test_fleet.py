@@ -281,13 +281,13 @@ def free_port() -> int:
 
 
 def test_a_run_trains_on_its_own_games_and_another_machines(bc_checkpoint, tmp_path, monkeypatch):
-    """The learner with one sim actor of its own, and a worker with one more, in one PPO run: the worker's games
+    """The learner with one rehearsal actor of its own, and a worker with one more, in one PPO run: the worker's games
     arrive under its own actor numbers, and when the run ends the worker stops its games and goes."""
     monkeypatch.chdir(tmp_path)
     port = free_port()
-    config = RLConfig(init=str(bc_checkpoint), env="sim", n_actors=1, total_steps=1200, segment_steps=48,
+    config = RLConfig(init=str(bc_checkpoint), env="synthetic", n_actors=1, total_steps=1200, segment_steps=48,
                       batch_steps=384, critic_warmup_updates=1, minibatch_size=96, device="cpu",
-                      sim={"max_steps": 120}, listen=f"127.0.0.1:{port}")
+                      synthetic={"max_steps": 120}, listen=f"127.0.0.1:{port}")
     said: list[str] = []
     worker = FleetWorker(FleetClient(f"127.0.0.1:{port}", TOKEN, "rig2", timeout_s=10),
                          WorkerOptions(actors=1, out_root=str(tmp_path / "fleet"), lost_s=3.0, poll_s=0.2,

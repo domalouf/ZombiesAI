@@ -3,7 +3,8 @@ several games at once.
 
 The shape of it:
 
-* **Actors** -- one process per game instance (`realgame/instances.py`), or per NachtSim for a rehearsal.
+* **Actors** -- one process per game instance (`realgame/instances.py`), or per synthetic stand-in for a
+  rehearsal (`zombiesai/synthetic.py`).
   Each runs its own copy of the policy on a CPU thread (0.5 ms a decision for the BC net, so the games and the
   learner have the GPU to themselves), acts in real time, and ships **segments** of up to `segment_steps`
   decisions to the learner. A segment ends early at an episode's end, so no segment spans a reset, and it
@@ -58,7 +59,6 @@ from zombiesai import spec
 # The pieces live in their own modules; their names are re-exported here, where the fleet, the scripts and the
 # tests have always imported them from.
 from zombiesai.rl.actors import (  # noqa: F401
-    SimActorEnv,
     _actor_loop,
     _episode_writer,
     _offer,

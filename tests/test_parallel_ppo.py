@@ -139,18 +139,18 @@ def test_actors_follow_published_weights(bc_checkpoint, tmp_path):
     assert follower.poll(net) == 3 and torch.equal(net.actor.weight, other.actor.weight)
 
 
-def test_parallel_training_runs_end_to_end_on_the_sim(bc_checkpoint, tmp_path):
+def test_parallel_training_runs_end_to_end_on_the_synthetic_stand_in(bc_checkpoint, tmp_path):
     """Two actor processes, the learner, warm-up then PPO, and a checkpoint every BC tool can play."""
-    config = RLConfig(init=str(bc_checkpoint), env="sim", n_actors=2, total_steps=1200, segment_steps=48,
+    config = RLConfig(init=str(bc_checkpoint), env="synthetic", n_actors=2, total_steps=1200, segment_steps=48,
                       batch_steps=384, critic_warmup_updates=1, minibatch_size=96, device="cpu",
-                      sim={"max_steps": 200})
+                      synthetic={"max_steps": 200})
     checkpoint = train(config, tmp_path / "run", say=lambda m: None)
     import json
 
     rows = [json.loads(line) for line in (tmp_path / "run" / "metrics.jsonl").read_text().splitlines()]
     assert len(rows) >= 3 and rows[0]["warmup"] and not rows[-1]["warmup"]
     assert rows[-1]["step"] >= 1200 and "return_mean" in rows[-1] and "round_reached_mean" in rows[-1]
-    assert json.loads((tmp_path / "run" / "config.json").read_text())["env"] == "nacht-render"
+    assert json.loads((tmp_path / "run" / "config.json").read_text())["env"] == "synthetic"
     games = [json.loads(line) for line in (tmp_path / "run" / "episodes.jsonl").read_text().splitlines()]
     assert games and {"round_reached", "seconds", "shots", "hits", "step", "actor"} <= set(games[0])
     assert all(0 <= g["hits"] <= g["shots"] and g["seconds"] > 0 for g in games)

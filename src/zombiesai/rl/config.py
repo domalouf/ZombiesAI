@@ -12,7 +12,7 @@ import torch
 @dataclass
 class RLConfig:
     init: str = ""  # the BC checkpoint RL starts from
-    env: str = "real"  # "real": the game instances of a fleet; "sim": NachtSim's rendered view, for rehearsal
+    env: str = "real"  # "real": the game instances of a fleet; "synthetic": no game, a rehearsal of the plumbing
     n_actors: int = 4
     total_steps: int = 2_000_000
     segment_steps: int = 256  # ~17 s of real play
@@ -43,15 +43,15 @@ class RLConfig:
     bindings: str = "configs/waw_bindings.json"
     record_every: int = 0  # record every k-th episode of each actor as a clip (0: never)
     hear: bool = True  # a checkpoint trained with audio hears its own instance's sink
-    # sim env
-    sim: dict = field(default_factory=dict)
+    # synthetic env: SyntheticConfig overrides (zombiesai/synthetic.py)
+    synthetic: dict = field(default_factory=dict)
     actor_restarts: int = 20  # per actor, before the run gives up on it
     # Other PCs' games (rl/fleet.py): "host:port" to accept their workers on, "" for this machine's games only
     listen: str = ""
 
     @property
     def env_name(self) -> str:
-        return "real-waw" if self.env == "real" else "nacht-render"
+        return "real-waw" if self.env == "real" else self.env
 
 
 def resolve_device(name: str) -> torch.device:

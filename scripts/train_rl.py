@@ -1,7 +1,7 @@
 """Reinforcement learning from the policy's own play: PPO fine-tuning of a BC policy across parallel games.
 
-    # Rehearse the whole pipeline on NachtSim first -- same actors, same learner, no game:
-    uv run python scripts/train_rl.py runs/bc_real2/bc.pt --env sim --actors 8 --total-steps 200000
+    # Rehearse the plumbing first -- same actors, same learner, synthetic frames, no game:
+    uv run python scripts/train_rl.py runs/bc_real2/bc.pt --env synthetic --actors 8 --total-steps 200000
 
     # The real thing: bring a fleet up and check it (docs/rl.md), then
     uv run python scripts/instances.py up --n 4
@@ -32,14 +32,14 @@ from zombiesai.rl.parallel_ppo import RLConfig, train
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("init", type=Path, help="the BC checkpoint to start from (or an RL checkpoint to continue)")
-    parser.add_argument("--env", choices=("real", "sim"), default="real")
-    parser.add_argument("--actors", type=int, default=4, help="one per game instance (real) or sim process; "
+    parser.add_argument("--env", choices=("real", "synthetic"), default="real",
+                        help="real: this machine's game instances; synthetic: no game, a rehearsal of the plumbing")
+    parser.add_argument("--actors", type=int, default=4, help="one per game instance (real) or rehearsal process; "
                                                                  "0 with --listen: only other machines play")
     parser.add_argument("--out", type=Path, default=None)
     parser.add_argument("--fleet", default=RLConfig.fleet_root, help="the fleet's root (scripts/instances.py)")
-    parser.add_argument("--sim-hardness", type=float, default=0.5)
     for f in fields(RLConfig):
-        if f.name in ("init", "env", "n_actors", "fleet_root", "sim"):
+        if f.name in ("init", "env", "n_actors", "fleet_root", "synthetic"):
             continue
         flag = "--" + f.name.replace("_", "-")
         kind = type(f.default) if f.default is not None else float
@@ -50,9 +50,8 @@ def main() -> None:
     args = parser.parse_args()
 
     values = {f.name: getattr(args, f.name) for f in fields(RLConfig)
-              if f.name not in ("init", "env", "n_actors", "fleet_root", "sim")}
-    config = RLConfig(init=str(args.init), env=args.env, n_actors=args.actors, fleet_root=args.fleet,
-                      sim={"hardness": args.sim_hardness}, **values)
+              if f.name not in ("init", "env", "n_actors", "fleet_root", "synthetic")}
+    config = RLConfig(init=str(args.init), env=args.env, n_actors=args.actors, fleet_root=args.fleet, **values)
     if args.out is None:
         root = Path("runs")
         k = len(list(root.glob(f"rl_{args.env}_*"))) if root.exists() else 0
