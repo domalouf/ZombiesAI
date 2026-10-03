@@ -73,7 +73,8 @@ uv run python scripts/play_real.py runs/bc1/bc.pt --minutes 3       # watch it p
 # Then PPO on several games at once (docs/rl.md)
 uv run python scripts/instances.py up --n 4                          # four games, four private X servers
 uv run python scripts/spike_instances.py --counts-per-degree 9.09   # does each take input, alone?
-uv run python scripts/train_rl.py runs/bc1/bc.pt --actors 4 --out runs/rl1
+uv run python scripts/train_rl.py runs/bc1/bc.pt --actors auto --out runs/rl1   # as many games as this PC carries
+uv run python scripts/train_rl.py fresh --actors auto --out runs/rl0          # no BC: a new pixel+audio policy
 uv run python scripts/train_rl.py runs/bc1/bc.pt --env synthetic --actors 8   # rehearse the plumbing, no game
 uv run python scripts/instances.py down
 
@@ -84,7 +85,9 @@ uv run python scripts/supervise.py               # the live supervision page: ru
 ```
 
 More games than one PC can run: the other gaming PCs join the same run as **workers** (`scripts/fleet_worker.py`),
-sending their games to the learner over the LAN. The learner turns away any PC on a different commit or with
+sending their games to the learner over the LAN. A worker needs only the fleet token: it finds the learner by
+its LAN beacon, starts as many games as its PC can carry, and with `--yield-to-games` steps aside while someone
+plays on that PC (`deploy/zombiesai-worker.service` runs it that way). The learner turns away any PC on a different commit or with
 different game settings; `scripts/fleet.py prep` brings every PC to this one's commit and settings and starts
 its games, over SSH, and the learner scores each machine's games on their own so one bad PC stands out. See
 [`docs/rl.md`](./docs/rl.md), "Several PCs".
