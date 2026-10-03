@@ -356,8 +356,9 @@ def ring_window(audio: ClipAudio, t_end: float, n: int) -> np.ndarray:
     The window's n sample times are evenly spaced and so sorted, and the chunk starts on a stream are sorted
     too; then which chunk each time falls in is one sorted merge of the ~200 starts into the times, not n
     binary searches, and a window wholly inside captured audio is one gather, not a masked one. Each time's
-    sample number is the same expression as `ClipAudio.sample_at`. Anything else (starts out of order, a
-    window reaching past what was captured) takes `ClipAudio.window` itself.
+    sample number is the same expression as `ClipAudio.sample_at`, and what was not captured (the few samples
+    a step in the clock envelope skips, the time before the ring) is silence, as there. Chunk starts out of
+    order take `ClipAudio.window` itself.
     """
     t = t_end + _window_offsets(n, audio.rate)
     starts = audio.chunk_origin + audio.chunk_start / audio.rate
@@ -370,6 +371,8 @@ def ring_window(audio: ClipAudio, t_end: float, n: int) -> np.ndarray:
     np.clip(i, 0, m - 1, out=i)
     s = np.floor((t - audio.chunk_origin[i]) * audio.rate + 1e-6).astype(np.int64)
     ok = (s >= audio.chunk_start[i]) & (s < audio.chunk_end[i]) & (t >= starts[0]) & (s >= audio.first_sample)
-    if not ok.all():
-        return audio.window(t_end, n / audio.rate)
-    return audio.samples[s - audio.first_sample]
+    if ok.all():
+        return audio.samples[s - audio.first_sample]
+    out = np.zeros((n, audio.channels), dtype=audio.samples.dtype)  # uncaptured stretches are silence
+    out[ok] = audio.samples[s[ok] - audio.first_sample]
+    return out
