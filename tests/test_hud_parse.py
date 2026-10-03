@@ -308,3 +308,31 @@ def test_lowres_round_reader_counts_tallies_in_policy_frames(crops):
     out = round_from_frames(frames)
     assert out["round"].tolist() == [1, 3, 8] and (out["round_status"] == OK).all()
     assert out["round_flags"].tolist() == [0, 0, ROUND_CAPPED]
+
+
+def test_stroke_evidence_is_the_plain_per_stroke_means_bit_for_bit(crops):
+    """The round reader only converts the pixels its strokes and rings read, and skips mean()'s wrapper;
+    the evidence must be exactly the plain computation's, or a confidence would move."""
+    from zombiesai.hud.parse import N_STROKES, _strokes, stroke_evidence
+
+    s = _strokes()
+
+    def plain(crop):
+        x = crop.reshape(-1, 3).astype(np.int16)
+        red = (x[:, 0] > 60) & (x[:, 1] < 30) & (x[:, 2] < 30)
+        lum = x.sum(1) * (1 / 3)
+        reds, contrast = np.zeros(N_STROKES), np.zeros(N_STROKES)
+        for k in range(N_STROKES):
+            if len(s.idx[k]) == 0:
+                reds[k] = contrast[k] = np.nan
+                continue
+            reds[k] = red[s.idx[k]].mean()
+            contrast[k] = lum[s.idx[k]].mean() - (lum[s.ring[k]].mean() if len(s.ring[k]) else 0.0)
+        return reds, contrast
+
+    rng = np.random.default_rng(0)
+    samples = list(crops["round"]) + [rng.integers(0, 256, (140, 160, 3), dtype=np.uint8) for _ in range(10)]
+    samples += [np.clip(c.astype(int) + rng.integers(-40, 40, c.shape), 0, 255).astype(np.uint8) for c in crops["round"]]
+    for crop in samples:
+        for got, want in zip(stroke_evidence(crop), plain(crop)):
+            np.testing.assert_array_equal(got.view(np.uint64), want.view(np.uint64))
