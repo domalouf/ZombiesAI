@@ -29,7 +29,7 @@ is cheap. So each instance gets:
 | sound | a PulseAudio null sink per instance, so a policy that hears hears its own game | `realgame/instances.py` |
 
 Nothing touches your desktop's X server, mouse or keyboard: you can keep using the computer while it trains.
-Under Weston nothing appears on your desktop at all; `scripts/watch.py`-style captures, or a screenshot of a
+Under Weston nothing appears on your desktop at all; `scripts/view_instances.py`, or a screenshot of a
 display (`DISPLAY=:60 import -window root shot.png`), are how to look. (With the Hyprland host,
 `scripts/instances.py show` toggles the workspace.)
 
@@ -305,17 +305,16 @@ worth checking on Wi-Fi.
 --worker <id>`; README.md, "Live on the site"): the Training Room shows a card per machine, with what its worker
 is doing, read from the `runs/fleet/status.json` the worker rewrites every few seconds.
 
-## Rehearse on the sim first
+## Rehearse without the game first
 
-The same actors and learner run on NachtSim's rendered view with `--env sim`, as fast as the CPU allows (about
-300 steps/s per actor process on this machine) -- the whole pipeline, minus the game:
+The same actors and learner run on a synthetic stand-in (`src/zombiesai/synthetic.py`) with `--env synthetic`,
+thousands of steps a second per actor process -- the whole pipeline, minus the game:
 
 ```sh
-uv run python scripts/train_rl.py runs/bc_real2/bc.pt --env sim --actors 8 --total-steps 300000
+uv run python scripts/train_rl.py runs/bc_real2/bc.pt --env synthetic --actors 8 --total-steps 300000
 ```
 
-A BC policy cloned from the real game will not play the sim well (`docs/sim_lies.md`: the pixels are not the
-same), so treat this as a plumbing and hyperparameter check, not a result.
+Its pixels look nothing like the game's, so treat this as a plumbing and hyperparameter check, not a result.
 
 ## What to expect, in numbers
 

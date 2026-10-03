@@ -6,7 +6,7 @@ IDM is allowed to see the frames on both sides of the decision, so a turn to the
 scene sliding left, and a reload is visible as the animation that follows it. A model that can only see the
 past -- a policy -- has to solve a much harder problem, which is why the IDM's labels are worth training on.
 
-The chain is: a small amount of labelled play (recorded with input logging, or generated in NachtSim) trains
+The chain is: a small amount of labelled play (recorded with input logging) trains
 the IDM; the IDM then labels as many hours of unlabelled gameplay video as you can find; behavioural cloning
 learns a causal policy from those pseudo-labels. Labelling is cheap, so the expensive resource -- a human
 sitting at the game -- buys an hour of IDM training data rather than an hour of demonstrations.

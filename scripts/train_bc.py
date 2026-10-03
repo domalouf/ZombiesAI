@@ -20,7 +20,7 @@ import json
 from pathlib import Path
 
 from zombiesai.demos.bc import BCConfig, train
-from zombiesai.demos.clips import clip_from_episode, iter_clips
+from zombiesai.demos.clips import iter_clips
 from zombiesai.demos.dataset import training_clips
 from zombiesai.demos.hearing import DEFAULT_CACHE
 
@@ -28,7 +28,6 @@ from zombiesai.demos.hearing import DEFAULT_CACHE
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("clips", nargs="+", type=Path)
-    parser.add_argument("--episodes", nargs="*", type=Path, default=[], help="episode dirs to include as clips")
     parser.add_argument("--out", type=Path, default=Path("runs/bc"))
     parser.add_argument("--epochs", type=int, default=BCConfig.epochs)
     parser.add_argument("--batch-size", type=int, default=BCConfig.batch_size)
@@ -68,7 +67,6 @@ def main() -> None:
     args = parser.parse_args()
 
     clips, empty = training_clips(args.clips, args.min_confidence)
-    clips += [clip_from_episode(path) for path in args.episodes]
     val_clips = None
     if args.val_clips is not None:
         val_clips = [c for root in args.val_clips for c in iter_clips(root) if c.labelled]
@@ -112,7 +110,7 @@ def main() -> None:
         print(f"  rollout statistics: {verdict}")
         inertia = final["inertia"]
         print(f"  action inertia: {'ok' if inertia['passed'] else 'copying on ' + str(inertia['inert_heads'])}")
-    print("\nnext: scripts/eval_bc.py to play it, scripts/watch.py --checkpoint to see it")
+    print("\nnext: scripts/eval_bc.py to score it, scripts/play_real.py to watch it play the game")
 
 
 if __name__ == "__main__":

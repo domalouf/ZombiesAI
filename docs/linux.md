@@ -194,13 +194,14 @@ uv run python scripts/train_bc.py data/demos runs/play --out runs/bc2   # --corr
 
 ## What runs where
 
-| Piece | Linux | Windows |
-|---|---|---|
-| Capture | `demos/x11_capture.py` (XWayland, MIT-SHM) | gone (it was `dxcam` Desktop Duplication) |
-| Recording human input | `demos/evdev_input.py` | `demos/win32_input.py` |
-| Synthetic input | `realgame/uinput.py` | not written yet (`SendInput` ladder) |
-| Several games at once | `realgame/instances.py` + `realgame/xtest.py` (an X server per game; `docs/rl.md`) | not possible (one foreground window per desktop) |
-| Everything else | identical | identical |
+Linux is the only platform (the Windows paths were removed in October 2026).
+
+| Piece | Where |
+|---|---|
+| Capture | `demos/x11_capture.py` (XWayland, MIT-SHM) |
+| Recording human input | `demos/evdev_input.py` |
+| Synthetic input | `realgame/uinput.py`, and per instance `realgame/xtest.py` |
+| Several games at once | `realgame/instances.py` (an X server per game; `docs/rl.md`) |
 
 `demos/capture.py` is X11 only: its `ScreenCapture` reads the game's window over MIT-SHM, on the desktop's
 XWayland or on an instance's own rootful Xwayland.
