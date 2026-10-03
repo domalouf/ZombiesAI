@@ -1,32 +1,71 @@
 """The PPO update over a batch of segments: GAE per segment, the clipped surrogate with a KL anchor to the
-behavioural prior, a critic warm-up, and reward scaling (rl/parallel_ppo.py has the whole loop)."""
+behavioural prior, a critic warm-up, and reward scaling (rl/parallel_ppo.py has the whole loop).
+
+How the update spends the GPU, because at 4096 decisions a batch the bookkeeping cost as much as the learning:
+
+* **Every frame crosses to the GPU once per update.** A segment's frames (uint8, each stored once) and its
+  audio features go up in one copy; each step's stack is a row of precomputed frame indices (the
+  `context + t - offsets` arithmetic of `segments.stack_indices`), and a minibatch is gathered on the device.
+  Stacking on the CPU meant copying every frame `len(offsets)` times per epoch and uploading it again.
+* **Big batches where nothing learns:** values of every observation, and the frozen reference policy's logits
+  of every step, are computed once per update in chunks of `EVAL_CHUNK`. The reference does not change during
+  an update, so running it on every minibatch of every epoch computed the same logits three times. With no
+  KL anchor (`kl_coef` 0: a fresh start, `prepare_init`) there is no reference network at all.
+* **Mixed precision** (`RLConfig.amp`, `encoders.precision`): the network runs under autocast, the losses and
+  the action distribution in fp32. In fp32 the arithmetic is the one it always was.
+"""
 
 import copy
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
 import torch
+from scipy.signal import lfilter
 from torch import nn
 
 from zombiesai import spec
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
+from zombiesai.rl.encoders import precision
 from zombiesai.rl.segments import Segment
+
+# Observations per forward pass where no gradient is kept (values, reference logits): a 7-frame stack of 512
+# is ~100 MB of uint8 on the device, and large enough that the GPU is busy rather than waiting on launches.
+EVAL_CHUNK = 512
+
+
+def segment_gae(rewards, values, last_values, terminated, gamma: float, lam: float):
+    """GAE of many segments at once: each a list entry, no episode boundary inside one, and each end
+    bootstrapping from its last value unless it terminated. Returns (advantages, returns), float32, every
+    segment's steps in order, concatenated.
+
+    The recursion runs backwards in time, so the segments are laid side by side, padded after their ends with
+    zero TD errors (which keep a zero advantage zero until a segment's real last step), and one first-order
+    filter runs along all of them in reverse."""
+    lengths = np.array([len(r) for r in rewards])
+    if not len(lengths) or lengths.max() == 0:
+        return np.zeros(0, np.float32), np.zeros(0, np.float32)
+    steps = np.arange(lengths.max())
+    inside = steps[None, :] < lengths[:, None]
+    r = np.zeros(inside.shape)
+    v = np.zeros(inside.shape)
+    v_next = np.zeros(inside.shape)
+    for i, n in enumerate(lengths):
+        if n:
+            r[i, :n] = rewards[i]
+            v[i, :n] = values[i]
+            v_next[i, : n - 1] = v[i, 1:n]
+            v_next[i, n - 1] = 0.0 if terminated[i] else float(last_values[i])
+    delta = np.where(inside, r + gamma * v_next - v, 0.0)
+    adv = lfilter([1.0], [1.0, -gamma * lam], delta[:, ::-1], axis=1)[:, ::-1]
+    adv = adv[inside].astype(np.float32)
+    return adv, adv + v[inside].astype(np.float32)
 
 
 def compute_gae(rewards, values, last_value: float, terminated: bool, gamma: float, lam: float):
     """GAE over one segment: no episode boundary inside it, and the end bootstraps unless it terminated."""
-    n = len(rewards)
-    adv = np.zeros(n, dtype=np.float32)
-    next_value = 0.0 if terminated else float(last_value)
-    gae = 0.0
-    for t in reversed(range(n)):
-        delta = rewards[t] + gamma * next_value - values[t]
-        gae = delta + gamma * lam * gae
-        adv[t] = gae
-        next_value = values[t]
-    return adv, adv + np.asarray(values, dtype=np.float32)
+    return segment_gae([np.asarray(rewards)], [np.asarray(values)], [last_value], [terminated], gamma, lam)
 
 
 class RunningStd:
@@ -38,13 +77,19 @@ class RunningStd:
         self.ret: dict[int, float] = {}
 
     def update(self, actor: int, rewards: np.ndarray, terminated: bool) -> None:
+        rewards = np.asarray(rewards, dtype=np.float64)
         ret = self.ret.get(actor, 0.0)
-        for r in rewards:
-            ret = ret * self.gamma + float(r)
-            self.count += 1
-            delta = ret - self.mean
-            self.mean += delta / self.count
-            self.m2 += delta * (ret - self.mean)
+        if len(rewards):
+            # The stream's discounted return after each reward, ret_t = gamma * ret_{t-1} + r_t, as one filter;
+            # then the batch's mean and spread merged into the running ones (Chan et al.), which is what
+            # Welford's one-at-a-time update adds up to.
+            returns = lfilter([1.0], [1.0, -self.gamma], rewards, zi=[self.gamma * ret])[0]
+            n, mean = len(returns), float(returns.mean())
+            total, delta = self.count + n, mean - self.mean
+            self.mean += delta * n / total
+            self.m2 += float(((returns - mean) ** 2).sum()) + delta**2 * self.count * n / total
+            self.count = total
+            ret = float(returns[-1])
         self.ret[actor] = 0.0 if terminated else ret
 
     @property
@@ -74,6 +119,42 @@ def root_prior(path: str | Path) -> str:
     raise ValueError(f"checkpoint chain loops at {path}")
 
 
+# The history a policy started from nothing gets: half a second, dense where motion is read.
+FRESH_OFFSETS = (0, 1, 2, 4, 8)
+
+
+def prepare_init(config: RLConfig, run_dir: str | Path) -> RLConfig:
+    """`init="fresh"`: no behavioural prior. Build a new pixel+audio policy, save it as an ordinary BC-format
+    checkpoint at `run_dir/init.pt` (so the actors, the fleet's workers and every BC tool load it as they load
+    any start), and return the config pointing there -- with no KL anchor and no critic warm-up, since there is
+    no cloned behaviour to protect. Any other config comes back unchanged."""
+    if config.init != "fresh":
+        return config
+    from zombiesai.demos import bc
+    from zombiesai.demos.hearing import AudioFeatureConfig
+
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    bc_config = bc.BCConfig(frame_offsets=FRESH_OFFSETS, use_audio=True, seed=config.seed)
+    features = AudioFeatureConfig()
+    torch.manual_seed(config.seed)
+    path = run_dir / "init.pt"
+    bc.save(path, bc.build_net(bc_config, features), bc_config, 0, {}, {}, features)
+    return replace(config, init=str(path), kl_coef=0.0, kl_min=0.0, critic_warmup_updates=0)
+
+
+@dataclass
+class Staged:
+    """One update's segments on the device: frames stored once, and indices that stack them."""
+
+    frames: torch.Tensor  # (frames, H, W, 3) uint8, every segment's frames back to back
+    stacks: torch.Tensor  # (observations, len(offsets)) int64: each observation's stack, as rows of `frames`
+    row_obs: torch.Tensor  # (decisions,) int64: the observation each decision was taken on
+    audio: torch.Tensor | None  # (observations, *feature) float32
+    audio_mask: torch.Tensor | None  # (observations,) float32
+    obs_counts: list[int]  # observations per segment, its steps plus the final one
+
+
 class Learner:
     """The PPO update over a batch of segments, on the learner's device. Separate from the process plumbing
     so it can be tested (and driven) in-process."""
@@ -90,15 +171,25 @@ class Learner:
         # on.
         previous = self.meta.get("rl") or {}
         self.reference = previous.get("reference") or (root_prior(previous["init"]) if previous else config.init)
-        if previous:
-            self.ref, _, _ = bc.load(self.reference, device)
-            self.ref.eval()
-        else:
-            self.ref = copy.deepcopy(self.net).eval()
-        for p in self.ref.parameters():
-            p.requires_grad_(False)
+        self.updates = int(previous.get("updates", 0))
+        self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
+        # A run without an anchor (kl_coef 0 from the start: nothing to stay close to) keeps no reference.
+        self.ref = None
+        if self.kl_coef > 0:
+            if previous:
+                self.ref, _, _ = bc.load(self.reference, device)
+                self.ref.eval()
+            else:
+                self.ref = copy.deepcopy(self.net).eval()
+            for p in self.ref.parameters():
+                p.requires_grad_(False)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=config.lr, eps=1e-5)
         self.critic_opt = torch.optim.Adam(self.net.critic.parameters(), lr=config.lr * 10, eps=1e-5)
+        self.precision = precision(config.amp, device)
+        self.amp = self.precision.mode
+        self.grad_scaler = self.precision.grad_scaler()
+        if device.type == "cuda":
+            torch.backends.cudnn.benchmark = True  # few shapes (minibatch, eval chunk), each seen every update
         self.offsets = self.bc_config.offsets
         self.uses_audio = self.bc_config.use_audio
         # One step's audio feature, as the actors build it (_actor_loop) and the network takes it; None if deaf.
@@ -108,14 +199,13 @@ class Learner:
 
             self.audio_shape = (feature_config(self.meta.get("audio_features")) or AudioFeatureConfig()).shape
         self.scaler = RunningStd(config.gamma)
-        self.updates = int(previous.get("updates", 0))
-        self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
 
     def _forward(self, net, pixels, audio=None, mask=None):
         return net(pixels, None, audio, mask)
 
     def _gather(self, segments: list[Segment], rows: np.ndarray, which: np.ndarray):
-        """Stacked pixels (and audio) of rows (segment, t) -- t may be n for the final observation."""
+        """Stacked pixels (and audio) of rows (segment, t) -- t may be n for the final observation -- built on
+        the CPU, row by row. The plain statement of what `_stage` and `_minibatch` compute in bulk."""
         pixels, audio, masks = [], [], []
         for s_idx, t in zip(which, rows):
             seg = segments[s_idx]
@@ -131,20 +221,54 @@ class Learner:
             out += [None, None]
         return out
 
+    def _stage(self, segments: list[Segment]) -> Staged:
+        """Upload every segment's frames and audio in one copy each, and index each observation's stack."""
+        n_frames = [len(seg.frames) for seg in segments]
+        frame_base = np.concatenate([[0], np.cumsum(n_frames)[:-1]]).astype(np.int64)
+        obs_counts = [seg.n + 1 for seg in segments]
+        back = np.asarray(self.offsets, dtype=np.int64)
+        # Observation t of a segment stacks frames[context + t - back], in that segment's stretch of `frames`.
+        stacks = np.concatenate([base + seg.context + np.arange(seg.n + 1)[:, None] - back[None, :]
+                                 for base, seg in zip(frame_base, segments)])
+        obs_base = np.concatenate([[0], np.cumsum(obs_counts)[:-1]]).astype(np.int64)
+        row_obs = np.concatenate([base + np.arange(seg.n) for base, seg in zip(obs_base, segments)])
+        pinned = self.device.type == "cuda"
+        host = torch.empty((sum(n_frames), *segments[0].frames.shape[1:]), dtype=torch.uint8, pin_memory=pinned)
+        np.concatenate([seg.frames for seg in segments], out=host.numpy())
+        audio = mask = None
+        if self.uses_audio:
+            # A segment from a deaf actor hears nothing: masked, exactly as a clip without sound trains.
+            audio = torch.empty((sum(obs_counts), *self.audio_shape), dtype=torch.float32, pin_memory=pinned)
+            mask = torch.empty(sum(obs_counts), dtype=torch.float32, pin_memory=pinned)
+            for base, count, seg in zip(obs_base, obs_counts, segments):
+                heard = seg.audio is not None
+                audio[base : base + count] = torch.from_numpy(np.asarray(seg.audio, np.float32)) if heard else 0.0
+                mask[base : base + count] = torch.from_numpy(np.asarray(seg.audio_mask, np.float32)) if heard else 0.0
+            audio, mask = audio.to(self.device, non_blocking=True), mask.to(self.device, non_blocking=True)
+        return Staged(frames=host.to(self.device, non_blocking=True), stacks=torch.from_numpy(stacks).to(self.device),
+                      row_obs=torch.from_numpy(row_obs).to(self.device), audio=audio, audio_mask=mask,
+                      obs_counts=obs_counts)
+
+    def _minibatch(self, staged: Staged, obs: torch.Tensor):
+        """Stacked pixels (and audio) of the observations `obs`, gathered on the device."""
+        pixels = staged.frames[staged.stacks[obs]]
+        if staged.audio is None:
+            return pixels, None, None
+        return pixels, staged.audio[obs], staged.audio_mask[obs]
+
     @torch.no_grad()
-    def _values(self, segments: list[Segment]) -> list[np.ndarray]:
-        """Current-network values of every observation, final one included: (n + 1,) per segment."""
-        self.net.eval()
-        out = []
-        for s_idx, seg in enumerate(segments):
-            rows = np.arange(seg.n + 1)
-            values = []
-            for chunk in np.array_split(rows, max(1, len(rows) // 256)):
-                px, au, mk = self._gather(segments, chunk, np.full(len(chunk), s_idx))
-                values.append(self._forward(self.net, px, au, mk)[1].float().cpu().numpy())
-            out.append(np.concatenate(values))
-        self.net.train()
-        return out
+    def _evaluate(self, net, staged: Staged, obs: torch.Tensor):
+        """(logits, values) of the observations `obs`, fp32, in chunks of EVAL_CHUNK with no gradient."""
+        was_training = net.training
+        net.eval()
+        logits, values = [], []
+        for chunk in torch.split(obs, EVAL_CHUNK):
+            with self.precision.autocast():
+                lg, v, _ = self._forward(net, *self._minibatch(staged, chunk))
+            logits.append(lg.float())
+            values.append(v.float())
+        net.train(was_training)
+        return torch.cat(logits), torch.cat(values)
 
     def update(self, segments: list[Segment]) -> dict:
         c = self.config
@@ -152,26 +276,31 @@ class Learner:
             if c.reward_scale:
                 self.scaler.update(seg.actor, seg.rewards, seg.terminated)
         scale = self.scaler.std if c.reward_scale else 1.0
-        values = self._values(segments)
-        adv, ret, which, rows, old_logp, actions, valid = [], [], [], [], [], [], []
-        for s_idx, (seg, v) in enumerate(zip(segments, values)):
-            a, r = compute_gae(seg.rewards / scale, v[:-1], v[-1], seg.terminated, c.gamma, c.gae_lambda)
-            adv.append(a)
-            ret.append(r)
-            which.append(np.full(seg.n, s_idx))
-            rows.append(np.arange(seg.n))
-            old_logp.append(seg.logp)
-            actions.append(seg.actions)
-            valid.append(~seg.bad)
-        adv, ret = np.concatenate(adv), np.concatenate(ret)
-        which, rows = np.concatenate(which), np.concatenate(rows)
-        old_logp, actions, valid = np.concatenate(old_logp), np.concatenate(actions), np.concatenate(valid)
-        pred = np.concatenate([v[:-1] for v in values])
+        staged = self._stage(segments)
+        all_obs = torch.arange(sum(staged.obs_counts), device=self.device)
+        values = self._evaluate(self.net, staged, all_obs)[1].cpu().numpy()
+        per_segment = np.split(values, np.cumsum(staged.obs_counts)[:-1])
+        adv, ret = segment_gae([seg.rewards / scale for seg in segments], [v[:-1] for v in per_segment],
+                               [v[-1] for v in per_segment], [seg.terminated for seg in segments],
+                               c.gamma, c.gae_lambda)
+        old_logp = np.concatenate([seg.logp for seg in segments])
+        actions = np.concatenate([seg.actions for seg in segments])
+        valid = np.concatenate([~seg.bad for seg in segments])
+        pred = np.concatenate([v[:-1] for v in per_segment])
         usable = np.flatnonzero(valid)
-        stats: dict[str, list[float]] = {k: [] for k in
-                                         ("policy_loss", "value_loss", "entropy", "clipfrac", "kl_ref")}
+        to_device = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(self.device)  # noqa: E731
+        adv_t, ret_t, old_logp_t, actions_t = map(to_device, (adv, ret, old_logp, actions.astype(np.int64)))
         warmup = self.updates < c.critic_warmup_updates
-        epoch_kl: list[float] = []
+        # The frozen prior's logits of every step that can be trained on, once: they are the same every epoch.
+        ref_logits = None
+        if self.ref is not None and not warmup and len(usable):
+            ref_logits = torch.zeros((len(valid), sum(spec.ACTION_NVEC)), device=self.device)
+            usable_t = to_device(usable)
+            ref_logits[usable_t] = self._evaluate(self.ref, staged, staged.row_obs[usable_t])[0]
+        stats: dict[str, list[torch.Tensor]] = {k: [] for k in
+                                                ("policy_loss", "value_loss", "entropy", "clipfrac", "kl_ref")}
+        epoch_kl: list[torch.Tensor] = []
+        autocast, scaler = self.precision.autocast, self.grad_scaler
         for _ in range(c.update_epochs):
             epoch_kl = []
             perm = np.random.permutation(usable)
@@ -179,50 +308,57 @@ class Learner:
                 mb = perm[start : start + c.minibatch_size]
                 if len(mb) < 2:
                     continue
-                px, au, mk = self._gather(segments, rows[mb], which[mb])
-                target = torch.from_numpy(ret[mb]).to(self.device)
+                rows = to_device(mb)
+                px, au, mk = self._minibatch(staged, staged.row_obs[rows])
+                target = ret_t[rows]
                 if warmup:
-                    with torch.no_grad():
+                    with torch.no_grad(), autocast():
                         h = self.net.features(px, None, au, mk)
-                    value = self.net.critic(h).squeeze(-1)
-                    value_loss = 0.5 * ((value - target) ** 2).mean()
+                    with autocast():
+                        value = self.net.critic(h).squeeze(-1)
+                    value_loss = 0.5 * ((value.float() - target) ** 2).mean()
                     self.critic_opt.zero_grad(set_to_none=True)
-                    value_loss.backward()
-                    self.critic_opt.step()
-                    stats["value_loss"].append(value_loss.item())
+                    scaler.scale(value_loss).backward()
+                    scaler.step(self.critic_opt)
+                    scaler.update()
+                    stats["value_loss"].append(value_loss.detach())
                     continue
-                logits, value, _ = self._forward(self.net, px, au, mk)
-                with torch.no_grad():
-                    ref_logits = self._forward(self.ref, px, au, mk)[0]
+                with autocast():
+                    logits, value, _ = self._forward(self.net, px, au, mk)
+                logits, value = logits.float(), value.float()
                 dist = FactoredCategorical(logits, spec.ACTION_NVEC)
-                act = torch.from_numpy(actions[mb]).to(self.device)
-                log_ratio = dist.log_prob(act) - torch.from_numpy(old_logp[mb]).to(self.device)
+                log_ratio = dist.log_prob(actions_t[rows]) - old_logp_t[rows]
                 ratio = log_ratio.exp()
-                a = torch.from_numpy(adv[mb]).to(self.device)
+                a = adv_t[rows]
                 a = (a - a.mean()) / (a.std() + 1e-8)
                 policy_loss = torch.max(-a * ratio, -a * ratio.clamp(1 - c.clip_coef, 1 + c.clip_coef)).mean()
                 value_loss = 0.5 * ((value - target) ** 2).mean()
                 entropy = dist.entropy().mean()
-                kl_ref = kl_to_reference(logits, ref_logits, spec.ACTION_NVEC).mean()
-                loss = policy_loss + c.vf_coef * value_loss - c.ent_coef * entropy + self.kl_coef * kl_ref
+                loss = policy_loss + c.vf_coef * value_loss - c.ent_coef * entropy
+                if ref_logits is not None:
+                    kl_ref = kl_to_reference(logits, ref_logits[rows], spec.ACTION_NVEC).mean()
+                    loss = loss + self.kl_coef * kl_ref
+                    stats["kl_ref"].append(kl_ref.detach())
                 self.opt.zero_grad(set_to_none=True)
-                loss.backward()
+                scaler.scale(loss).backward()
+                scaler.unscale_(self.opt)
                 nn.utils.clip_grad_norm_(self.net.parameters(), c.max_grad_norm)
-                self.opt.step()
+                scaler.step(self.opt)
+                scaler.update()
                 with torch.no_grad():
-                    epoch_kl.append(((ratio - 1) - log_ratio).mean().item())
-                    stats["clipfrac"].append(((ratio - 1).abs() > c.clip_coef).float().mean().item())
-                stats["policy_loss"].append(policy_loss.item())
-                stats["value_loss"].append(value_loss.item())
-                stats["entropy"].append(entropy.item())
-                stats["kl_ref"].append(kl_ref.item())
-            if not warmup and c.target_kl is not None and epoch_kl and np.mean(epoch_kl) > 1.5 * c.target_kl:
+                    epoch_kl.append(((ratio - 1) - log_ratio).mean())
+                    stats["clipfrac"].append(((ratio - 1).abs() > c.clip_coef).float().mean())
+                stats["policy_loss"].append(policy_loss.detach())
+                stats["value_loss"].append(value_loss.detach())
+                stats["entropy"].append(entropy.detach())
+            # One synchronisation per epoch, not one per number per minibatch.
+            if not warmup and c.target_kl is not None and epoch_kl and _mean(epoch_kl) > 1.5 * c.target_kl:
                 break
         self.updates += 1
-        if not warmup:
+        if not warmup and self.ref is not None:
             self.kl_coef = max(c.kl_min, self.kl_coef * c.kl_decay)
-        out = {k: float(np.mean(v)) for k, v in stats.items() if v}
-        out["approx_kl"] = float(np.mean(epoch_kl)) if epoch_kl else 0.0
+        out = {k: _mean(v) for k, v in stats.items() if v}
+        out["approx_kl"] = _mean(epoch_kl) if epoch_kl else 0.0
         var = float(np.var(ret[usable])) if len(usable) else 0.0
         out["explained_variance"] = 1.0 - float(np.var(ret[usable] - pred[usable])) / var if var > 0 else None
         out.update({"warmup": warmup, "kl_coef": self.kl_coef, "reward_scale": scale,
@@ -243,3 +379,8 @@ class Learner:
         })
         torch.save(blob, tmp)
         tmp.replace(path)
+
+
+def _mean(values: list[torch.Tensor]) -> float:
+    """The mean of per-minibatch scalars, as the float the metrics log wants (np.mean of their floats)."""
+    return float(torch.stack(values).double().mean())
