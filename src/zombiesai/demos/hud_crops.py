@@ -25,6 +25,10 @@ Crops are area-downsampled by `HUD_SCALE`. At 0.5 a 2560x1440 capture keeps digi
 for template matching against a fixed bitmap font -- for 410 KB a decision, ~7.4 GB per 20 minutes (the prompt
 and power-up boxes are 266 KB of it), instead of four times that. That is while recording: once the session
 ends they are packed as verified video, ~20x smaller (demos/hud_video.py).
+
+Live, the crops are cut from the capture's BGRX buffer as it is (`channels=frames.BGRX`): only the boxes are
+read, and at 1440p the points and round boxes are exact 2x2 means (frames.block_mean) -- the same values the
+float path gives there, since halving is exact in float32 too.
 """
 
 import numpy as np
@@ -61,13 +65,14 @@ def crop_shape(height: int, width: int, frac, scale: float = HUD_SCALE) -> tuple
 
 
 def crop_regions(
-    frame: np.ndarray, regions: dict = HUD_REGIONS, scale: float = HUD_SCALE
+    frame: np.ndarray, regions: dict = HUD_REGIONS, scale: float = HUD_SCALE, *, channels=None
 ) -> dict[str, np.ndarray]:
-    """Every HUD region of one full-resolution RGB frame, area-downsampled by `scale`."""
+    """Every HUD region of one full-resolution frame, area-downsampled by `scale`, as RGB crops that own their
+    memory. `frame` is RGB, or BGRX with `channels=frames.BGRX` (see `frames.area_resize`)."""
     height, width = frame.shape[:2]
     out = {}
     for name, frac in regions.items():
         left, top, w, h = region_box(height, width, frac)
         out_h, out_w, _ = crop_shape(height, width, frac, scale)
-        out[name] = area_resize(frame[top : top + h, left : left + w], out_h, out_w)
+        out[name] = area_resize(frame[top : top + h, left : left + w], out_h, out_w, channels=channels)
     return out
