@@ -366,3 +366,47 @@ def test_the_player_hands_the_policy_what_it_heard_when_the_frame_was_grabbed():
     assert [h for h, _ in agent.heard] == list(range(1, len(ears.times) + 1))
     assert np.allclose(np.diff(ears.times), 1 / spec.DECISION_HZ)  # once per tick, at the frame
     assert summary["hearing"] == {"observed": len(ears.times)}
+
+
+def test_the_live_window_is_the_clip_window_value_for_value():
+    """`LiveAudio` builds each tick's window with `ring_window`, not `ClipAudio.window`; it must be the same
+    samples whatever the ring looks like: odd chunk sizes, jitter, a dropout, stamps that arrive out of order,
+    and windows reaching before the ring or past its newest sample."""
+    from zombiesai.demos.hearing import ring_window
+
+    rng = np.random.default_rng(0)
+    for trial in range(24):
+        live = LiveAudio(FakeStream(), CFG, clock=lambda: 0.0)
+        t0, sent = 1000.0, 0
+        for c in range(int(rng.integers(30, 300))):
+            size = (480, 512, 441, 960)[(c + trial) % 4] if trial % 2 else 480
+            if trial % 5 == 0 and c == 60:
+                t0 += 0.05  # a dropout: the samples fall behind the clock
+            sent += size
+            stamp = t0 + sent / RATE + 0.008 + float(rng.uniform(0, (0.0, 0.003, 0.02)[trial % 3]))
+            if trial % 7 == 0 and c % 13 == 0:
+                stamp -= 0.03  # stamped early: chunk starts out of order
+            live.feed(rng.integers(-9000, 9000, (size, 2)).astype(np.int16), stamp)
+        ring = live.snapshot()
+        newest = float(ring.time_of(ring.chunk_end[-1]))
+        for t_end in (newest, newest - 0.0123, newest - 0.3, newest - 1.7, newest - 9.0, newest + 0.1):
+            np.testing.assert_array_equal(ring_window(ring, t_end, CFG.window_samples),
+                                          ring.window(t_end, CFG.window_s))
+        np.testing.assert_array_equal(live.observe(newest - 0.01)[0], features_at(ring, newest - 0.01, CFG))
+
+
+def test_log_mel_is_the_straightforward_computation_bit_for_bit():
+    def reference(window, config):
+        x = window.T.astype(np.float64) / 32768.0
+        taps = np.arange(config.n_frames)[:, None] * config.hop + np.arange(config.n_fft)[None]
+        hann = np.hanning(config.n_fft + 1)[:-1]
+        spectrum = np.fft.rfft(x[:, taps] * hann, axis=-1)
+        power = (spectrum.real**2 + spectrum.imag**2) * (2.0 / hann.sum()) ** 2 / 2.0
+        db = 10.0 * np.log10(np.maximum(power @ mel_filterbank(config).T, 10.0 ** (config.floor_db / 10.0)))
+        return ((db - config.offset_db) / config.scale_db).astype(np.float32)
+
+    rng = np.random.default_rng(1)
+    for config in (CFG, AudioFeatureConfig(n_mels=32), AudioFeatureConfig(hop=512, n_frames=10)):
+        for scale in (1, 300):
+            window = (rng.integers(-32768, 32767, (config.window_samples, 2)) // scale).astype(np.int16)
+            np.testing.assert_array_equal(log_mel(window, config), reference(window, config))

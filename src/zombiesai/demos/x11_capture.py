@@ -9,6 +9,9 @@ The fast path is `XShmGetImage` into a shared-memory segment the X server writes
 of a round trip through the socket, which is the difference between ~2 ms and ~20 ms at 1080p. If the
 extension is missing (a remote display, a locked-down server) it falls back to `XGetImage`, which is correct
 but slow enough to fail spike S2. Which one you got is in `describe()`, so a slow capture is never a mystery.
+`grab_bgrx()` hands the pixels over as the server wrote them, BGRX in the shared segment; the live capture
+reads its policy frame and HUD crops from there (demos/frames.py), so nothing copies the whole frame. `grab()`
+converts to an RGB array of its own, for scripts that keep frames.
 
 Grabbing the whole root window does not work on a Wayland compositor -- XWayland's root is not the desktop.
 Grab the game's window instead: `X11Grabber(window="World at War")`.
@@ -456,13 +459,26 @@ class X11Grabber:
         Raises `WindowUnavailable` while the window cannot be read and `WindowGone` once it no longer exists.
         The happy path costs nothing extra: the window is only re-examined after a grab has failed, and then
         before every retry until one succeeds.
+
+        Converting to RGB is a full-frame copy (~15 ms at 1440p, more than the rest of an actor's step); a
+        caller that only reads the frame wants `grab_bgrx()`.
         """
+        return self._recovering(self._read)
+
+    def grab_bgrx(self) -> np.ndarray:
+        """The region exactly as X hands it over: (H, W, 4) BGRX, unconverted. With MIT-SHM it is a view of the
+        shared segment, uncopied and overwritten by the next grab -- read it before grabbing again, and copy
+        what must outlive that (demos/frames.py reads it in place: `channels=frames.BGRX`). Without MIT-SHM it
+        is an array of its own. Fails, and recovers, exactly as `grab()` does."""
+        return self._recovering(self._read_bgrx)
+
+    def _recovering(self, read) -> np.ndarray:
         if self._lost:
             # Checked before retrying, not just after failing: a window that comes back *larger* would grab
             # without complaint, and hand back its top-left corner as if it were the whole thing.
             self._refresh()
         try:
-            pixels = self._read()
+            pixels = read()
         except X11Error as error:
             self._lost = True
             self._refresh()  # raises WindowGone or a sharper WindowUnavailable, if there is one to raise
@@ -500,16 +516,6 @@ class X11Grabber:
                 self._attach_shm()
             self.backend = "xshm" if self.image else "xgetimage"
 
-    def grab_bgrx(self) -> np.ndarray:
-        """The region exactly as X hands it over: (H, W, 4) BGRX, unconverted and uncopied -- a view of the
-        shared segment, overwritten by the next grab. For passing frames straight on (realgame/viewer.py pipes
-        them to a player); anything that keeps or reads a frame wants `grab()`. MIT-SHM only."""
-        if self.image is None:
-            raise X11Error("grab_bgrx needs MIT-SHM")
-        width, height = self.size
-        raw, stride = self._shm_read()
-        return raw.reshape(height, stride // 4, 4)[:, :width]
-
     def _shm_read(self) -> tuple[np.ndarray, int]:
         x, (left, top, _, height) = self.x, self.region
         clear_errors()
@@ -522,7 +528,7 @@ class X11Grabber:
         stride = self.image.contents.bytes_per_line
         return np.frombuffer(self._buffer, dtype=np.uint8, count=stride * height), stride
 
-    def _read(self) -> np.ndarray:
+    def _read_bgrx(self) -> np.ndarray:
         x, (left, top, width, height) = self.x, self.region
         if self.image is not None:
             raw, stride = self._shm_read()
@@ -538,8 +544,10 @@ class X11Grabber:
             ).copy()
             self._destroy_image(image)
         # X hands back BGRX on a little-endian TrueColor display, padded to bytes_per_line.
-        pixels = raw.reshape(height, stride // 4, 4)[:, :width, 2::-1]
-        return np.ascontiguousarray(pixels)
+        return raw.reshape(height, stride // 4, 4)[:, :width]
+
+    def _read(self) -> np.ndarray:
+        return np.ascontiguousarray(self._read_bgrx()[..., 2::-1])
 
     def describe(self) -> dict:
         return {

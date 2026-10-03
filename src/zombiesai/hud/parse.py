@@ -217,6 +217,11 @@ class _Strokes:
     idx: tuple  # per stroke: flat pixel indices inside the stroke
     ring: tuple  # per stroke: flat indices of the scene just around it
     union: np.ndarray  # flat indices of every stroke
+    # Every pixel any stroke or ring reads (a fifth of the crop), and each stroke's and ring's indices into
+    # that list: the evidence is computed on those pixels alone.
+    used: np.ndarray
+    used_idx: tuple
+    used_ring: tuple
 
 
 @lru_cache(maxsize=4)
@@ -230,7 +235,9 @@ def _strokes(path=ATLAS_PATH) -> _Strokes:
         idx.append(np.flatnonzero(m))
         around = ndimage.binary_dilation(m, iterations=6) & ~near
         ring.append(np.flatnonzero(around))
-    return _Strokes(tuple(idx), tuple(ring), np.flatnonzero(allm))
+    used = np.unique(np.concatenate(idx + ring))
+    return _Strokes(tuple(idx), tuple(ring), np.flatnonzero(allm), used,
+                    tuple(np.searchsorted(used, i) for i in idx), tuple(np.searchsorted(used, r) for r in ring))
 
 
 # Stroke judgement, per stroke. Red ink is the tally's own colour (~(108, 1, 0)); nothing in Nacht's scene
@@ -240,19 +247,24 @@ CONTRAST_PRESENT, CONTRAST_ABSENT = 35.0, 14.0
 
 
 def stroke_evidence(crop: np.ndarray, strokes: _Strokes | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """(red fraction, brightness contrast) of each tally stroke in one round crop."""
+    """(red fraction, brightness contrast) of each tally stroke in one round crop.
+
+    Only the pixels a stroke or ring reads are converted. The means are `ndarray.mean` without its wrapper:
+    the same reduction over the same gathered values, divided by the same count, so the same bits."""
     s = strokes or _strokes()
-    x = crop.reshape(-1, 3).astype(np.int16)
+    x = crop.reshape(-1, 3)[s.used].astype(np.int16)
     red = (x[:, 0] > 60) & (x[:, 1] < 30) & (x[:, 2] < 30)
     lum = x.sum(1) * (1 / 3)
     reds = np.zeros(N_STROKES)
     contrast = np.zeros(N_STROKES)
+    add = np.add.reduce
     for k in range(N_STROKES):
-        if len(s.idx[k]) == 0:
+        idx, ring = s.used_idx[k], s.used_ring[k]
+        if len(idx) == 0:
             reds[k], contrast[k] = np.nan, np.nan  # outside the crop: unknowable
             continue
-        reds[k] = red[s.idx[k]].mean()
-        contrast[k] = lum[s.idx[k]].mean() - (lum[s.ring[k]].mean() if len(s.ring[k]) else 0.0)
+        reds[k] = np.count_nonzero(red[idx]) / len(idx)
+        contrast[k] = add(lum[idx]) / len(idx) - (add(lum[ring]) / len(ring) if len(ring) else 0.0)
     return reds, contrast
 
 

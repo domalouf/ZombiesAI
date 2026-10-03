@@ -93,3 +93,93 @@ def test_estimate_shift_recovers_horizontal_motion(shift):
     found, confidence = fr.estimate_shift(before, after)
     assert found == -shift  # sampling further right means the scene moved left
     assert confidence > 0.1
+
+
+# ---------------------------------------------------------------------------------------- whole-multiple sizes
+
+
+def exact_mean(rgb: np.ndarray, fy: int, fx: int) -> np.ndarray:
+    """The reference: each block's true mean, rounded half to even, in Python integers' worth of precision."""
+    h, w, _ = rgb.shape
+    sums = rgb.reshape(h // fy, fy, w // fx, fx, 3).astype(np.int64).sum(axis=(1, 3))
+    n = fy * fx
+    quotient, rest = np.divmod(sums, n)
+    return (quotient + ((2 * rest > n) | ((2 * rest == n) & (quotient % 2 == 1)))).astype(np.uint8)
+
+
+def bgrx_frame(rng, h: int, w: int, pad: int = 0) -> np.ndarray:
+    """A BGRX frame as MIT-SHM hands it over: a view into rows padded to bytes_per_line."""
+    rows = rng.integers(0, 256, (h, w * 4 + pad), dtype=np.uint8)
+    return rows[:, : w * 4].reshape(h, w, 4)
+
+
+@pytest.mark.parametrize("h, w, fy, fx", [(1440, 2560, 20, 20), (1080, 1920, 15, 15), (720, 1280, 10, 10),
+                                          (270, 380, 2, 2), (280, 320, 2, 2), (64, 64, 16, 16), (40, 64, 4, 2),
+                                          (34, 300, 17, 30), (600, 40, 300, 2)])
+def test_whole_multiples_are_the_exact_mean_from_rgb_and_straight_from_bgrx(h, w, fy, fx):
+    rng = np.random.default_rng(fy * 1000 + fx)
+    bgrx = bgrx_frame(rng, h, w, pad=8)
+    rgb = np.ascontiguousarray(bgrx[..., 2::-1])
+    want = exact_mean(rgb, fy, fx)
+    np.testing.assert_array_equal(fr.block_mean(rgb, fy, fx), want)
+    np.testing.assert_array_equal(fr.block_mean(bgrx, fy, fx, channels=fr.BGRX), want)
+    np.testing.assert_array_equal(fr.area_resize(bgrx, h // fy, w // fx, channels=fr.BGRX), want)
+    white = np.full_like(bgrx, 255)
+    assert (fr.block_mean(white, fy, fx, channels=fr.BGRX) == 255).all()  # no 16-bit lane overflows
+
+
+@pytest.mark.parametrize("h, w, f", [(1440, 2560, 20), (1080, 1920, 15), (720, 1280, 10), (270, 380, 2)])
+def test_the_float_path_differs_from_the_exact_mean_only_by_one_on_exact_ties(h, w, f):
+    """The general path rounds a float32 sum, so a mean exactly half-way between two integers can land either
+    side; everywhere else it is the exact mean. Halving and odd factors have no such cases at all."""
+    rng = np.random.default_rng(f)
+    rgb = rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
+    exact = exact_mean(rgb, f, f).astype(int)
+    old = fr._area_resize_float(rgb, h // f, w // f).astype(int)
+    sums = rgb.reshape(h // f, f, w // f, f, 3).astype(np.int64).sum(axis=(1, 3))
+    tie = 2 * (sums % (f * f)) == f * f
+    assert np.abs(old - exact).max() <= 1 and (old == exact)[~tie].all()
+    if f in (2, 15):
+        np.testing.assert_array_equal(old, exact)
+    if f == 20:
+        assert 0 < (old != exact).mean() < 0.002  # about one value in 2,000
+
+
+def test_policy_frames_from_bgrx_equal_policy_frames_from_rgb():
+    rng = np.random.default_rng(3)
+    bgrx = bgrx_frame(rng, 1440, 2560, pad=64)
+    bgrx[:200] = 0  # a letterbox, so the box is not a whole multiple and the float path is taken
+    rgb = np.ascontiguousarray(bgrx[..., 2::-1])
+    for fit in fr.FITS:
+        box = fr.crop_box(1440, 2560, fr.detect_bars(rgb), fit)
+        np.testing.assert_array_equal(fr.to_policy_frame(bgrx, box, fit, channels=fr.BGRX),
+                                      fr.to_policy_frame(rgb, box, fit))
+    np.testing.assert_array_equal(fr.to_policy_frame(bgrx, channels=fr.BGRX), fr.to_policy_frame(rgb))
+    whole = (0, 0, 1440, 2560)
+    np.testing.assert_array_equal(fr.to_policy_frame(bgrx, whole, channels=fr.BGRX), exact_mean(rgb, 20, 20))
+
+
+def _dense_float(image, out_h, out_w):
+    """The general path as it was before halving was special-cased: the full dense column product."""
+    h, w = image.shape[:2]
+    x = image.astype(np.float32).reshape(h, w * 3)
+    rows = (fr._row_weights(h, out_h) @ x).reshape(out_h, w, 3).transpose(0, 2, 1).reshape(out_h * 3, w)
+    out = (rows @ fr._axis_weights(w, out_w).T).reshape(out_h, 3, out_w).transpose(0, 2, 1)
+    return np.rint(out).clip(0, 255).astype(np.uint8)
+
+
+@pytest.mark.parametrize("h, w, out_h, out_w", [(43, 1946, 22, 973), (87, 563, 44, 282), (202, 285, 135, 190),
+                                                (32, 1460, 21, 973), (37, 91, 13, 29)])
+def test_non_multiples_are_the_float_path_bit_for_bit_from_rgb_or_bgrx(h, w, out_h, out_w):
+    """The console crop halves the width (two weights of exactly 0.5, no other terms), which is done as one
+    add and an exact halving; and a BGRX crop's row pass runs over all four channels. Neither changes a bit."""
+    rng = np.random.default_rng(h + w)
+    for k in range(4):
+        frame = rng.integers(0, 256, (h + 3, w + 5, 4), dtype=np.uint8)
+        if k % 2:
+            frame[:] = rng.integers(0, 256)
+        bgrx = frame[2 : 2 + h, 3 : 3 + w]
+        rgb = np.ascontiguousarray(bgrx[..., 2::-1])
+        want = _dense_float(rgb, out_h, out_w)
+        np.testing.assert_array_equal(fr.area_resize(rgb, out_h, out_w), want)
+        np.testing.assert_array_equal(fr.area_resize(bgrx, out_h, out_w, channels=fr.BGRX), want)

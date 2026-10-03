@@ -32,10 +32,12 @@ refuse every labelled recording. The shape a policy actually reads is `AudioFeat
 its checkpoint.
 """
 
+import functools
 import hashlib
 import json
 import threading
 import time
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -44,6 +46,7 @@ import numpy as np
 from zombiesai.demos.audio import CHANNELS, DEFAULT_LATENCY_S, INDEX_DTYPE, ClipAudio, chunk_offsets
 
 _BYTES_PER_SAMPLE = 2
+STATS_TICKS = 9000  # LiveAudio's lag and cost statistics cover the last ten minutes at 15 Hz, not the whole run
 DEFAULT_CACHE = Path.home() / ".cache" / "zombiesai" / "audio_features"
 _CACHE_VERSION = 1  # bump when features_at changes in a way AudioFeatureConfig does not capture
 
@@ -115,17 +118,26 @@ def mel_filterbank(config: AudioFeatureConfig) -> np.ndarray:
     return _FILTERBANKS[key]
 
 
+@functools.cache
+def _frame_plan(config: AudioFeatureConfig) -> tuple[np.ndarray, float]:
+    """The constant parts of `log_mel`, made once per config: the window and its power normalisation."""
+    hann = np.hanning(config.n_fft + 1)[:-1]  # periodic
+    hann.setflags(write=False)
+    return hann, (2.0 / hann.sum()) ** 2
+
+
 def log_mel(window: np.ndarray, config: AudioFeatureConfig) -> np.ndarray:
     """(window_samples, 2) int16 PCM -> (2, n_frames, n_mels) float32. The last frame ends on the last sample."""
     window = np.asarray(window)
     if window.shape != (config.window_samples, CHANNELS):
         raise ValueError(f"expected ({config.window_samples}, {CHANNELS}) samples, got {window.shape}")
     x = window.T.astype(np.float64) / 32768.0
-    taps = np.arange(config.n_frames)[:, None] * config.hop + np.arange(config.n_fft)[None]
-    hann = np.hanning(config.n_fft + 1)[:-1]  # periodic
-    spectrum = np.fft.rfft(x[:, taps] * hann, axis=-1)
+    hann, scale = _frame_plan(config)
+    # Frame f is samples [f * hop, f * hop + n_fft): a strided view of x, not a gathered copy of it.
+    frames = np.lib.stride_tricks.sliding_window_view(x, config.n_fft, axis=-1)[:, :: config.hop]
+    spectrum = np.fft.rfft(frames * hann, axis=-1)
     # Mean-square units: a full-scale sine lands at 0.5 (-3 dB) in its bin.
-    power = (spectrum.real**2 + spectrum.imag**2) * (2.0 / hann.sum()) ** 2 / 2.0
+    power = (spectrum.real**2 + spectrum.imag**2) * scale / 2.0
     mel = power @ mel_filterbank(config).T
     db = 10.0 * np.log10(np.maximum(mel, 10.0 ** (config.floor_db / 10.0)))
     return ((db - config.offset_db) / config.scale_db).astype(np.float32)
@@ -242,8 +254,8 @@ class LiveAudio:
         self.latency_s = DEFAULT_LATENCY_S
         self._silence = silence(self.config)
         self.counts = {"observed": 0, "no_audio": 0}
-        self._lag: list[float] = []
-        self._cost: list[float] = []
+        self._lag: deque[float] = deque(maxlen=STATS_TICKS)
+        self._cost: deque[float] = deque(maxlen=STATS_TICKS)
 
     def start(self) -> "LiveAudio":
         self.stream.open()
@@ -308,7 +320,7 @@ class LiveAudio:
             return self._silence, 0.0
         # Nothing after the newest sample has arrived yet; end there rather than on a silent tail.
         t_end = min(float(t_frame), float(audio.time_of(audio.chunk_end[-1])))
-        feature = features_at(audio, t_end, self.config)
+        feature = log_mel(ring_window(audio, t_end, self.config.window_samples), self.config)
         self._lag.append(float(t_frame) - t_end)
         self._cost.append(time.perf_counter() - started)
         return feature, 1.0
@@ -328,3 +340,39 @@ class LiveAudio:
         self.stream.close()
         if self._thread is not None:
             self._thread.join(timeout=2)
+
+
+@functools.cache
+def _window_offsets(n: int, rate: int) -> np.ndarray:
+    offsets = (np.arange(n) - n) / rate
+    offsets.setflags(write=False)
+    return offsets
+
+
+def ring_window(audio: ClipAudio, t_end: float, n: int) -> np.ndarray:
+    """`audio.window(t_end, n / rate)`, value for value, at a fraction of its cost -- what `LiveAudio` hands
+    `log_mel` every tick, so `observe` stays the feature `features_at` computes (the parity test checks it).
+
+    The window's n sample times are evenly spaced and so sorted, and the chunk starts on a stream are sorted
+    too; then which chunk each time falls in is one sorted merge of the ~200 starts into the times, not n
+    binary searches, and a window wholly inside captured audio is one gather, not a masked one. Each time's
+    sample number is the same expression as `ClipAudio.sample_at`, and what was not captured (the few samples
+    a step in the clock envelope skips, the time before the ring) is silence, as there. Chunk starts out of
+    order take `ClipAudio.window` itself.
+    """
+    t = t_end + _window_offsets(n, audio.rate)
+    starts = audio.chunk_origin + audio.chunk_start / audio.rate
+    if len(starts) > 1 and not (starts[1:] >= starts[:-1]).all():
+        return audio.window(t_end, n / audio.rate)
+    m = len(starts)
+    # i = searchsorted(starts, t, "right") - 1, by counting for each time how many starts it has reached.
+    reached = np.searchsorted(t, starts, side="left")
+    i = np.repeat(np.arange(-1, m), np.diff(np.concatenate(([0], reached, [n]))))
+    np.clip(i, 0, m - 1, out=i)
+    s = np.floor((t - audio.chunk_origin[i]) * audio.rate + 1e-6).astype(np.int64)
+    ok = (s >= audio.chunk_start[i]) & (s < audio.chunk_end[i]) & (t >= starts[0]) & (s >= audio.first_sample)
+    if ok.all():
+        return audio.samples[s - audio.first_sample]
+    out = np.zeros((n, audio.channels), dtype=audio.samples.dtype)  # uncaptured stretches are silence
+    out[ok] = audio.samples[s[ok] - audio.first_sample]
+    return out
