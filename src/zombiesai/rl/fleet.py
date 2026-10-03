@@ -30,8 +30,17 @@ What the network must not be allowed to do, and what stops it:
   shared token (`ZOMBIES_FLEET_TOKEN`), and a body over `MAX_BODY` is refused before it is read.
 * **Leave keys held when the learner goes away.** A worker that cannot reach the learner for `lost_s` stops its
   actors (which releases every key, as Ctrl-C on `train_rl.py` does), then waits for the next run.
+* **Hand the token to a stranger.** A worker given no address finds the learner by the beacon it broadcasts
+  (rl/discovery.py), and takes only beacons signed with the token, whose signed body names the address to dial.
 
-The traffic is small for a LAN: a 128x72 frame at 15 Hz is ~415 KB/s per game before compression.
+What a PC needs to join is this worker and the token. It finds the learner, and finds it again after losing it
+(a run continued on another PC is found the same way); it plays as many games as the PC can carry
+(`--actors auto`, rl/capacity.py), starting them itself and, optionally, taking them down after a long wait;
+and it steps aside -- actors stopped, keys released, games down -- while the PC's owner is playing something
+else (`--yield-to-games`).
+
+The traffic is small for a LAN: a 128x72 frame at 15 Hz is ~415 KB/s per game, ~610 KB/s with hearing, sent as
+is (see `encode_segment` for why not compressed).
 """
 
 from __future__ import annotations
@@ -45,6 +54,7 @@ import math
 import multiprocessing as mp
 import os
 import queue as queue_mod
+import socket
 import threading
 import time
 import urllib.error
@@ -59,6 +69,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from zombiesai import spec
+from zombiesai.rl.discovery import BEACON_INTERVAL_S, BEACON_PORT, Announcer, Beacon
 
 DEFAULT_PORT = 47860
 TOKEN_ENV = "ZOMBIES_FLEET_TOKEN"
@@ -91,8 +102,26 @@ class NameInUse(FleetError):
 # ------------------------------------------------------------------------------------------------ wire format
 
 
-def encode_segment(segment) -> bytes:
-    """A Segment as a compressed .npz: arrays as arrays, the rest as a JSON header. No pickles."""
+# Measured 2026-10-03 on a 256-step segment with hearing -- frames (260, 72, 128, 3) uint8 and audio (257, 2, 25,
+# 64) float32, 10.5 MB raw -- on one core of the RTX 2080 Ti PC (best of three; decode is np.load of every array):
+#
+#                         frames like the stand-in's      frames of textured noise
+#     stored              10.5 MB, encode  6 ms           10.5 MB, encode   6 ms     decode ~4 ms
+#     deflate level 1      3.4 MB, encode 127 ms           8.1 MB, encode 217 ms     decode ~35 ms
+#     deflate level 6      2.4 MB, encode 135 ms           8.1 MB, encode 275 ms     decode ~50 ms
+#
+# What deflate saves depends on the picture (smooth panning compresses 30x, noise 1.15x; the audio features 1.8x
+# whatever happens) and costs 20-50x the CPU of storing. On wired gigabit a stored segment is 84 ms of the link
+# every ~17 s per game -- eight games are 4% of it -- while deflating them is a seventh of a worker core and a
+# GIL-holding decode on the learner beside its update. So segments travel stored; `compress` (fleet_worker.py
+# --compress) deflates them for a PC on Wi-Fi, and the learner reads either. The weights stay a plain torch blob:
+# deflate saves 7.6% of the 10.6 MB for 310 ms, and they go out once per update.
+SEGMENT_ARRAYS = ("frames", "actions", "logp", "rewards", "bad", "meta", "audio", "audio_mask")
+
+
+def encode_segment(segment, *, compress: bool = False) -> bytes:
+    """A Segment as an .npz: arrays as arrays, the rest as a JSON header. No pickles. Stored unless `compress`
+    (see above for why)."""
     meta = {"version": segment.version, "context": segment.context, "terminated": bool(segment.terminated),
             "spec_version": spec.SPEC_VERSION}
     arrays = {"frames": segment.frames, "actions": segment.actions, "logp": segment.logp,
@@ -102,8 +131,21 @@ def encode_segment(segment) -> bytes:
         arrays["audio"] = segment.audio
         arrays["audio_mask"] = segment.audio_mask
     buf = io.BytesIO()
-    np.savez_compressed(buf, **arrays)
+    (np.savez_compressed if compress else np.savez)(buf, **arrays)
     return buf.getvalue()
+
+
+def _check_archive(data: bytes) -> None:
+    """Before anything is decompressed: only a segment's arrays, and no more of them, unpacked, than a body may
+    be. A deflated member's header says how big it unpacks to and zipfile never inflates past that, so this
+    bounds what a hostile body costs the learner's memory."""
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        infos = archive.infolist()
+    names = [i.filename for i in infos]
+    if len(set(names)) != len(names) or not set(names) <= {f"{a}.npy" for a in SEGMENT_ARRAYS}:
+        raise ValueError(f"a segment holds {sorted(names)[:10]}")
+    if sum(i.file_size for i in infos) > MAX_BODY:
+        raise ValueError("a segment that unpacks past MAX_BODY")
 
 
 def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[int, ...] | None):
@@ -113,6 +155,7 @@ def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[
     for a policy that does not hear."""
     from zombiesai.rl.parallel_ppo import Segment
 
+    _check_archive(data)
     with np.load(io.BytesIO(data), allow_pickle=False) as z:
         meta = json.loads(z["meta"].tobytes().decode())
         if not isinstance(meta, dict):
@@ -208,7 +251,7 @@ def play_settings(fleet_root: str | Path = "runs/instances") -> dict | None:
 
 def describe(fleet_root: str | Path = "runs/instances") -> dict:
     """This machine as a learner would judge it, for `scripts/fleet.py`: its commit, the game settings its games
-    play with and where they come from, and how many of its games are running."""
+    play with and where they come from, how many of its games are running, and how many it has room for."""
     from zombiesai.realgame.instances import fleet, game_config, load_fleet
 
     path = game_config(fleet_root)
@@ -217,6 +260,13 @@ def describe(fleet_root: str | Path = "runs/instances") -> dict:
                                                        else "prefix" if Path(fleet_root) in path.parents else "steam"),
            "config_sha256": hashlib.sha256(path.read_bytes()).hexdigest() if path is not None else None,
            "client": None, "instances": None, "games_running": 0}
+    try:  # how many games `--actors auto` would play here now (rl/capacity.py)
+        from zombiesai.rl.capacity import games_for, probe
+
+        verdict = games_for(probe(fleet_root))
+        out["room"], out["room_why"] = verdict.games, verdict.why
+    except (OSError, ValueError, TypeError):
+        out["room"] = None
     try:
         config = load_fleet(fleet_root)
     except FileNotFoundError:
@@ -289,7 +339,9 @@ class FleetServer:
     hear), for `decode_segment` to check."""
 
     def __init__(self, address: str, token: str, *, config, run_dir: Path, settings: dict | None, context: int,
-                 audio_shape: tuple[int, ...] | None, inbox_size: int = 32, say=print):
+                 audio_shape: tuple[int, ...] | None, inbox_size: int = 32, say=print,
+                 beacon_port: int | None = BEACON_PORT, beacon_targets: list[str] | None = None,
+                 beacon_interval_s: float = BEACON_INTERVAL_S):
         if not token:
             raise ValueError(f"a fleet needs a shared token: set {TOKEN_ENV} on every machine")
         self.token, self.config, self.run_dir, self.say = token, config, Path(run_dir), say
@@ -312,12 +364,28 @@ class FleetServer:
         self.httpd.daemon_threads = True
         self.address = self.httpd.server_address[:2]
         self._thread = threading.Thread(target=self.httpd.serve_forever, name="fleet-server", daemon=True)
+        # Workers started without --learner find us by this (rl/discovery.py); None turns it off.
+        self.started = time.time()
+        self.announcer = None if beacon_port is None else Announcer(
+            self.beacon, token, bound_host=host, port=beacon_port, interval_s=beacon_interval_s,
+            targets=beacon_targets)
+
+    def beacon(self, host: str) -> Beacon:
+        """What this learner announces, as reached at `host`: everything a worker needs to pick it among
+        several, and to know before hello whether it would be refused."""
+        return Beacon(host=host, port=int(self.address[1]), run=self.run_dir.name, sha=str(self.provenance["sha"]),
+                      spec_version=str(self.provenance["spec_version"]), started=round(self.started, 3),
+                      t=round(time.time(), 3), name=socket.gethostname().split(".")[0][:64])
 
     def start(self) -> "FleetServer":
         self._thread.start()
+        if self.announcer is not None:
+            self.announcer.start()
         return self
 
     def close(self) -> None:
+        if self.announcer is not None:
+            self.announcer.close()  # first: a worker that hears us must find us answering
         self.httpd.shutdown()
         self.httpd.server_close()
 
@@ -574,15 +642,24 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class FleetClient:
-    """The worker's side of the protocol, over plain urllib."""
+    """The worker's side of the protocol, over plain urllib. `learner` may be None until a beacon says where
+    it is (`point_at`); the same client, and so the same instance id, follows the learner wherever it moves."""
 
-    def __init__(self, learner: str, token: str, name: str, timeout_s: float = 30.0):
-        host, port = parse_address(learner, default_host="127.0.0.1")
-        self.base, self.token, self.name, self.timeout_s = f"http://{host}:{port}", token, name, timeout_s
+    def __init__(self, learner: str | None, token: str, name: str, timeout_s: float = 30.0):
+        self.base: str | None = None
+        self.token, self.name, self.timeout_s = token, name, timeout_s
+        if learner:
+            self.point_at(learner)
         # Drawn once per process: what tells this worker apart from another PC (or a second copy) with its name.
         self.instance = uuid.uuid4().hex
 
+    def point_at(self, learner: str) -> None:
+        host, port = parse_address(learner, default_host="127.0.0.1")
+        self.base = f"http://{host}:{port}"
+
     def _request(self, method: str, path: str, data: bytes | None = None, headers: dict | None = None):
+        if self.base is None:
+            raise ConnectionError("no learner found yet")
         req = urllib.request.Request(self.base + path, data=data, method=method,
                                      headers={"X-Fleet-Token": self.token, "X-Worker": self.name,
                                               INSTANCE_HEADER: self.instance, **(headers or {})})
@@ -640,13 +717,28 @@ class FleetClient:
 
 @dataclass
 class WorkerOptions:
-    actors: int = 4
+    actors: int = 4  # with auto_actors, sized again before every run
     fleet_root: str = "runs/instances"
     out_root: str = "runs/fleet"
     overrides: dict = field(default_factory=dict)  # RLConfig fields this machine sets for itself
     lost_s: float = 60.0  # no contact with the learner this long: stop the actors and wait for the next run
     poll_s: float = 1.0  # how often to ask for new weights
     retry_s: float = 10.0  # how often to look for a learner while there is none
+    # As many games as this PC can carry (rl/capacity.py), judged afresh before every run.
+    auto_actors: bool = False
+    # Finding the learner, when the client was given no address: its beacon on this UDP port, only `run`'s if set.
+    beacon_port: int = BEACON_PORT
+    run: str | None = None
+    # Start the games a real-game run needs, rather than refuse to join without them (fleet_worker.py: on).
+    manage_games: bool = False
+    down_after_s: float | None = None  # games up this long without a run: take them down (None: leave them)
+    # The PC's owner first: leave the run while they play a game or the pause file exists (rl/capacity.py).
+    yield_to_games: bool = False
+    yield_stops_games: bool = True  # and take the games down meanwhile, giving back their VRAM and RAM
+    pause_file: str | None = None  # None: ~/.config/zombiesai/pause
+    resume_after_s: float = 60.0  # free this long before rejoining
+    yield_scan_s: float = 5.0  # how often to look
+    compress: bool = False  # deflate segments: for a PC on Wi-Fi (see encode_segment)
 
 
 class _Gone(Exception):
@@ -678,11 +770,31 @@ def response_verdict(code: int, what: str, success: tuple[int, ...] = (200,)) ->
 
 class FleetWorker:
     """Plays this machine's games for a learner elsewhere: hello, the run's starting checkpoint and config, then
-    the same actor processes `train()` would start, with their segments forwarded and weights pulled."""
+    the same actor processes `train()` would start, with their segments forwarded and weights pulled.
 
-    def __init__(self, client: FleetClient, options: WorkerOptions, *, settings: dict | None = None, say=print):
+    Around each run (`run()`), what makes a PC need nothing but this worker: it finds the learner by its beacon
+    when given no address, and again whenever it loses it (rl/discovery.py); it sizes its share of the run to the
+    PC (`auto_actors`); it starts the games a run needs (`manage_games`) and takes them down after a long wait
+    (`down_after_s`); and it steps aside while the PC's owner plays (`yield_to_games`)."""
+
+    def __init__(self, client: FleetClient, options: WorkerOptions, *, settings: dict | None = None, say=print,
+                 watch=None, size=None, listener=None):
         self.client, self.options, self.say = client, options, say
         self.settings = settings
+        self.discovering = client.base is None  # nothing pins the address a beacon gave: it is found again
+        self._listener = listener
+        if watch is None and options.yield_to_games:
+            from zombiesai.rl.capacity import PAUSE_FILE, YieldWatch
+
+            watch = YieldWatch(fleet_root=options.fleet_root, resume_after_s=options.resume_after_s,
+                               pause_file=options.pause_file or PAUSE_FILE)
+        self.watch = watch  # .check() -> why the owner wants the PC now, or None
+        self._size = size  # () -> capacity.Verdict; the real machine's by default
+        self._paused = False
+        self._said: set = set()
+        self._last_scan = (-math.inf, None)
+        self._idle_since = time.monotonic()
+        self._games_down = False
 
     @property
     def status_path(self) -> Path:
@@ -697,18 +809,33 @@ class FleetWorker:
         except OSError:
             pass  # the status is for people watching; never a reason to stop playing
 
+    def _once(self, key, message: str) -> None:
+        """Say something the first time only: a worker waiting all night must not repeat itself every 10 s."""
+        if key not in self._said:
+            self._said.add(key)
+            self.say(message)
+
     def run(self, stop: threading.Event | None = None, *, once: bool = False) -> None:
         """Serve every run the learner starts, until `stop` (or after one run, with `once`)."""
         stop = stop or threading.Event()
-        waiting_said = refused = False
+        refused = False
         try:
             while not stop.is_set():
+                if self._yielding(stop):
+                    continue
+                self._maybe_take_down()
+                if self.discovering and not self._locate(stop):
+                    continue
+                if self.options.auto_actors and not self._right_size(stop):
+                    continue
                 try:
                     hello = self.client.hello(self.options.actors, self.settings)
                 except _NETWORK_ERRORS as error:
-                    if not waiting_said:
-                        self.say(f"waiting for the learner at {self.client.base} ({getattr(error, 'reason', error)})")
-                        waiting_said = True
+                    why = getattr(error, "reason", error)
+                    self._once(("unreachable", self.client.base), f"waiting for the learner at {self.client.base} ({why})"
+                               + (": its beacon reached this PC but its port does not -- is TCP "
+                                  f"{self.client.base.rpartition(':')[2]} open in the learner's firewall?"
+                                  if self.discovering else ""))
                     self._status("waiting")
                     stop.wait(self.options.retry_s)
                     continue
@@ -721,18 +848,186 @@ class FleetWorker:
                     self._status("refused", reason=str(error)[:300])
                     refused = True
                     raise
-                waiting_said = False
+                self._said.clear()
+                if (hello.get("config") or {}).get("env") == "real" and self.options.manage_games \
+                        and not self._games_up(hello, stop):
+                    continue
                 try:
-                    self.session(hello, stop)
+                    self._play(hello, stop)
                 except (urllib.error.URLError, ConnectionError, TimeoutError, http.client.HTTPException) as error:
                     self.say(f"could not join the run: {error}")
+                self._idle_since = time.monotonic()
                 if once:
                     return
-                self._status("waiting")
-                stop.wait(self.options.retry_s)
+                if self._owner_wants_it() is None:  # stepping aside says so itself, at once
+                    self._status("waiting")
+                    stop.wait(self.options.retry_s)
         finally:
+            if self._listener is not None:
+                self._listener.close()
+                self._listener = None
             if not refused:  # a refusal stays on the page: it is the one state a person has to act on
                 self._status("stopped")
+
+    # -- around a run
+
+    def _owner_wants_it(self) -> str | None:
+        """The yield watch's verdict, scanning /proc at most every `yield_scan_s`."""
+        if self.watch is None:
+            return None
+        at, reason = self._last_scan
+        if time.monotonic() - at >= self.options.yield_scan_s:
+            reason = self.watch.check()
+            self._last_scan = (time.monotonic(), reason)
+        return reason
+
+    def _yielding(self, stop: threading.Event) -> bool:
+        """While the owner wants the PC: out of every run, games down if so configured, `paused` on the status.
+        True while that lasts (the caller loops back here); False once it has been free for `resume_after_s`."""
+        reason = self._owner_wants_it()
+        if reason is None:
+            if self._paused:
+                self._paused = False
+                self.say("this PC is free again: back to the fleet")
+            return False
+        if not self._paused:
+            self._paused = True
+            self.say(f"stepping aside: {reason}")
+            if self.options.yield_stops_games:
+                from zombiesai.realgame.instances import take_down
+
+                try:
+                    n = take_down(self.options.fleet_root, say=self.say)
+                except (OSError, ValueError, TypeError) as error:
+                    self.say(f"  could not take the games down: {error}")
+                else:
+                    self._games_down = True
+                    if n:
+                        self.say(f"  took this PC's {n} games down until then")
+        resuming = getattr(self.watch, "resuming_in", lambda: None)()
+        self._status("paused", reason=reason[:300],
+                     **({"resuming_in_s": round(resuming)} if resuming is not None else {}))
+        stop.wait(self.options.yield_scan_s)
+        return True
+
+    def _maybe_take_down(self) -> None:
+        if self.options.down_after_s is None or self._games_down:
+            return
+        if time.monotonic() - self._idle_since < self.options.down_after_s:
+            return
+        from zombiesai.realgame.instances import take_down
+
+        self._games_down = True
+        try:
+            n = take_down(self.options.fleet_root, say=self.say)
+        except (OSError, ValueError, TypeError) as error:
+            self.say(f"could not take the games down: {error}")
+            return
+        if n:
+            self.say(f"no run for {self.options.down_after_s / 60:.0f} min: took this PC's {n} games down "
+                     "(the next run starts them again)")
+
+    def _locate(self, stop: threading.Event) -> bool:
+        """Listen for the learner's beacon for up to `retry_s`; point the client at the one to join. False
+        (status `waiting`) while none is heard."""
+        from zombiesai.rl.discovery import BeaconListener, choose
+
+        if self._listener is None:
+            try:
+                self._listener = BeaconListener(self.client.token, port=self.options.beacon_port)
+            except OSError as error:
+                raise FleetError(f"cannot listen for the learner's beacon on UDP {self.options.beacon_port} "
+                                 f"({error}): pass --learner") from None
+            self.say(f"listening for a learner on UDP {self._listener.port}"
+                     + (f" (run {self.options.run} only)" if self.options.run else ""))
+        self._status("waiting", looking_for=f"run {self.options.run}" if self.options.run else "a learner")
+        beacons = self._listener.listen(self.options.retry_s, stop=stop)
+        for source, error in list(self._listener.rejected.items()):
+            self._once(("rejected", source, error.kind), f"ignoring a learner's beacon from {source}: {error}"
+                       + (f" -- is {TOKEN_ENV} the same on both PCs?" if error.kind == "token" else ""))
+        ours = provenance()
+        chosen = choose(beacons, run=self.options.run, sha=ours["sha"], spec_version=ours["spec_version"])
+        if chosen is None:
+            if beacons:
+                self._once(("other runs", tuple(sorted(b.run for b in beacons))),
+                           f"heard learners for {', '.join(sorted(b.run for b in beacons))}; waiting for run "
+                           f"{self.options.run}")
+            return False
+        address = f"{chosen.host}:{chosen.port}"
+        if self.client.base != f"http://{address}":
+            others = [b for b in beacons if b is not chosen]
+            self.say(f"found the learner of run {chosen.run} at {address}" + (f" ({chosen.name})" if chosen.name else "")
+                     + (f"; also heard {', '.join(b.run for b in others)}" if others else ""))
+        self.client.point_at(address)
+        return True
+
+    def _right_size(self, stop: threading.Event) -> bool:
+        """`actors` from what the PC has free now (rl/capacity.py). False, and a wait, when nothing fits."""
+        from zombiesai.rl import capacity
+
+        verdict = self._size() if self._size is not None else capacity.games_for(capacity.probe(self.options.fleet_root))
+        self._once(("size", verdict.games), f"this PC can carry {verdict}")
+        if verdict.games < 1:
+            self._status("waiting", reason=f"no room for a game here now: {verdict.why}"[:300])
+            stop.wait(self.options.retry_s)
+            return False
+        self.options = replace(self.options, actors=verdict.games)
+        return True
+
+    def _games_up(self, hello: dict, stop: threading.Event) -> bool:
+        """Start whatever of the `actors` games is not running (realgame/instances.py: ensure_fleet). False if
+        that was given up -- the worker stopping, or the owner sitting down to play -- or failed."""
+        from zombiesai.realgame.instances import ensure_fleet, fleet, load_fleet
+
+        n = self.options.actors
+        try:
+            have = sum(i.game_running() for i in fleet(load_fleet(self.options.fleet_root), say=lambda m: None)[:n])
+        except FileNotFoundError:
+            have = 0
+        if have >= n:
+            return True
+        self.say(f"starting {n - have} of this PC's {n} games for run {hello.get('run')}")
+        self._status("waiting", doing=f"starting {n - have} games")
+
+        def should_stop() -> bool:
+            return stop.is_set() or self._owner_wants_it() is not None
+
+        try:
+            ensure_fleet(self.options.fleet_root, n, say=self.say, should_stop=should_stop)
+        except (FileNotFoundError, RuntimeError, OSError, ValueError) as error:
+            self.say(f"could not start this PC's games: {error}")
+            self._status("waiting", reason=f"could not start the games: {error}"[:300])
+            stop.wait(max(self.options.retry_s, 60.0))
+            return False
+        self._games_down = False
+        return not should_stop()
+
+    def _play(self, hello: dict, stop: threading.Event) -> None:
+        """`session()`, ended early when the owner wants the PC back. The session gets a stop of its own, set
+        by the worker's `stop` or by the yield watch; when the session sets it itself (Ctrl-C inside it), the
+        whole worker stops, as before."""
+        session_stop = threading.Event()
+        cause: list[str] = []
+
+        def watch() -> None:
+            while not session_stop.wait(0.5):
+                if stop.is_set():
+                    cause.append("stop")
+                elif self._owner_wants_it() is not None:
+                    cause.append("yield")
+                else:
+                    continue
+                session_stop.set()
+
+        watcher = threading.Thread(target=watch, name="fleet-yield", daemon=True)
+        watcher.start()
+        try:
+            self.session(hello, session_stop)
+        finally:
+            if session_stop.is_set() and not cause:
+                stop.set()
+            session_stop.set()
+            watcher.join(timeout=2.0)
 
     def session(self, hello: dict, stop: threading.Event) -> None:
         from zombiesai.rl.parallel_ppo import RLConfig, actor_main
@@ -796,7 +1091,7 @@ class FleetWorker:
                 except queue_mod.Empty:
                     continue
                 try:
-                    code = self.client.segment(index, encode_segment(seg))
+                    code = self.client.segment(index, encode_segment(seg, compress=self.options.compress))
                 except _NETWORK_ERRORS:
                     count("dropped")
                     continue

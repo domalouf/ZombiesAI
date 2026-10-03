@@ -32,7 +32,7 @@ import shutil
 import signal
 import subprocess
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from zombiesai.demos.game_settings import WAW_STEAM_APP_ID
@@ -702,6 +702,85 @@ class Instance:
 
 def fleet(config: FleetConfig, *, say=print) -> list[Instance]:
     return [Instance(config, spec, say=say) for spec in specs(config)]
+
+
+# ------------------------------------------------------------------------------------------------ up and down
+
+
+def wait_for_window(instance: Instance, timeout_s: float, *, say=print, should_stop=None, sleep=time.sleep,
+                    clock=time.monotonic) -> bool:
+    """Wait for the game's window and give it its X server's focus. There is no window manager to do it, and
+    the game will not get past loading its renderer until its window is the focused one."""
+    deadline = clock() + timeout_s
+    while clock() < deadline:
+        if should_stop is not None and should_stop():
+            return False
+        try:
+            window = instance.window()
+            sink = instance.sink()
+            sink.focus(window.id)
+            sink.close()
+            return True
+        except Exception:  # noqa: BLE001 -- not there yet
+            sleep(1.0)
+    say(f"  instance {instance.spec.index}: no game window after {timeout_s:.0f} s; carrying on")
+    return False
+
+
+def bring_up(instances: list[Instance], *, window_timeout_s: float = 120.0, stagger_s: float = 5.0, say=print,
+             should_stop=None, sleep=time.sleep) -> int:
+    """Up every one of `instances` (`Instance.up` is a no-op for what is already running), one game at a time:
+    each new game gets its window focused, and the next waits `stagger_s` after it -- several games loading at
+    once fight over the disk and the GPU. `should_stop()` is asked between games, so a long start-up can be
+    abandoned (the owner sat down to play); a game already launching is left to finish. Returns how many games
+    were launched."""
+    launched = 0
+    for k, instance in enumerate(instances):
+        if should_stop is not None and should_stop():
+            break
+        was_running = instance.game_running()
+        instance.up()
+        if was_running:
+            continue
+        launched += 1
+        wait_for_window(instance, window_timeout_s, say=say, should_stop=should_stop, sleep=sleep)
+        if k < len(instances) - 1 and stagger_s > 0:
+            deadline = time.monotonic() + stagger_s
+            while time.monotonic() < deadline and not (should_stop is not None and should_stop()):
+                sleep(min(0.5, stagger_s))
+    return launched
+
+
+def ensure_fleet(root: str | Path, n: int, *, say=print, should_stop=None, **up_kwargs) -> FleetConfig:
+    """At least `n` games of the fleet at `root` running: what `scripts/instances.py up --n n` does, for a fleet
+    worker joining a run (rl/fleet.py). The fleet's saved settings are kept, its size only ever grows (a bigger
+    fleet.json costs nothing until its games start), and a PC without a fleet gets the defaults `up` would give
+    it. Only the first `n` games are started; any beyond are left as they are."""
+    try:
+        config = load_fleet(root)
+    except FileNotFoundError:
+        config = FleetConfig(root=str(root), n=n)
+        save_fleet(config)
+    if config.n < n:
+        config = replace(config, n=n)
+        save_fleet(config)
+    bring_up(fleet(config, say=say)[:n], say=say, should_stop=should_stop, **up_kwargs)
+    return config
+
+
+def take_down(root: str | Path, *, say=print) -> int:
+    """Stop every game of the fleet at `root`, with its X server and sink: the GPU and RAM back to the PC's
+    owner. Returns how many games were running. The prefixes and fleet.json stay, so `ensure_fleet` brings the
+    same fleet back."""
+    try:
+        config = load_fleet(root)
+    except FileNotFoundError:
+        return 0
+    running = 0
+    for instance in fleet(config, say=say):
+        running += instance.game_running()
+        instance.down()
+    return running
 
 
 def save_fleet(config: FleetConfig) -> Path:
