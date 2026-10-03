@@ -11,9 +11,7 @@ session being recorded shows up in the *next* recording's copy. The file's modif
 lag is visible rather than silent.
 """
 
-import os
 import re
-import sys
 import time
 from pathlib import Path
 
@@ -60,27 +58,21 @@ def dvar(dvars: dict[str, str], name: str) -> str | None:
 
 
 def candidate_configs(home: Path | None = None) -> list[Path]:
-    """Every WaW single-player profile config this machine has, Proton prefixes on Linux and the native path
-    on Windows. Multiplayer keeps its own profile elsewhere; Nacht is single-player."""
+    """Every WaW single-player profile config in this machine's Proton prefixes, under either place Steam keeps
+    its library. Multiplayer keeps its own profile elsewhere; Nacht is single-player."""
     home = home or Path.home()
-    roots = []
-    if sys.platform == "win32":
-        local = os.environ.get("LOCALAPPDATA")
-        if local:
-            roots.append(Path(local) / "Activision" / "CoDWaW")
-    else:
-        for steam in (home / ".steam" / "steam", home / ".local" / "share" / "Steam"):
-            roots.append(
-                steam / "steamapps" / "compatdata" / str(WAW_STEAM_APP_ID) / "pfx" / "drive_c" / "users"
-                / "steamuser" / "AppData" / "Local" / "Activision" / "CoDWaW"
-            )
+    roots = [
+        steam / "steamapps" / "compatdata" / str(WAW_STEAM_APP_ID) / "pfx" / "drive_c" / "users" / "steamuser"
+        / "AppData" / "Local" / "Activision" / "CoDWaW"
+        for steam in (home / ".steam" / "steam", home / ".local" / "share" / "Steam")
+    ]
     found = {p.resolve(): p for root in roots for p in root.glob("players/profiles/*/config.cfg")}
     return sorted(found.values(), key=lambda p: p.stat().st_mtime, reverse=True)
 
 
 def read_settings(path: str | Path | None = None, *, home: Path | None = None) -> dict | None:
-    """The settings a recording should carry, or None when no config can be found (a sim recording, a
-    machine without the game). Picks the most recently written profile when there are several."""
+    """The settings a recording should carry, or None when no config can be found (a machine without
+    the game). Picks the most recently written profile when there are several."""
     if path is None:
         found = candidate_configs(home)
         if not found:

@@ -19,7 +19,6 @@ The number it prints is what `record_demo.py --counts-per-degree` and `DispatchC
 
 import argparse
 import math
-import sys
 import time
 
 import numpy as np
@@ -109,8 +108,6 @@ def main() -> None:
                              "instance's own X server (scripts/instances.py), no focusing by hand")
     args = parser.parse_args()
 
-    if not sys.platform.startswith("linux"):
-        raise SystemExit("this script drives the Linux virtual device; on Windows use the SendInput path")
     window = int(args.window, 16) if args.window.startswith("0x") else find_window(args.window, args.display).id
     grabber = X11Grabber(window=window, display=args.display)
     print(f"capturing {grabber.describe()}")

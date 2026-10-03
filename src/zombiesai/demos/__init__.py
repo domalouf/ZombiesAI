@@ -2,7 +2,7 @@
 
 `PLAN.md` milestone M6. Two ways in, one way out:
 
-* **Recorded with input logging** (`recorder`, `capture`, `win32_input`, `inputs`) -- frames and the human's
+* **Recorded with input logging** (`recorder`, `capture`, `evdev_input`, `inputs`) -- frames and the human's
   own mouse counts and key transitions, quantized into spec actions. The best labels there are, and the only
   source that can train the inverse dynamics model.
 * **Video nobody logged** (`video`) -- any recording of the game, decoded into policy frames and segmented

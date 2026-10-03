@@ -1,4 +1,4 @@
-"""Linux raw input: the same device counts Win32 Raw Input gives, read straight off the kernel.
+"""Raw input: the device's own counts and key transitions, read straight off the kernel.
 
 `/dev/input/event*` carries exactly what the hardware reported -- `REL_X`/`REL_Y` are mouse counts, not
 cursor positions, so they survive a game that captures and re-centres the pointer, and they are the unit
@@ -57,7 +57,7 @@ KEY_NAMES.update({59 + i: f"f{i + 1}" for i in range(10)})
 KEY_NAMES.update({97: "ctrl", 100: "alt", 103: "up", 105: "left", 106: "right", 108: "down"})
 KEY_NAMES.update({125: "super", 126: "super"})  # KEY_LEFTMETA/RIGHTMETA: the compositor's modifier
 # The wheel as pseudo-buttons, keyed by (axis, sign of the count). Positive REL_WHEEL is away from the
-# player (up), positive REL_HWHEEL is right -- the same convention Windows uses for its wheel deltas.
+# player (up), positive REL_HWHEEL is right.
 WHEEL_NAMES = {
     (REL_WHEEL, 1): "wheelup",
     (REL_WHEEL, -1): "wheeldown",

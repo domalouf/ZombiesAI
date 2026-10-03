@@ -272,8 +272,9 @@ class PlayMarker:
     the player had said they were back. Both edges round towards exclusion because a menu frame mislabelled
     as play costs more than one real step thrown away.
 
-    Only down-edges count, and a key already down does not count again: Windows Raw Input repeats the make
-    code while a key is held (evdev's value-2 repeats are dropped at decode), and a held F8 is one toggle.
+    Only down-edges count, and a key already down does not count again: a held F8 is one toggle, however many
+    downs the log holds for it (evdev's value-2 repeats are dropped at decode, but nothing else promises a log
+    without them).
     """
 
     def __init__(self, key: str | None = MARK_KEY):

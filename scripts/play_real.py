@@ -20,7 +20,6 @@ policy got itself into. The summary says how much was captured; train on it alon
 """
 
 import argparse
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -110,8 +109,6 @@ def main() -> None:
     from zombiesai.realgame.dispatch import ActionDispatcher, DispatchConfig, FakeSink
     from zombiesai.realgame.play import HumanWatch, HyprlandFocus, play
 
-    if not sys.platform.startswith("linux"):
-        raise SystemExit("play_real.py is Linux-only for now (uinput, XWayland capture, Hyprland focus)")
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     agent = BCAgent(args.checkpoint, deterministic=args.deterministic, device=device,
                     temperature=args.temperature)

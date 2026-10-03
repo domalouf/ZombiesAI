@@ -1,5 +1,4 @@
 import os
-import sys
 
 import numpy as np
 import pytest
@@ -61,7 +60,6 @@ def test_the_config_implies_the_counts_per_degree_the_labels_need():
     assert implied_counts_per_degree({"sensitivity": "0", "m_yaw": "0.022"}) is None
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the Proton prefix layout is Linux-only")
 def test_the_newest_profile_in_the_proton_prefix_is_the_one_read(tmp_path):
     profile(tmp_path, "old", CONFIG.replace('sensitivity "5"', 'sensitivity "3"'), mtime=1_000)
     profile(tmp_path, "$$$", mtime=2_000)

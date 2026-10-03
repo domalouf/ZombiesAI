@@ -300,10 +300,13 @@ def test_the_default_mark_key_is_free_in_every_shipped_binding_map():
         inputs.InputConfig(bindings=bindings)  # raises if the mark key were bound
 
 
-def test_both_input_backends_name_the_mark_key_the_same_way():
-    from zombiesai.demos import evdev_input, win32_input
+def test_the_recorder_and_the_agents_hands_name_the_mark_key_the_same_way():
+    from zombiesai.demos import evdev_input
+    from zombiesai.realgame.uinput import code_for
 
-    assert evdev_input.key_name(66) == win32_input.vk_name(0x77) == inputs.MARK_KEY  # KEY_F8, VK_F8
+    # KEY_F8 is 66 in linux/input-event-codes.h: the physical F8 is what the recorder hears as its mark key,
+    # and the key the virtual device would press by that name.
+    assert evdev_input.key_name(66) == inputs.MARK_KEY and code_for(inputs.MARK_KEY) == 66
 
 
 def test_not_playing_marks_from_the_window_of_one_press_to_the_window_of_the_next():

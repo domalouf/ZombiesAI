@@ -11,7 +11,8 @@ Three measurements, each with the plan's own pass mark:
   will do. PASS is an overrun rate under 2%.
 * **S3 latency.** With `--latency`, it turns the view with the virtual mouse and times how long until the
   pixels change. This is the closed-loop delay the whole delayed-MDP design is built around: it does not
-  have to be small, it has to be known and stable. Set the sim's latency knob to the number it prints.
+  have to be small, it has to be known and stable, because
+  a policy that sees its own last actions can learn around a constant delay, not a wandering one.
 
 Nothing here needs the agent, a policy, or a trained anything: it is a measurement of your machine.
 """
@@ -19,7 +20,6 @@ Nothing here needs the agent, a policy, or a trained anything: it is a measureme
 import argparse
 import statistics
 import subprocess
-import sys
 import time
 
 import numpy as np
@@ -152,8 +152,6 @@ def main() -> None:
     parser.add_argument("--video", help="write what the agent would see to this mp4 (needs ffmpeg)")
     args = parser.parse_args()
 
-    if not sys.platform.startswith("linux"):
-        raise SystemExit("this spike drives the X11 capture path; on Windows measure the dxcam path instead")
     if args.list_windows:
         from zombiesai.demos.x11_capture import list_windows
 
@@ -198,9 +196,8 @@ def main() -> None:
                 verdict = "PASS" if delay["p99_ms"] < 120 and delay["stdev_ms"] < 25 else "CHECK"
                 print(f"  {verdict}: p50 {delay['p50_ms']:.0f} ms, p99 {delay['p99_ms']:.0f} ms, "
                       f"stdev {delay['stdev_ms']:.0f} ms over {delay['answered']}/{delay['trials']} trials")
-                print(f"  that is {delay['p50_ms'] / (TICK * 1000):.1f} decisions of delay; set the sim's "
-                      f"latency_steps to {round(delay['p50_ms'] / (TICK * 1000))} and check the agent can "
-                      "still learn to aim there")
+                print(f"  that is {delay['p50_ms'] / (TICK * 1000):.1f} decisions of delay: what the policy has "
+                      "to aim through")
         finally:
             dispatcher.close()
 
