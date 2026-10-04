@@ -39,9 +39,12 @@ SITE_LINKS = [("← domalouf.com", "/"), ("Live stream", "/zombies/live/"),
               ("Code on GitHub", "https://github.com/domalouf/ZombiesAI")]
 LIVE_INTRO = (
     "How the reinforcement-learning agent's training is going, live from the gaming PC it trains on: the machine "
-    "as it works, the runs training right now, and every run its trainers have written -- PPO on the real game, "
-    "behavioural cloning from human play, and the inverse dynamics model."
+    "as it works, the runs training right now, and every run of the agent playing the real game (World at War's "
+    "Nacht der Untoten)."
 )
+# The site shows the agent playing the real game and nothing else: the simulator and benchmark runs (nacht-state,
+# cartpole, lunarlander), synthetic rehearsals, and behavioural cloning and the IDM stay on the local dashboards.
+REAL_ENV = "real-waw"
 PROC_FIELDS = ("name", "cpu", "rss", "mem_pct", "threads")
 # A worker machine's id is its file name on the site and nothing else: short, lower case, no dots or slashes.
 MACHINE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -119,11 +122,11 @@ def public_system(payload: dict, step_s: float = 10.0) -> dict:
 
 
 def live_runs(payload: dict, trainers: list[dict]) -> dict:
-    """supervise.build_payload's runs with "running" meaning a trainer is writing the run now, and without
-    run_paths -- absolute paths keyed by run, the one part of it that is purely local."""
+    """supervise.build_payload's real-game runs (REAL_ENV) with "running" meaning a trainer is writing the run now,
+    and without run_paths -- absolute paths keyed by run, the one part of it that is purely local."""
     writing = {t["run"] for t in trainers}
     runs = [dict(r, status="stopped") if r["status"] == "running" and r["name"] not in writing else r
-            for r in payload["runs"]]
+            for r in payload["runs"] if r.get("env") == REAL_ENV]
     return dict({k: v for k, v in payload.items() if k != "run_paths"}, runs=runs, live=True)
 
 
@@ -150,10 +153,14 @@ def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[
 
 
 def training_now(trainers: list[dict], runs: dict) -> list[dict]:
-    """The runs being trained this minute: how far along, how long it has run, and the number it is judged by."""
+    """The runs being trained this minute: how far along, how long it has run, and the number it is judged by.
+    Only the real game's: a trainer whose run is not among `runs` (live_runs keeps REAL_ENV alone), a rehearsal,
+    or BC or the IDM is left out. A real run too new to have written metrics has no run yet, and stays in."""
     by_name = {r["name"]: r for r in runs["runs"]}
     out = []
     for t in trainers:
+        if t.get("rehearsal") or t["script"] != "train_rl.py" or (t["run"] and t["run"] not in by_name):
+            continue
         run = by_name.get(t["run"]) if t["run"] else None
         head = run["series"].get(run["headline"] or "") if run else None
         out.append({

@@ -55,6 +55,19 @@ def test_runs_json_is_scrubbed_and_running_means_a_trainer_is_writing_it():
     assert "args" not in now and now["steps_per_s"] == 40
 
 
+def test_the_site_shows_only_the_agent_playing_the_real_game():
+    sim = dict(run("ppo-cartpole-s1"), env="cartpole")
+    bc = dict(run("bc1", kind="bc"), env="pixels")
+    payload = {"runs": [run("rl8"), sim, bc], "run_paths": {}, "root": "main/runs"}
+    trainers = [{"run": "rl8", "script": "train_rl.py", "elapsed_s": 1.0},
+                {"run": "bc1", "script": "train_bc.py", "elapsed_s": 1.0},
+                {"run": None, "script": "train_rl.py", "elapsed_s": 1.0, "rehearsal": True},
+                {"run": None, "script": "train_rl.py", "elapsed_s": 1.0, "rehearsal": False}]
+    out = public_runs(payload, trainers)
+    assert [r["name"] for r in out["runs"]] == ["rl8"]
+    assert [t["run"] for t in training_now(trainers, out)] == ["rl8", None]
+
+
 class FakeSampler:
     paused = False
 
