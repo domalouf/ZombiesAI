@@ -57,6 +57,7 @@ class ScreenCapture:
         display: str | None = None,
         hud_regions: dict | None = None,
         hud_scale: float = 1.0,
+        video_height: int | None = None,
     ):
         if backend not in ("auto", "x11"):
             raise ValueError(f"capture backend {backend!r} is gone: capture is X11 only (docs/linux.md)")
@@ -65,6 +66,10 @@ class ScreenCapture:
         # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
         self.hud_regions, self.hud_scale = hud_regions, hud_scale
         self.last_hud: dict[str, np.ndarray] | None = None
+        # A watchable copy of each good grab, BGRX at most `video_height` tall, for filming the game (the run's
+        # best game: rl/best_episode.py). None: not kept.
+        self.video_height = video_height
+        self.last_video: np.ndarray | None = None
         self._frozen = 0  # consecutive reads whose policy frame repeated the one before
         self._probe: np.ndarray | None = None  # is_capturable's previous sample, to tell live from frozen
         # Whether the frame `read()` last returned is a repeat of an earlier one because the window could not
@@ -134,6 +139,10 @@ class ScreenCapture:
             from zombiesai.demos.hud_crops import crop_regions
 
             self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale, channels=fr.BGRX)
+        if self.video_height:
+            from zombiesai.rl.best_episode import video_frame
+
+            self.last_video = video_frame(frame, self.video_height)
         self._shape = shape
         policy = fr.to_policy_frame(frame, self._box, self.fit, channels=fr.BGRX)
         self._frozen = self._frozen + 1 if self._policy is not None and np.array_equal(policy, self._policy) else 0
@@ -188,6 +197,7 @@ class FollowWindow:
         self._next_try = 0.0
         self._policy = np.zeros(spec_pixels_shape(), dtype=np.uint8)
         self.last_hud = None
+        self.last_video = None
         self.last_stale, self.stale_reason = True, "no game window yet"
         self.has_frame = False
 
@@ -215,6 +225,7 @@ class FollowWindow:
             return self._lost(f"the game window went away ({error}); looking for it again")
         self._policy = frame
         self.last_hud = self._capture.last_hud
+        self.last_video = getattr(self._capture, "last_video", None)
         self.last_stale = bool(getattr(self._capture, "last_stale", False))
         self.stale_reason = getattr(self._capture, "stale_reason", None)
         self.has_frame = self.has_frame or not self.last_stale
