@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from zombiesai import spec
+from zombiesai.demos.hud_crops import hud_view
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.segments import FrameHistory, Segment
@@ -156,25 +157,29 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                 time.sleep(0.1)  # the learner has not published yet
                 continue
             frames = history.context() + [history.frames[-1]]
-            actions, logps, rewards, bad, heard, masks = [], [], [], [], [], []
+            actions, logps, rewards, bad, heard, masks, views = [], [], [], [], [], [], []
             terminated = ended = False
 
             def hear(o):
-                if audio_features is None:
-                    return
-                a = o.get("audio")
-                heard.append(quiet if a is None else np.asarray(a, np.float32))
-                masks.append(float(o.get("audio_mask", 1.0)) if a is not None else 0.0)
+                if audio_features is not None:
+                    a = o.get("audio")
+                    heard.append(quiet if a is None else np.asarray(a, np.float32))
+                    masks.append(float(o.get("audio_mask", 1.0)) if a is not None else 0.0)
+                if bc_config.use_hud_view:
+                    v = o.get("hud_view")
+                    views.append(hud_view(None) if v is None else np.asarray(v, np.uint8))
 
             hear(obs)
             for _ in range(config.segment_steps):
                 with torch.no_grad():
                     pixels = torch.from_numpy(history.stack()[None]).to(device)
-                    audio = mask = None
+                    audio = mask = hud = None
                     if audio_features is not None:
                         audio = torch.from_numpy(heard[-1][None]).to(device)
                         mask = torch.tensor([masks[-1]], device=device)
-                    logits, _, _ = net(pixels, None, audio, mask)
+                    if views:
+                        hud = torch.from_numpy(views[-1][None]).to(device)
+                    logits, _, _ = net(pixels, None, audio, mask, hud)
                     dist = FactoredCategorical(logits, spec.ACTION_NVEC)
                     u = torch.rand(dist.log_probs.shape, generator=rng).clamp_min(1e-12).to(device)
                     action = (dist.log_probs - torch.log(-torch.log(u))).argmax(-1)
@@ -208,6 +213,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                 rewards=np.asarray(rewards, np.float32), bad=np.asarray(bad, bool), terminated=bool(terminated),
                 audio=np.stack(heard) if heard else None,
                 audio_mask=np.asarray(masks, np.float32) if heard else None,
+                hud_view=np.stack(views) if views else None,
             )
             _offer(out, ("segment", index, segment))
             if ended:

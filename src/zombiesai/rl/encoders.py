@@ -92,6 +92,33 @@ class AudioEncoder(nn.Module):
         return self.fc(self.conv(audio.float()))
 
 
+class HudEncoder(nn.Module):
+    """The HUD corner at a readable size (demos/hud_crops.py `hud_view`: (B, 60, 80, 3) uint8) -> (B, out_dim).
+
+    Small strides on purpose: a magazine tick is one pixel wide and a letter of the gun's name four or five, so the
+    first convolution must not stride over them the way the main encoder's 8x8/4 does over the scene."""
+
+    def __init__(self, shape: tuple[int, int, int], out_dim: int = 128, norm: bool = True):
+        super().__init__()
+        h, w, c = shape
+        layers: list[nn.Module] = []
+        for in_c, out_c, kernel, stride in ((c, 32, 4, 2), (32, 64, 3, 2), (64, 64, 3, 1)):
+            layers.append(layer_init(nn.Conv2d(in_c, out_c, kernel, stride)))
+            if norm:
+                layers.append(nn.GroupNorm(8, out_c))
+            layers.append(nn.ReLU(inplace=True))
+        self.conv = nn.Sequential(*layers)
+        with torch.no_grad():
+            flat = self.conv(torch.zeros(1, c, h, w)).flatten(1).shape[1]
+        self.fc = nn.Sequential(nn.Flatten(), layer_init(nn.Linear(flat, out_dim)), nn.ReLU(inplace=True))
+        self.shape, self.out_dim = tuple(shape), out_dim
+
+    def forward(self, hud: torch.Tensor) -> torch.Tensor:
+        x = hud.permute(0, 3, 1, 2)
+        dtype = torch.get_autocast_dtype(x.device.type) if torch.is_autocast_enabled(x.device.type) else torch.float32
+        return self.fc(self.conv(x.to(dtype).div_(255.0)))
+
+
 class PixelActorCritic(nn.Module):
     """Pixels (+ any vector observations) -> one categorical per action head, a value, and auxiliary heads.
 
@@ -112,6 +139,8 @@ class PixelActorCritic(nn.Module):
         aux_heads: dict[str, int] | None = None,
         audio_shape: tuple[int, int, int] | None = None,
         audio_dim: int = 128,
+        hud_shape: tuple[int, int, int] | None = None,
+        hud_dim: int = 128,
     ):
         super().__init__()
         self.nvec = tuple(int(n) for n in nvec)
@@ -122,7 +151,10 @@ class PixelActorCritic(nn.Module):
         # without sound (or a dead live stream) contributes exactly nothing rather than a silence it never had.
         # Without it the module list is unchanged, so every checkpoint from before audio loads as it was.
         self.audio_encoder = AudioEncoder(audio_shape, audio_dim, norm=norm) if audio_shape else None
-        fused = vector_dim + (audio_dim + 1 if audio_shape else 0)
+        # Optional HUD corner (demos/hud_crops.py `hud_view`): the same screen, at a size its text survives. Its
+        # embedding joins the mixer after the audio's; without it the module list is unchanged, as for audio.
+        self.hud_encoder = HudEncoder(hud_shape, hud_dim, norm=norm) if hud_shape else None
+        fused = vector_dim + (audio_dim + 1 if audio_shape else 0) + (hud_dim if hud_shape else 0)
         self.mixer = (
             nn.Sequential(layer_init(nn.Linear(hidden + fused, hidden)), nn.ReLU(inplace=True))
             if fused
@@ -140,7 +172,10 @@ class PixelActorCritic(nn.Module):
         vector: torch.Tensor | None = None,
         audio: torch.Tensor | None = None,
         audio_mask: torch.Tensor | None = None,
+        hud: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """`hud` is ignored by a network without the HUD branch, so one batch can feed a policy that has it and
+        the frozen prior it is anchored to that does not."""
         h = self.encoder(pixels)
         parts = [h]
         if self.vector_dim:
@@ -152,6 +187,10 @@ class PixelActorCritic(nn.Module):
                 raise ValueError("this network hears: pass audio (and audio_mask=0 where there is none)")
             mask = torch.ones(len(h), device=h.device) if audio_mask is None else audio_mask.float()
             parts += [self.audio_encoder(audio) * mask[:, None], mask[:, None]]
+        if self.hud_encoder is not None:
+            if hud is None:
+                raise ValueError("this network looks at the HUD corner: pass hud (zeros where there is none)")
+            parts.append(self.hud_encoder(hud))
         return self.mixer(torch.cat(parts, dim=-1)) if len(parts) > 1 else h
 
     def forward(
@@ -160,8 +199,9 @@ class PixelActorCritic(nn.Module):
         vector: torch.Tensor | None = None,
         audio: torch.Tensor | None = None,
         audio_mask: torch.Tensor | None = None,
+        hud: torch.Tensor | None = None,
     ):
-        h = self.features(pixels, vector, audio, audio_mask)
+        h = self.features(pixels, vector, audio, audio_mask, hud)
         aux = {name: head(h) for name, head in self.aux.items()}
         return self.actor(h), self.critic(h).squeeze(-1), aux
 
@@ -206,7 +246,7 @@ def precision(amp: str, device: torch.device | str) -> Precision:
 
 
 # Observations with an encoder of their own rather than a place in the flat vector.
-_ENCODED_KEYS = ("pixels", "audio")
+_ENCODED_KEYS = ("pixels", "audio", "hud_view")
 
 
 def vector_dim(obs_keys: tuple[str, ...]) -> int:

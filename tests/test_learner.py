@@ -15,6 +15,7 @@ from zombiesai import spec
 from zombiesai.demos import bc
 from zombiesai.demos.agent import BCAgent
 from zombiesai.demos.hearing import AudioFeatureConfig
+from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.encoders import precision
@@ -79,8 +80,8 @@ def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd)
     with torch.no_grad():
         for s_idx, seg in enumerate(segments):
             rows = np.arange(seg.n + 1)
-            px, au, mk = learner._gather(segments, rows, np.full(len(rows), s_idx))
-            values.append(learner.net(px, None, au, mk)[1].numpy())
+            px, au, mk, hd = learner._gather(segments, rows, np.full(len(rows), s_idx))
+            values.append(learner.net(px, None, au, mk, hd)[1].numpy())
     learner.net.train()
     adv, ret, which, rows, valid = [], [], [], [], []
     for s_idx, (seg, v) in enumerate(zip(segments, values)):
@@ -102,20 +103,20 @@ def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd)
             mb = perm[start : start + c.minibatch_size]
             if len(mb) < 2:
                 continue
-            px, au, mk = learner._gather(segments, rows[mb], which[mb])
+            px, au, mk, hd = learner._gather(segments, rows[mb], which[mb])
             target = torch.from_numpy(ret[mb])
             if warmup:
                 with torch.no_grad():
-                    h = learner.net.features(px, None, au, mk)
+                    h = learner.net.features(px, None, au, mk, hd)
                 value_loss = 0.5 * ((learner.net.critic(h).squeeze(-1) - target) ** 2).mean()
                 learner.critic_opt.zero_grad(set_to_none=True)
                 value_loss.backward()
                 learner.critic_opt.step()
                 losses.append(float(value_loss.detach()))
                 continue
-            logits, value, _ = learner.net(px, None, au, mk)
+            logits, value, _ = learner.net(px, None, au, mk, hd)
             with torch.no_grad():
-                ref_logits = learner.ref(px, None, au, mk)[0]
+                ref_logits = learner.ref(px, None, au, mk, hd)[0]
             dist = FactoredCategorical(logits, spec.ACTION_NVEC)
             log_ratio = dist.log_prob(torch.from_numpy(actions[mb])) - torch.from_numpy(old_logp[mb])
             ratio = log_ratio.exp()
@@ -137,7 +138,7 @@ def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd)
     return {"loss_mean": float(np.mean(losses)), "ret": ret, "adv": adv, "scale": scale}
 
 
-def make_segments(net, offsets, audio: bool, lengths=(17, 40, 1, 33), seed=0) -> list[Segment]:
+def make_segments(net, offsets, audio: bool, lengths=(17, 40, 1, 33), seed=0, hud=False) -> list[Segment]:
     """Segments of mixed length (a one-step one included) with log-probs from `net`, as a lag-0 actor's."""
     rng = np.random.default_rng(seed)
     depth = max(offsets)
@@ -149,19 +150,21 @@ def make_segments(net, offsets, audio: bool, lengths=(17, 40, 1, 33), seed=0) ->
                       logp=np.zeros(n, np.float32), rewards=rng.normal(0, 1, n).astype(np.float32),
                       bad=rng.random(n) < 0.15, terminated=k == 1,
                       audio=rng.normal(0, 1, (n + 1, *AUDIO)).astype(np.float32) if audio else None,
-                      audio_mask=(rng.random(n + 1) < 0.7).astype(np.float32) if audio else None)
+                      audio_mask=(rng.random(n + 1) < 0.7).astype(np.float32) if audio else None,
+                      hud_view=rng.integers(0, 255, (n + 1, *HUD_VIEW_SHAPE), dtype=np.uint8) if hud else None)
         idx = depth + np.arange(n)[:, None] - np.asarray(offsets)[None, :]
         with torch.no_grad():
             au = torch.from_numpy(seg.audio[:n]) if audio else None
             mk = torch.from_numpy(seg.audio_mask[:n]) if audio else None
-            logits = net(torch.from_numpy(frames[idx]), None, au, mk)[0]
+            hd = torch.from_numpy(seg.hud_view[:n]) if hud else None
+            logits = net(torch.from_numpy(frames[idx]), None, au, mk, hd)[0]
             seg.logp = FactoredCategorical(logits, spec.ACTION_NVEC).log_prob(torch.from_numpy(actions)).numpy()
         out.append(seg)
     return out
 
 
-def checkpoint(tmp_path, offsets=(0, 1, 3), audio=False) -> str:
-    config = bc.BCConfig(frame_offsets=offsets, hidden=32, audio_dim=16, use_audio=audio)
+def checkpoint(tmp_path, offsets=(0, 1, 3), audio=False, hud=False) -> str:
+    config = bc.BCConfig(frame_offsets=offsets, hidden=32, audio_dim=16, use_audio=audio, use_hud_view=hud, hud_dim=16)
     torch.manual_seed(0)
     path = tmp_path / "bc.pt"
     bc.save(path, bc.build_net(config, AudioFeatureConfig() if audio else None), config, 0, {}, {},
@@ -169,16 +172,16 @@ def checkpoint(tmp_path, offsets=(0, 1, 3), audio=False) -> str:
     return str(path)
 
 
-@pytest.mark.parametrize("audio", [False, True])
-def test_the_fast_update_is_the_plain_update(tmp_path, audio):
+@pytest.mark.parametrize("audio,hud", [(False, False), (True, False), (True, True), (False, True)])
+def test_the_fast_update_is_the_plain_update(tmp_path, audio, hud):
     """Warm-up then two PPO updates, from the same weights on the same segments: the same parameters after."""
-    config = RLConfig(init=checkpoint(tmp_path, (0, 1, 2, 4), audio), critic_warmup_updates=1, minibatch_size=16,
-                      update_epochs=2, device="cpu", target_kl=None, amp="auto")
+    config = RLConfig(init=checkpoint(tmp_path, (0, 1, 2, 4), audio, hud), critic_warmup_updates=1,
+                      minibatch_size=16, update_epochs=2, device="cpu", target_kl=None, amp="auto")
     fast, plain = Learner(config, torch.device("cpu")), Learner(config, torch.device("cpu"))
     assert fast.amp == "off"  # the CPU always trains in fp32
     scaler = LoopStd(config.gamma)
     for seed in range(3):
-        segments = make_segments(fast.net, fast.offsets, audio, seed=seed)
+        segments = make_segments(fast.net, fast.offsets, audio, seed=seed, hud=hud)
         np.random.seed(seed)
         stats = fast.update(segments)
         np.random.seed(seed)
@@ -191,15 +194,17 @@ def test_the_fast_update_is_the_plain_update(tmp_path, audio):
 
 
 def test_staged_minibatches_are_the_stacks_the_actor_acted_on(tmp_path):
-    learner = Learner(RLConfig(init=checkpoint(tmp_path, (0, 2, 5), audio=True), device="cpu"), torch.device("cpu"))
-    segments = make_segments(learner.net, learner.offsets, audio=True)
+    learner = Learner(RLConfig(init=checkpoint(tmp_path, (0, 2, 5), audio=True, hud=True), device="cpu"),
+                      torch.device("cpu"))
+    segments = make_segments(learner.net, learner.offsets, audio=True, hud=True)
     staged = learner._stage(segments)
     which = np.concatenate([np.full(s.n + 1, i) for i, s in enumerate(segments)])
     rows = np.concatenate([np.arange(s.n + 1) for s in segments])
-    pixels, audio, mask = learner._minibatch(staged, torch.arange(len(rows)))
+    got = learner._minibatch(staged, torch.arange(len(rows)))
     expected = learner._gather(segments, rows, which)
-    for got, want in zip((pixels, audio, mask), expected):
-        assert torch.equal(got, want)
+    assert len(got) == len(expected) == 4
+    for g, want in zip(got, expected):
+        assert (g is None and want is None) or torch.equal(g, want)
     # A decision's observation is its own step, never the segment's final (bootstrap) one.
     finals = np.cumsum([s.n + 1 for s in segments]) - 1
     assert not np.isin(staged.row_obs.numpy(), finals).any() and len(staged.row_obs) == sum(s.n for s in segments)
@@ -242,18 +247,22 @@ def test_a_fresh_start_hears_trains_and_plays(tmp_path):
     assert config.init == str(run / "init.pt") and config.kl_coef == 0.0 and config.critic_warmup_updates == 0
     net, bc_config, meta = bc.load(config.init)
     assert bc_config.use_audio and bc_config.frame_offsets == FRESH_OFFSETS and net.audio_encoder is not None
+    assert bc_config.use_hud_view and net.hud_encoder is not None  # and it looks at the HUD corner
     learner = Learner(config, torch.device("cpu"))
-    assert learner.ref is None and learner.audio_shape == AUDIO
+    assert learner.ref is None and learner.audio_shape == AUDIO and learner.uses_hud_view
     for seed in range(2):
-        stats = learner.update(make_segments(learner.net, learner.offsets, audio=True, lengths=(40, 25), seed=seed))
+        stats = learner.update(make_segments(learner.net, learner.offsets, audio=True, lengths=(40, 25), seed=seed,
+                                             hud=True))
         assert not stats["warmup"] and np.isfinite(stats["policy_loss"])
     learner.checkpoint(run / "checkpoint.pt", step=130)
     net, bc_config, meta = bc.load(run / "checkpoint.pt")
     assert meta["rl"]["kl_coef"] == 0.0 and meta["rl"]["updates"] == 2
     agent = BCAgent(run / "checkpoint.pt")
     frame = np.zeros(spec.PIXELS_SHAPE, np.uint8)
-    assert agent.act({"pixels": frame, "audio": np.zeros(AUDIO, np.float32), "audio_mask": 1.0}).shape == (8,)
-    assert agent.act({"pixels": frame}).shape == (8,)  # and deaf, if the stream dies
+    view = np.zeros(HUD_VIEW_SHAPE, np.uint8)
+    assert agent.act({"pixels": frame, "audio": np.zeros(AUDIO, np.float32), "audio_mask": 1.0,
+                      "hud_view": view}).shape == (8,)
+    assert agent.act({"pixels": frame}).shape == (8,)  # and deaf and HUD-blind, if the streams die
     again = Learner(replace(config, init=str(run / "checkpoint.pt")), torch.device("cpu"))
     assert again.ref is None and again.updates == 2  # continuing it stays unanchored
 

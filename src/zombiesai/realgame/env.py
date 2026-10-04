@@ -41,6 +41,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from zombiesai import spec
+from zombiesai.demos.hud_crops import hud_view
 from zombiesai.hud.parse import ABSENT, OK
 from zombiesai.hud.track import START_POINTS, HudTracker
 from zombiesai.hud.weapons import WEAPONS
@@ -166,6 +167,7 @@ class RealGameEnv:
         self.config = config or EnvConfig()
         self.clock, self.sleep, self.say = clock, sleep, say
         self.tracker = HudTracker()
+        self._hud_view = None  # the last good HUD-corner view, repeated while the grab is stale
         self.signals = HudSignals(self.config.signals)
         self.shaper = RewardShaper(self.config.reward)
         self._deadline = 0.0
@@ -207,7 +209,13 @@ class RealGameEnv:
         stale = bool(getattr(self.capture, "last_stale", False))
         crops = getattr(self.capture, "last_hud", None)
         reading = self.reader(crops) if crops is not None and not stale else None
-        obs = {"pixels": frame}
+        # The HUD corner at a size its text survives (demos/hud_crops.py), from the same grab. A stale grab
+        # repeats the last good one, as the capture repeats the last good frame.
+        if crops is not None and not stale and crops.get("points_ammo") is not None:
+            self._hud_view = hud_view(crops["points_ammo"])
+        elif self._hud_view is None:
+            self._hud_view = hud_view(None)
+        obs = {"pixels": frame, "hud_view": self._hud_view}
         if self.hearing is not None:
             obs["audio"], obs["audio_mask"] = self.hearing.observe(t)
         return obs, reading, stale

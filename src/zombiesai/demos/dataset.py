@@ -19,6 +19,7 @@ import numpy as np
 
 from zombiesai import spec
 from zombiesai.demos.clips import Clip, clip_span, iter_clips
+from zombiesai.demos.hud_crops import hud_view
 
 # Per-step targets beyond the action, present only when the clip's source could supply them.
 EXTRA_KEYS = {"mc_return": np.float32, "aux_dpoints": np.int64, "aux_damage": np.int64}
@@ -55,13 +56,17 @@ class ClipDataset:
         offsets: Sequence[int] | None = None,
         audio=None,
         audio_config=None,
+        hud_view: bool = False,
     ):
         """`before`/`after` give the contiguous window [t - before, t + after]. `offsets` replaces it with any
         set of relative steps (negative in the past), e.g. a strided history (-30, -16, -8, -4, -2, -1, 0).
 
         `audio`, when given, is what each clip sounds like: a callable clip -> per-step features
         (`hearing.clip_features`) or None for a clip without sound; batches then carry `audio` and
-        `audio_mask` (0 where there was nothing to hear, padded with the feature of silence)."""
+        `audio_mask` (0 where there was nothing to hear, padded with the feature of silence).
+
+        `hud_view` adds each step's view of the HUD corner (demos/hud_crops.py), cut from the clip's recorded
+        points_ammo crops; zeros for a clip recorded without them."""
         self.clips = [c for c in clips if c.n_steps > 0]
         self.config = config or DataConfig()
         if offsets is None:
@@ -79,6 +84,7 @@ class ClipDataset:
             self.audio_config = audio_config or AudioFeatureConfig()
             self._audio = [audio(clip) for clip in self.clips]
             self._silence = silence(self.audio_config)
+        self._hud = [clip.hud("points_ammo") for clip in self.clips] if hud_view else None
         # Where each step's history begins, per clip: computed once, read on every sample.
         self._segment_start = [clip.segment_start for clip in self.clips]
         # A play run's usable steps are all corrections (`Clip.usable`), so its whole clip carries their weight.
@@ -134,6 +140,9 @@ class ClipDataset:
         batch.update(self.extras(rows))
         if self._audio is not None:
             batch.update(self.audio(rows, (rng or np.random.default_rng()) if augment else None))
+        if self._hud is not None:
+            batch["hud_view"] = np.stack([hud_view(None if self._hud[c] is None else np.asarray(self._hud[c][t]))
+                                          for c, t in rows])
         return batch
 
     def audio(self, rows: np.ndarray, rng: np.random.Generator | None = None) -> dict[str, np.ndarray]:

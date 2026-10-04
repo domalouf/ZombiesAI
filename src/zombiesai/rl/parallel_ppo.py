@@ -197,7 +197,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
         # (FrameHistory.depth and the actor's audio); the server refuses one that does not fit.
         fleet = FleetServer(config.listen, fleet_token or "", config=config, run_dir=run_dir,
                             settings=play_settings(config.fleet_root) if config.env == "real" else None,
-                            context=max(learner.offsets), audio_shape=learner.audio_shape, say=say).start()
+                            context=max(learner.offsets), audio_shape=learner.audio_shape,
+                            hud_view=learner.uses_hud_view, say=say).start()
         fleet.set_weights(version, run_dir / "weights.pt")
         host, port = fleet.address
         say(f"listening for other machines' games on {host}:{port}")

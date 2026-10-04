@@ -29,7 +29,7 @@ does if the live stream dies.
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -41,6 +41,7 @@ from zombiesai.demos import stats
 from zombiesai.demos.clips import DPOINTS_EDGES, Clip, clip_name
 from zombiesai.demos.dataset import ClipDataset, DataConfig, class_weights, split_clips
 from zombiesai.demos.hearing import DEFAULT_CACHE, AudioFeatureConfig, clip_features, feature_config
+from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE
 from zombiesai.demos.idm import resolve_device
 from zombiesai.demos.losses import factored_cross_entropy, head_predictions, split_heads
 from zombiesai.rl.distributions import FactoredCategorical
@@ -79,6 +80,10 @@ class BCConfig:
     device: str = "auto"
     use_audio: bool = False  # hear the game: the `audio` key, features from demos/hearing.py
     audio_dim: int = 128
+    # Look at the HUD corner at a size its text survives: the `hud_view` key, demos/hud_crops.py. Still the
+    # screen's pixels; what the gun's name and the magazine marks mean is left to the policy to learn.
+    use_hud_view: bool = False
+    hud_dim: int = 128
 
     def __post_init__(self):
         if self.frame_offsets is None:
@@ -105,7 +110,7 @@ class BCConfig:
     @property
     def obs_keys(self) -> tuple[str, ...]:
         keys = ("pixels", "prev_actions") if self.use_prev_actions else ("pixels",)
-        return keys + (("audio",) if self.use_audio else ())
+        return keys + (("audio",) if self.use_audio else ()) + (("hud_view",) if self.use_hud_view else ())
 
 
 def build_net(config: BCConfig, audio: AudioFeatureConfig | None = None) -> PixelActorCritic:
@@ -120,7 +125,37 @@ def build_net(config: BCConfig, audio: AudioFeatureConfig | None = None) -> Pixe
         aux_heads=dict(AUX_HEADS),
         audio_shape=audio.shape if config.use_audio else None,
         audio_dim=config.audio_dim,
+        hud_shape=HUD_VIEW_SHAPE if config.use_hud_view else None,
+        hud_dim=config.hud_dim,
     )
+
+
+def with_hud_view(net: PixelActorCritic, config: BCConfig, audio: AudioFeatureConfig | None = None,
+                  ) -> tuple[PixelActorCritic, BCConfig]:
+    """A copy of a trained policy that also looks at the HUD corner, and acts exactly as it did until training
+    says otherwise: every weight is carried over, the new HUD encoder starts as a fresh one would, and the mixer's
+    inputs from it start at zero. A policy with no mixer (no audio, no vector) gets one that passes the pixel
+    features through unchanged -- they come out of a ReLU, so ReLU(I h) is h."""
+    if config.use_hud_view:
+        raise ValueError("this policy already looks at the HUD corner")
+    new_config = replace(config, use_hud_view=True)
+    new = build_net(new_config, audio)
+    state = new.state_dict()
+    for name, value in net.state_dict().items():
+        if not name.startswith("mixer."):
+            state[name] = value
+    weight = state["mixer.0.weight"]
+    with torch.no_grad():
+        weight.zero_()
+        state["mixer.0.bias"].zero_()
+        if isinstance(net.mixer, nn.Identity):
+            weight[:, : weight.shape[0]] = torch.eye(weight.shape[0])
+        else:
+            old = net.mixer[0]
+            weight[:, : old.in_features] = old.weight  # the HUD's columns come last and stay zero
+            state["mixer.0.bias"].copy_(old.bias)
+    new.load_state_dict(state)
+    return new.to(next(net.parameters()).device), new_config
 
 
 def batch_tensors(batch: dict, config: BCConfig, device: torch.device) -> dict[str, torch.Tensor]:
@@ -134,6 +169,8 @@ def batch_tensors(batch: dict, config: BCConfig, device: torch.device) -> dict[s
     if config.use_audio:
         out["audio"] = torch.from_numpy(batch["audio"]).to(device)
         out["audio_mask"] = torch.from_numpy(batch["audio_mask"]).to(device)
+    if config.use_hud_view:
+        out["hud_view"] = torch.from_numpy(batch["hud_view"]).to(device)
     for key in ("mc_return", *AUX_HEADS):
         if key in batch:
             out[key] = torch.from_numpy(batch[key]).to(device)
@@ -142,7 +179,7 @@ def batch_tensors(batch: dict, config: BCConfig, device: torch.device) -> dict[s
 
 
 def compute_loss(net: PixelActorCritic, t: dict[str, torch.Tensor], config: BCConfig, weights) -> tuple:
-    logits, value, aux = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"))
+    logits, value, aux = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"), t.get("hud_view"))
     loss, per_head = factored_cross_entropy(
         logits, t["action"], class_weights=weights, sample_weights=t["weight"], focal_gamma=config.focal_gamma
     )
@@ -177,7 +214,7 @@ def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device:
     rng = np.random.default_rng(0)
     for rows in data.epoch(max(32, config.batch_size), rng, shuffle=False, drop_last=False):
         t = batch_tensors(data.batch(rows), config, device)
-        logits, _, _ = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"))
+        logits, _, _ = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"), t.get("hud_view"))
         nll.append(head_nll(logits, t["action"]).cpu().numpy())
         predicted.append(head_predictions(logits).cpu().numpy())
         sampled.append(FactoredCategorical(logits, spec.ACTION_NVEC).sample().cpu().numpy())
@@ -250,6 +287,7 @@ def train(
     if config.use_audio:
         audio_features = audio_features or AudioFeatureConfig()
         hearing = {"audio": audio or audio_source(config, audio_features, audio_cache), "audio_config": audio_features}
+    hearing["hud_view"] = config.use_hud_view
     train_data = ClipDataset(train_clips, data_config, offsets=config.data_offsets, **hearing)
     val_data = ClipDataset(val_clips, data_config, offsets=config.data_offsets, **hearing)
     if len(train_data) < config.batch_size:

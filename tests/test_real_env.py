@@ -103,6 +103,27 @@ def test_info_carries_the_held_gun_and_this_steps_ammo():
     assert (infos[3]["mag"], infos[3]["mag_at_least"], infos[3]["reserve"], infos[3]["grenades"]) == (None, False, None, None)
 
 
+def test_every_observation_carries_the_hud_corner_and_a_stale_grab_repeats_the_last_one():
+    from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE, POINTS_AMMO_SHAPE, hud_view
+
+    env, game, _, _, _ = make_env([500] * 4)
+    obs, _ = env.reset()
+    assert obs["hud_view"].shape == HUD_VIEW_SHAPE and not obs["hud_view"].any()  # no crop yet: an empty corner
+    crop = np.random.default_rng(0).integers(0, 256, (*POINTS_AMMO_SHAPE, 3), dtype=np.uint8)
+    read = game.read
+
+    def read_with_crop():
+        frame = read()
+        game.last_hud["points_ammo"] = crop
+        return frame
+
+    game.read = read_with_crop
+    obs = env.step(IDLE)[0]
+    assert np.array_equal(obs["hud_view"], hud_view(crop))
+    game.stale, crop = True, np.zeros_like(crop)
+    assert np.array_equal(env.step(IDLE)[0]["hud_view"], obs["hud_view"])
+
+
 def test_a_gain_pays_once_it_settles_and_a_death_terminates():
     env, game, dispatcher, _, _ = make_env([500] * 4)
     env.reset()

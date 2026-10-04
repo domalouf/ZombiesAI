@@ -22,6 +22,7 @@ import torch
 from zombiesai import spec
 from zombiesai.demos import bc
 from zombiesai.demos.hearing import AudioFeatureConfig, feature_config, silence
+from zombiesai.demos.hud_crops import hud_view
 from zombiesai.rl.distributions import FactoredCategorical
 
 
@@ -84,7 +85,12 @@ class BCAgent:
             heard = self._silence if heard is None else np.asarray(heard, dtype=np.float32)
             audio = torch.from_numpy(heard[None]).to(self.device)
             mask = torch.tensor([mask], device=self.device)
-        logits, _, _ = self.net(pixels, vector, audio, mask)
+        hud = None
+        if self.config.use_hud_view:
+            view = obs.get("hud_view")
+            view = hud_view(None) if view is None else np.asarray(view, dtype=np.uint8)
+            hud = torch.from_numpy(view[None]).to(self.device)
+        logits, _, _ = self.net(pixels, vector, audio, mask, hud)
         dist = FactoredCategorical(logits / (1.0 if self.deterministic else self.temperature), spec.ACTION_NVEC)
         action = dist.mode()[0] if self.deterministic else dist.sample()[0]
         self.last_look = tuple(
