@@ -321,6 +321,52 @@ def test_online_tracker_holds_the_round_through_a_jump_the_game_cannot_make():
     assert seen[-1] == 2  # the next round is still taken
 
 
+# (weapon key, grenades, magazine, magazine at least, reserve) per live_crops.npz fixture (the RL agents' games,
+# scripts/sample_hud.py; checked by eye); None = must not be OK
+LIVE = [
+    ("colt", 0, 8, False, 32),  # the empty grenade count is drawn orange-red
+    ("colt", 0, 0, False, 32),  # eight spent ticks: an empty pistol
+    ("colt", 2, 4, False, 32),
+    ("kar98k", 0, 4, True, 50),  # three dashes and the fourth's sliver loaded, the fifth off the crop
+    ("kar98k", None, 2, False, 50),  # the red 0 over a busy wall is refused, not guessed
+    ("m1_carbine", 0, 10, False, 120),
+    (None, None, None, False, None),  # the ammo counter and the name have faded out
+]
+
+
+@pytest.mark.parametrize("i", range(len(LIVE)))
+def test_weapon_grenades_and_magazine_on_live_crops(parser, i):
+    from zombiesai.hud.parse import MAG_AT_LEAST
+    from zombiesai.hud.weapons import WEAPON_INDEX
+
+    with np.load(FIXTURES / "live_crops.npz") as z:
+        crop, source = z["points_ammo"][i], z["points_ammo_source"][i]
+    weapon, grenades, mag, at_least, reserve = LIVE[i]
+    r = parser.parse({"points_ammo": crop})
+    want = {"weapon": None if weapon is None else WEAPON_INDEX[weapon], "grenades": grenades, "mag": mag,
+            "reserve": reserve}
+    for name, value in want.items():
+        got, status = getattr(r, name), getattr(r, f"{name}_status")
+        if value is None:
+            assert status != OK and got == -1, (source, name, got, status)
+        else:
+            assert (got, status) == (value, OK), (source, name)
+            assert getattr(r, f"{name}_conf") >= 0.5, (source, name)
+    assert bool(r.mag_flags & MAG_AT_LEAST) == at_least
+    if weapon is None:
+        assert r.weapon_status == ABSENT
+
+
+def test_a_magazine_off_the_crop_is_unreadable_without_the_gun():
+    from zombiesai.hud.parse import read_mag
+
+    with np.load(FIXTURES / "live_crops.npz") as z:
+        loaded_kar = z["points_ammo"][3]
+    assert read_mag(loaded_kar).status == UNREADABLE  # four bright marks could be any long magazine
+    assert read_mag(loaded_kar, capacity=4).value == 4  # a gun that holds four: exact
+    assert read_mag(loaded_kar, capacity=3).status == UNREADABLE  # more marks than the gun holds: a misread
+
+
 def test_online_tracker_holds_the_gun_while_its_name_is_faded_out():
     from zombiesai.hud.parse import HudReading
     from zombiesai.hud.track import HudTracker

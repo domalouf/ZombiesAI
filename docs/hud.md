@@ -64,7 +64,7 @@ gun unknown, or more marks than it holds, the chain is UNREADABLE (long box-gun 
 only while the ammo counter is (it fades with it). It is matched as a whole word: ink is the light, neutral
 text after the same 5 px top-hat, scaled to a peak of 1, compared with per-weapon templates in
 `hud/weapon_names.npz` (several per gun: faded, over different scenes) plus reject templates for scene that
-gets through the ink rule. Measured on 1,173 live frames: a name sits within 0.008 of its own weapon's
+gets through the ink rule. Measured on the first 1,173 live frames: a name sits within 0.008 of its own weapon's
 templates, also when the templates come from other games, and 0.086+ from another weapon's; a pale wall
 with no name is 0.073+ from any. The cut is 0.04, so a gun with no template yet (a box gun no sample has
 shown) reads UNREADABLE, not as the nearest known one. The value is an index into `hud/weapons.py`
@@ -113,6 +113,16 @@ rendered with their reads -- every ok read of points, round, grenades and reserv
 refusals were on the frames a person also squints at. The honest estimate: points and round are wrong on
 well under 1 in 1,000 ok reads (none found); grenades and reserve about 1 in 10,000; the magazine is
 approximate -- about 1 read in 300 is off by a few rounds for a step, on busy backgrounds.
+
+**Weapon, empty grenades and the Kar98k's magazine** were added later and measured on a different
+source: 7,914 points_ammo crops sampled from the RL agents' six games (`scripts/sample_hud.py`, ~25 minutes,
+2026-10-03), the same crops the templates were harvested from. The weapon read on 6,945 of them (Colt M1911
+6,818, Kar98k 124, M1A1 Carbine 3), unreadable on 39 (scene through the ink rule, a name over a white wall),
+absent on 930 (the counter faded); with the templates built from three of the games, every Colt name in the
+other three still matched. The empty grenade count, unread before (orange-red), read 6,184 times. A loaded
+Kar98k, unreadable before, reads 4 with `MAG_AT_LEAST`, and 0-3 exactly. Seven of these crops, checked by
+eye, are fixtures (`tests/fixtures/hud/live_crops.npz`). What they also show: the agent's Colt was empty
+(0 of 8, with 32 in reserve) on 4,702 of its 6,518 magazine reads -- it rarely reloads.
 
 What it does not see: rounds past 10 (numerals: no examples yet), round 9 as distinct from 8 in a single
 frame, points behind a solid-white flash, the ammo counter over a wall as pale as its text (unreadable,
@@ -171,8 +181,8 @@ only 1440p has been measured.
 
 ### Adding a weapon
 
-The name templates only know the guns a sample has shown: the Colt M1911 and the Kar98k so far, from the
-agents' own games. Any other gun reads UNREADABLE until its name is harvested. Clips work as sources (the
+The name templates only know the guns a sample has shown: the Colt M1911, the Kar98k and the M1A1 Carbine
+so far, from the agents' own games (the Carbine from 3 frames: one template). Any other gun reads UNREADABLE until its name is harvested. Clips work as sources (the
 human demos have the box guns); so does a sample of the running fleet's games, taken without touching them:
 
 ```
