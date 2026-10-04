@@ -155,7 +155,7 @@ actor as a clip (frames, actions, HUD crops, rewards) under `runs/<run>/episodes
 
 **The run's best game, filmed.** Every actor films every game it plays and keeps it only if it is the run's
 best so far: `runs/<run>/best/best.mp4`, with its round, points, kills, actor, episode and full summary in
-`best.json`. Best is the highest round, then the most points, then the most kills -- the game-over
+`best.json`. Best is the highest round, then the most kills, then the most points -- the game-over
 scoreboard's numbers when they were read, else the HUD's -- and a tie keeps the earlier game. The film is the
 game's own picture at 720p and 15 fps (every other pixel of each 1440p grab, ~1 ms of the tick), encoded by
 ffmpeg on NVENC where there is one, else x264; about 18 MB a minute. A game cut short by stopping the run is

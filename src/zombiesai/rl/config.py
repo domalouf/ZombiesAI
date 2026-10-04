@@ -47,7 +47,7 @@ class RLConfig:
     look_smoothing_s: float = 0.08
     bindings: str = "configs/waw_bindings.json"
     record_every: int = 0  # record every k-th episode of each actor as a clip (0: never)
-    # Film every game and keep the run's best -- highest round, then most points, then most kills -- as
+    # Film every game and keep the run's best -- highest round, then most kills, then most points -- as
     # best/best.mp4 in the run's directory (rl/best_episode.py)
     record_best: bool = True
     hear: bool = True  # a checkpoint trained with audio hears its own instance's sink
