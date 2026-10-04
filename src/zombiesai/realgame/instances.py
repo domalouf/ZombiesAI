@@ -643,8 +643,9 @@ class Instance:
 
         return find_window(self.config.window_title, self.spec.display)
 
-    def capture(self, hud_regions=None):
-        """A capture that follows the game window on this display across the game's own window churn."""
+    def capture(self, hud_regions=None, video_height: int | None = None):
+        """A capture that follows the game window on this display across the game's own window churn; with
+        `video_height`, also keeping a watchable copy of each grab (`ScreenCapture.last_video`)."""
         from zombiesai.demos.capture import FollowWindow, ScreenCapture
         from zombiesai.demos.hud_crops import HUD_REGIONS
 
@@ -657,7 +658,8 @@ class Instance:
         # The crops' reference size is 1440p at half scale, i.e. 720p's own pixels.
         scale = min(1.0, 720.0 / self.spec.height)
         return FollowWindow(lambda: ScreenCapture(window=self.config.window_title, display=self.spec.display,
-                                                  hud_regions=regions, hud_scale=scale))
+                                                  hud_regions=regions, hud_scale=scale,
+                                                  video_height=video_height))
 
     def sink(self):
         from zombiesai.realgame.xtest import XTestSink
