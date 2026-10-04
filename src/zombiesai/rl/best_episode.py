@@ -2,7 +2,7 @@
 
 Which game is best is only known once it is over, so every actor films every game and, when one ends, keeps it
 if it beats the run's best so far and throws it away otherwise. Best is the highest round; a tie goes to the
-most points, then the most kills; a game that only ties the best does not replace it. The points and kills are
+most kills, then the most points; a game that only ties the best does not replace it. The points and kills are
 the game-over scoreboard's when it was read (`end_points` counts the 500 a game starts with, `end_kills` is the
 game's own count), else the HUD's: the 500 plus every settled gain, and the gains taken for kills.
 
@@ -43,14 +43,20 @@ QUEUE_FRAMES = 45  # 3 s of frames waiting for the encoder before they are dropp
 
 
 def episode_rank(summary: dict) -> tuple[int, int, int]:
-    """(round, points, kills): the order games are ranked in, higher first."""
+    """(round, kills, points): the order games are ranked in, higher first."""
     points = summary.get("end_points")
     if points is None:
         points = START_POINTS + int(summary.get("points_gained") or 0)
     kills = summary.get("end_kills")
     if kills is None:
         kills = int(summary.get("kills") or 0)
-    return int(summary.get("round_reached") or 0), int(points), int(kills)
+    return int(summary.get("round_reached") or 0), int(kills), int(points)
+
+
+def stored_rank(record: dict) -> tuple[int, int, int]:
+    """A best.json's rank, read from its named numbers: a run's best kept before kills outranked points has
+    its `rank` list in the old (round, points, kills) order."""
+    return int(record.get("round") or 0), int(record.get("kills") or 0), int(record.get("points") or 0)
 
 
 def video_frame(frame: np.ndarray, height: int = VIDEO_HEIGHT) -> np.ndarray:
@@ -164,11 +170,11 @@ def keep_if_best(best_dir: Path, video: Path, summary: dict, **about) -> bool:
     with open(best_dir / ".lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         current = read_best(best_dir)
-        if current is not None and tuple(current.get("rank", ())) >= rank:
+        if current is not None and stored_rank(current) >= rank:
             video.unlink(missing_ok=True)
             return False
         os.replace(video, best_dir / "best.mp4")
-        record = {"rank": list(rank), "round": rank[0], "points": rank[1], "kills": rank[2], "video": "best.mp4",
+        record = {"rank": list(rank), "round": rank[0], "kills": rank[1], "points": rank[2], "video": "best.mp4",
                   "host": socket.gethostname(), "recorded_unix": time.time(), **about, "summary": summary}
         tmp = best_dir / "best.json.tmp"
         tmp.write_text(json.dumps(record, indent=2, default=str))
@@ -225,7 +231,7 @@ class BestEpisodeRecorder:
                 return
             if keep_if_best(self.dir, video.path, summary, actor=self.actor, episode=episode, frames=video.frames,
                             dropped_frames=video.dropped, encoder=video.encoder[1]):
-                r, p, k = episode_rank(summary)
+                r, k, p = episode_rank(summary)
                 self.say(f"new best game: round {r}, {p} points, {k} kills -> {self.dir / 'best.mp4'}")
         except Exception as error:  # noqa: BLE001
             self.say(f"keeping game {episode}'s film failed: {error}")

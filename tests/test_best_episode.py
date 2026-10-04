@@ -22,15 +22,15 @@ def game(round_reached, points=None, kills=None, *, gained=0, hud_kills=0):
             "points_gained": gained, "kills": hud_kills}
 
 
-def test_games_rank_by_round_then_points_then_kills():
-    ranked = sorted([game(3, 900, 9), game(5, 600, 2), game(3, 1400, 1), game(3, 1400, 4)], key=episode_rank)
-    assert [episode_rank(g) for g in ranked] == [(3, 900, 9), (3, 1400, 1), (3, 1400, 4), (5, 600, 2)]
+def test_games_rank_by_round_then_kills_then_points():
+    ranked = sorted([game(3, 1400, 4), game(5, 600, 2), game(3, 900, 9), game(3, 1600, 4)], key=episode_rank)
+    assert [episode_rank(g) for g in ranked] == [(3, 4, 1400), (3, 4, 1600), (3, 9, 900), (5, 2, 600)]
 
 
 def test_the_scoreboard_counts_win_and_the_hud_stands_in_without_them():
-    assert episode_rank(game(2, 1210, 7, gained=300, hud_kills=3)) == (2, 1210, 7)
+    assert episode_rank(game(2, 1210, 7, gained=300, hud_kills=3)) == (2, 7, 1210)
     # the scoreboard's points count the 500 a game starts with; the HUD's gains do not
-    assert episode_rank(game(2, gained=710, hud_kills=3)) == (2, 1210, 3)
+    assert episode_rank(game(2, gained=710, hud_kills=3)) == (2, 3, 1210)
 
 
 def video(path, text=b"film"):
@@ -41,7 +41,7 @@ def video(path, text=b"film"):
 def test_a_better_game_replaces_the_best_and_a_worse_or_equal_one_is_thrown_away(tmp_path):
     assert keep_if_best(tmp_path, video(tmp_path / "a.mp4", b"a"), game(3, 900, 5), actor=0, episode=1)
     assert (tmp_path / "best.mp4").read_bytes() == b"a" and not (tmp_path / "a.mp4").exists()
-    assert read_best(tmp_path)["rank"] == [3, 900, 5] and read_best(tmp_path)["episode"] == 1
+    assert read_best(tmp_path)["rank"] == [3, 5, 900] and read_best(tmp_path)["episode"] == 1
 
     for name, worse in (("b", game(2, 5000, 50)), ("c", game(3, 900, 5))):  # lower round; an exact tie
         assert not keep_if_best(tmp_path, video(tmp_path / f"{name}.mp4"), worse, actor=1, episode=2)
@@ -52,6 +52,20 @@ def test_a_better_game_replaces_the_best_and_a_worse_or_equal_one_is_thrown_away
     best = json.loads((tmp_path / "best.json").read_text())
     assert (tmp_path / "best.mp4").read_bytes() == b"d"
     assert (best["round"], best["points"], best["kills"], best["actor"]) == (3, 900, 6, 1)
+
+    # more kills beats more points
+    assert not keep_if_best(tmp_path, video(tmp_path / "e.mp4"), game(3, 5000, 5), actor=2, episode=4)
+    assert keep_if_best(tmp_path, video(tmp_path / "f.mp4", b"f"), game(3, 700, 7), actor=2, episode=5)
+    assert (tmp_path / "best.mp4").read_bytes() == b"f"
+
+
+def test_a_best_kept_with_the_old_rank_order_is_read_by_its_named_numbers(tmp_path):
+    (tmp_path / "best.mp4").write_bytes(b"old")
+    (tmp_path / "best.json").write_text(json.dumps(
+        {"rank": [1, 510, 0], "round": 1, "points": 510, "kills": 0, "video": "best.mp4"}))
+    # by the stale list, (1, 510, 0) would outrank (1, 3, 400); by kills it does not
+    assert keep_if_best(tmp_path, video(tmp_path / "a.mp4", b"a"), game(1, 400, 3), actor=0, episode=1)
+    assert (tmp_path / "best.mp4").read_bytes() == b"a"
 
 
 def test_the_film_frame_is_every_other_pixel_of_the_grab_with_even_sides():
