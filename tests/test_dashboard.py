@@ -71,6 +71,22 @@ def test_reads_a_ppo_run_and_names_its_progress(tmp_path):
     assert run["eta_s"] > run["elapsed_s"] * 200
 
 
+def test_best_round_is_the_furthest_single_game_not_the_average(tmp_path):
+    run_dir = write_run(tmp_path, "rl1", ppo_rows(5, env_metrics=True), {"env": "real-waw"})
+    assert read_run(run_dir)["stats"]["best_round"] is None  # no episodes.jsonl: nothing to say
+    games = run_dir / "episodes.jsonl"
+    games.write_text("".join(json.dumps({"episode": i, "round_reached": r}) + "\n" for i, r in enumerate([1, 3, 2])))
+    with open(games, "a") as f:
+        f.write('{"episode": 3, "round_rea')  # a trainer mid-write: not read until its line is whole
+    assert read_run(run_dir)["stats"]["best_round"] == 3
+    with open(games, "a") as f:
+        f.write('ched": 5}\n')
+    assert read_run(run_dir)["stats"]["best_round"] == 5  # the rest of that line, read on the next rebuild
+    games.unlink()
+    games.write_text(json.dumps({"round_reached": 2}) + "\n")  # a new file in its place is read afresh
+    assert read_run(run_dir)["stats"]["best_round"] == 2
+
+
 def test_a_half_written_last_line_is_skipped_not_fatal(tmp_path):
     run = write_run(tmp_path, "live", ppo_rows(12), {"env": "synthetic", "total_steps": 500_000})
     with (run / "metrics.jsonl").open("a") as f:

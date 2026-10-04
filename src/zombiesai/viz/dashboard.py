@@ -32,7 +32,7 @@ SERIES_COLORS = ("#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300
 # PPO logs one row per update; BC and the IDM log one per epoch. Everything below is (path, label, hint).
 PPO_SERIES = (
     ("return_mean", "Return", "mean over the last 100 finished episodes"),
-    ("round_reached_mean", "Round reached", "how far into the game it gets, mean of the last 100"),
+    ("round_reached_mean", "Average round reached", "how far into the game it gets, mean of the last 100"),
     ("length_mean", "Episode length", "steps before it dies or hits the cap"),
     ("entropy", "Policy entropy", "nats; falling means the policy is committing"),
     ("approx_kl", "Approx. KL", "how far each update moves the policy"),
@@ -59,7 +59,7 @@ KIND_SERIES = {"ppo": PPO_SERIES, "bc": BC_SERIES, "idm": IDM_SERIES}
 # the batch worse data than the rest is visible instead of averaged away. (key, label, hint)
 MACHINE_SERIES = (
     ("bad_step_pct", "Late steps, %", "share of each machine's steps that missed their deadline; the learner warns at 10%"),
-    ("round_reached_mean", "Round reached", "mean of each machine's last 50 games"),
+    ("round_reached_mean", "Average round reached", "mean of each machine's last 50 games"),
     ("share_pct", "Share of the training data, %", "each machine's steps in each update; one falling to 0 has stopped"),
     ("stale_pct", "Segments too stale to use, %",
      "arrived more than max_policy_lag versions behind the learner; over the last 10 updates"),
@@ -311,6 +311,40 @@ def best_game(run_dir: Path) -> dict | None:
     }
 
 
+# episodes.jsonl path -> (inode, bytes read, best round so far). A run plays thousands of games and the page is
+# rebuilt every few seconds, so each rebuild reads only the lines written since the last.
+_BEST_ROUNDS: dict[Path, tuple[int, int, int | None]] = {}
+
+
+def best_round(run_dir: Path) -> int | None:
+    """The furthest round one game of the run reached, from its episodes.jsonl (rl/parallel_ppo.py). None for a
+    run that logs no games one by one: metrics.jsonl only holds the round averaged over the last 100."""
+    path = run_dir / "episodes.jsonl"
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    ino, offset, best = _BEST_ROUNDS.get(path, (st.st_ino, 0, None))
+    if ino != st.st_ino or st.st_size < offset:  # replaced or truncated: read it again from the start
+        offset, best = 0, None
+    if st.st_size > offset:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            data = f.read()
+        complete = data.rfind(b"\n") + 1  # a trainer's last line can be half-written: leave it for next time
+        for line in data[:complete].splitlines():
+            try:
+                row = json.loads(line)
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            r = _num(row.get("round_reached")) if isinstance(row, dict) else None
+            if r is not None and (best is None or r > best):
+                best = int(r)
+        offset += complete
+    _BEST_ROUNDS[path] = (st.st_ino, offset, best)
+    return best
+
+
 def read_run(run_dir: Path, buckets: int = 160, stale_after: float = 600.0, now: float | None = None) -> dict | None:
     """One run's config, curves, headline numbers and verdicts. None if the directory holds no metrics."""
     metrics = run_dir / "metrics.jsonl"
@@ -385,6 +419,7 @@ def read_run(run_dir: Path, buckets: int = 160, stale_after: float = 600.0, now:
         "best_game": best_game(run_dir) if kind == "ppo" else None,
     }
     run["stats"] = _stats(run)
+    run["stats"]["best_round"] = best_round(run_dir)
     run["notes"] = _notes(run)
     return run
 

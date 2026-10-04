@@ -409,6 +409,29 @@ def test_a_read_from_the_shared_bgrx_buffer_is_the_rgb_path_and_keeps_nothing_of
         np.testing.assert_array_equal(crops[name], kept[name])
 
 
+def dark_room(height=1440, width=2560):
+    """A dark Nacht room as X hands it over: every row and column under frames.BAR_LUMA but those through one
+    lit doorway, right of centre -- a frame `detect_bars` reads as bars on all four sides."""
+    frame = np.full((height, width, 4), 10, np.uint8)
+    frame[height * 3 // 10:height * 7 // 10, width // 2:width * 9 // 10, :3] = 120
+    return frame
+
+
+def test_known_bars_keep_the_whole_picture_where_a_dark_first_frame_would_crop_it(monkeypatch):
+    from zombiesai.demos import frames as fr
+
+    frame, whole = dark_room(), (0, 0, 1440, 2560)
+    monkeypatch.setattr(x11_capture, "X11Grabber", SharedSegment([frame]))
+    guessed = ScreenCapture()
+    guessed.read()
+    assert guessed.describe()["box"] != whole  # what a guess makes of it: the doorway, blown up
+    monkeypatch.setattr(x11_capture, "X11Grabber", SharedSegment([frame, frame]))
+    known = ScreenCapture(bars=fr.NO_BARS)
+    policy = known.read()
+    assert known.describe()["box"] == whole
+    np.testing.assert_array_equal(policy, fr.to_policy_frame(frame, whole, channels=fr.BGRX))
+
+
 def test_grab_bgrx_fails_and_recovers_as_grab_does():
     x = FakeXlib()
     grabber = fake_grabber(x)
