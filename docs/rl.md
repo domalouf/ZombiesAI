@@ -164,7 +164,11 @@ a game that could be the best. The two meet on `time.monotonic()`: each frame go
 time falls in (a missed grab repeats the frame before), and the sound is laid sample by sample from its
 arrival-stamped capture onto the same clock (`demos/audio.py`), so neither drifts however long the game; the
 sound is put half a frame later, `AV_DELAY_S`, since a frame shows the start of the slot it stands for.
-A fleet started with `--no-audio-sinks` films without sound. A game cut short by stopping the run is
+A fleet started with `--no-audio-sinks` films without sound. A game that ends in a death is filmed on through
+the game-over screen while the env looks for its scoreboard (up to `after_death_s`, 4 s, which the reset waited
+anyway), so the film ends on the game's own final numbers, and `best.json`'s `stats` keeps them: round, points,
+kills and headshots, with `from: scoreboard` -- or `from: hud` and no headshots when the scoreboard was not
+read -- plus the game's length, shots, hits and how it ended. A game cut short by stopping the run is
 not kept. A fleet's other PCs keep the best of their own games in their own copy of the run. `--no-record-best`
 turns it off (`rl/best_episode.py`). The Training Room shows each real run's best game under "Best games":
 `publish_live.py` pushes the film to the site whenever it changes (`viz/live_site.py`).
