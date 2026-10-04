@@ -63,7 +63,7 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
         capture.read()
         return shows_console()
 
-    return RealGameEnv(capture, dispatcher, focus=instance.focuser(sink),
+    env = RealGameEnv(capture, dispatcher, focus=instance.focuser(sink),
                        console=lambda command: console_command(sink, command, is_open=looks_open),
                        # 30 ms taps are shorter than the game notices for some keys (the scores key); 150 ms is sure
                        restart=instance.restart_game, press=lambda key: tap_key(sink, key, hold_s=0.15),
@@ -71,6 +71,10 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
                        downed=lambda: scoreboard_shown((capture.last_hud or {}).get("scores")),
                        end_screen=lambda: read_end_screen(capture.grab()),
                        hearing=hearing, say=lambda m: print(f"[actor {index}] {m}", flush=True))
+    # The sink this game alone plays into, for the best game's film to have its sound; a fleet started without
+    # sinks of its own plays into the desktop's, mixed with every other game, so its films stay silent.
+    env.sound_monitor = instance.spec.monitor if fleet.audio_sinks else None
+    return env
 
 
 # What --counts-per-degree defaulted to before it was derived: sensitivity 5 x m_yaw 0.022, the demos' settings.
@@ -143,14 +147,14 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     env = make_actor_env(config, index, audio_features)
     episode = 0
     writer = None
-    best = BestEpisodeRecorder(run_dir, index, say=lambda m: print(f"[actor {index}] {m}", flush=True)) \
-        if config.record_best else None
+    best = BestEpisodeRecorder(run_dir, index, say=lambda m: print(f"[actor {index}] {m}", flush=True),
+                               sound=_sound_stream(env, index)) if config.record_best else None
     try:
         obs, _ = env.reset()
         history.reset(obs["pixels"])
         if best is not None:
             best.start(episode)
-            best.add(_video_frame(env, obs))
+            best.add(*_video_frame(env, obs))
         while not stop.is_set():
             version = follower.poll(net)
             if version < 0:
@@ -195,7 +199,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                                hud=getattr(getattr(env, "capture", None), "last_hud", None),
                                extras={"actor": np.uint8(1), "reward": np.float32(reward)})
                 if best is not None:
-                    best.add(_video_frame(env, obs))
+                    best.add(*_video_frame(env, obs))
                 history.push(obs["pixels"])
                 frames.append(history.frames[-1])
                 hear(obs)
@@ -227,7 +231,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                 history.reset(obs["pixels"])
                 if best is not None:
                     best.start(episode)
-                    best.add(_video_frame(env, obs))
+                    best.add(*_video_frame(env, obs))
                 if config.record_every and episode % config.record_every == 0:
                     writer = _episode_writer(run_dir, index, episode, env)
     finally:
@@ -250,10 +254,22 @@ def _offer(out, item, timeout_s: float = 0.25) -> bool:
 
 
 def _video_frame(env, obs):
-    """What the best game's film shows of this step: the game's own picture, or, for a game with no screen
-    behind it (the synthetic stand-in), the observation."""
+    """What the best game's film shows of this step, and when it was grabbed: the game's own picture, or, for a
+    game with no screen behind it (the synthetic stand-in), the observation, with no time."""
     capture = getattr(env, "capture", None)
-    return obs["pixels"] if capture is None else getattr(capture, "last_video", None)
+    if capture is None:
+        return obs["pixels"], None
+    return getattr(capture, "last_video", None), getattr(capture, "last_t", None)
+
+
+def _sound_stream(env, index: int):
+    """A function opening a fresh capture of this game's own sink for the best game's film, or None."""
+    monitor = getattr(env, "sound_monitor", None)
+    if monitor is None:
+        return None
+    from zombiesai.demos.audio import PulseMonitorStream
+
+    return lambda: PulseMonitorStream(monitor, stream_name=f"best game {index}")
 
 
 def _episode_writer(run_dir: Path, index: int, episode: int, env):

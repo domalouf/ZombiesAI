@@ -73,6 +73,9 @@ class ScreenCapture:
         # best game: rl/best_episode.py). None: not kept.
         self.video_height = video_height
         self.last_video: np.ndarray | None = None
+        # When the last `read()` grabbed (time.monotonic(), just after the grab returned), or tried to: a film
+        # lines its frames, and the sound beside them, up on it.
+        self.last_t: float | None = None
         self._frozen = 0  # consecutive reads whose policy frame repeated the one before
         self._probe: np.ndarray | None = None  # is_capturable's previous sample, to tell live from frozen
         # Whether the frame `read()` last returned is a repeat of an earlier one because the window could not
@@ -119,7 +122,9 @@ class ScreenCapture:
         """
         try:
             frame = self._grabber.grab_bgrx()  # a view of the shared segment: read it before the next grab
+            self.last_t = time.monotonic()
         except Exception as error:
+            self.last_t = time.monotonic()
             if self._policy is None or not self._transient(error):
                 raise
             return self._stale(str(error))
@@ -203,10 +208,12 @@ class FollowWindow:
         self._policy = np.zeros(spec_pixels_shape(), dtype=np.uint8)
         self.last_hud = None
         self.last_video = None
+        self.last_t: float | None = None
         self.last_stale, self.stale_reason = True, "no game window yet"
         self.has_frame = False
 
     def _lost(self, reason: str) -> np.ndarray:
+        self.last_t = self.clock()
         self.last_stale, self.stale_reason = True, reason
         return self._policy
 
@@ -231,6 +238,7 @@ class FollowWindow:
         self._policy = frame
         self.last_hud = self._capture.last_hud
         self.last_video = getattr(self._capture, "last_video", None)
+        self.last_t = getattr(self._capture, "last_t", None)
         self.last_stale = bool(getattr(self._capture, "last_stale", False))
         self.stale_reason = getattr(self._capture, "stale_reason", None)
         self.has_frame = self.has_frame or not self.last_stale
