@@ -2,7 +2,8 @@
 reward scaling vectorised -- against the plain statement of the same PPO update, row by row, on the same data.
 
 PPO math must not move when the bookkeeping does, so the reference here is the update as it was written before
-any of that (per-row stacking, per-segment GAE, the prior re-run on every minibatch), in fp32 on the CPU."""
+any of that (per-row stacking, per-segment GAE), in fp32 on the CPU -- running the network at the fast path's batch
+shapes, for the reason reference_update gives."""
 
 from dataclasses import replace
 
@@ -34,16 +35,17 @@ AUDIO = AudioFeatureConfig().shape
 
 
 def loop_gae(rewards, values, last_value, terminated, gamma, lam):
-    """GAE as it was first written: one step at a time, backwards."""
+    """GAE as it was first written: one step at a time, backwards -- in float64, as segment_gae accumulates."""
     n = len(rewards)
-    adv = np.zeros(n, dtype=np.float32)
+    adv = np.zeros(n)
     next_value = 0.0 if terminated else float(last_value)
     gae = 0.0
     for t in reversed(range(n)):
-        delta = rewards[t] + gamma * next_value - values[t]
+        delta = float(rewards[t]) + gamma * next_value - float(values[t])
         gae = delta + gamma * lam * gae
         adv[t] = gae
-        next_value = values[t]
+        next_value = float(values[t])
+    adv = adv.astype(np.float32)
     return adv, adv + np.asarray(values, dtype=np.float32)
 
 
@@ -69,19 +71,25 @@ class LoopStd:
 
 
 def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd) -> dict:
-    """The PPO update written the plain way: stacks built per row on the CPU, values per segment, GAE per segment,
-    the frozen prior run on every minibatch. Same random permutations as the fast path (np.random)."""
+    """The PPO update written the plain way: stacks built per row on the CPU, GAE per segment, the frozen prior's
+    logits indexed per minibatch. Same random permutations as the fast path (np.random).
+
+    The network runs at the fast path's batch shapes -- every observation's value in one batch, the prior over every
+    usable step in one -- because a CPU convolution's rounding depends on the batch it is in, and a one-ulp
+    difference is not harmless here: it can tip a ReLU sitting on zero the other way, which changes that sample's
+    gradient outright, and from there the two trajectories part by far more than any tolerance. Which batch sizes
+    round alike is down to the kernel torch picks for the CPU, so a test built on that passes on one runner and
+    fails on the next (AVX-512 ones, mostly)."""
     c = learner.config
     for seg in segments:
         scaler.update(seg.actor, seg.rewards, seg.terminated)
     scale = scaler.std
+    every_which = np.concatenate([np.full(seg.n + 1, s_idx) for s_idx, seg in enumerate(segments)])
+    every_row = np.concatenate([np.arange(seg.n + 1) for seg in segments])
     learner.net.eval()
-    values = []
     with torch.no_grad():
-        for s_idx, seg in enumerate(segments):
-            rows = np.arange(seg.n + 1)
-            px, au, mk, hd = learner._gather(segments, rows, np.full(len(rows), s_idx))
-            values.append(learner.net(px, None, au, mk, hd)[1].numpy())
+        px, au, mk, hd = learner._gather(segments, every_row, every_which)
+        values = np.split(learner.net(px, None, au, mk, hd)[1].numpy(), np.cumsum([s.n + 1 for s in segments])[:-1])
     learner.net.train()
     adv, ret, which, rows, valid = [], [], [], [], []
     for s_idx, (seg, v) in enumerate(zip(segments, values)):
@@ -96,6 +104,11 @@ def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd)
     actions = np.concatenate([s.actions for s in segments])
     usable = np.flatnonzero(np.concatenate(valid))
     warmup = learner.updates < c.critic_warmup_updates
+    prior = np.zeros((len(rows), sum(spec.ACTION_NVEC)), np.float32)
+    if not warmup and len(usable):
+        px, au, mk, hd = learner._gather(segments, rows[usable], which[usable])
+        with torch.no_grad():
+            prior[usable] = learner.ref(px, None, au, mk, hd)[0].numpy()
     losses = []
     for _ in range(c.update_epochs):
         perm = np.random.permutation(usable)
@@ -115,8 +128,7 @@ def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd)
                 losses.append(float(value_loss.detach()))
                 continue
             logits, value, _ = learner.net(px, None, au, mk, hd)
-            with torch.no_grad():
-                ref_logits = learner.ref(px, None, au, mk, hd)[0]
+            ref_logits = torch.from_numpy(prior[mb])
             dist = FactoredCategorical(logits, spec.ACTION_NVEC)
             log_ratio = dist.log_prob(torch.from_numpy(actions[mb])) - torch.from_numpy(old_logp[mb])
             ratio = log_ratio.exp()
