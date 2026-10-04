@@ -44,6 +44,8 @@ class ScreenCapture:
 
     `region` (left, top, width, height) narrows the grab to part of the window; the server then sends only
     those pixels. `monitor` is accepted for old callers and ignored: a window is captured, not a monitor.
+    `bars` (top, bottom, left, right) are the letterbox bars, when they are known (`frames.NO_BARS` for a game
+    that fills its window); left out, they are detected on the first frame.
     """
 
     def __init__(
@@ -57,10 +59,11 @@ class ScreenCapture:
         display: str | None = None,
         hud_regions: dict | None = None,
         hud_scale: float = 1.0,
+        bars: tuple[int, int, int, int] | None = None,
     ):
         if backend not in ("auto", "x11"):
             raise ValueError(f"capture backend {backend!r} is gone: capture is X11 only (docs/linux.md)")
-        self.region, self.fit, self.monitor = region, fit, monitor
+        self.region, self.fit, self.monitor, self.bars = region, fit, monitor, bars
         self.window, self.display = window, display
         # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
         self.hud_regions, self.hud_scale = hud_regions, hud_scale
@@ -127,9 +130,11 @@ class ScreenCapture:
                 f"the window is now {shape[1]}x{shape[0]}; the recording started at {width}x{height}"
             )
         if self._box is None:
-            # Detected once, on the first frame, and then frozen: a crop that drifts mid-recording would
-            # change what the pixels mean halfway through the clip.
-            self._box = fr.crop_box(*shape, fr.detect_bars(frame[..., fr.BGRX]), self.fit)
+            # Fixed on the first frame: a crop that drifts mid-recording would change what the pixels mean
+            # halfway through the clip. Bars not given are detected on that frame, so a dark one can cost
+            # whole edges of the picture (frames.BAR_LUMA) -- which is why a caller who knows passes them.
+            bars = self.bars if self.bars is not None else fr.detect_bars(frame[..., fr.BGRX])
+            self._box = fr.crop_box(*shape, bars, self.fit)
         if self.hud_regions:
             from zombiesai.demos.hud_crops import crop_regions
 

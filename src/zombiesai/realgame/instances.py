@@ -646,6 +646,7 @@ class Instance:
     def capture(self, hud_regions=None):
         """A capture that follows the game window on this display across the game's own window churn."""
         from zombiesai.demos.capture import FollowWindow, ScreenCapture
+        from zombiesai.demos.frames import NO_BARS
         from zombiesai.demos.hud_crops import HUD_REGIONS
 
         from zombiesai.realgame.console import CONSOLE_REGION
@@ -656,8 +657,10 @@ class Instance:
             "scores": SCOREBOARD_REGION}
         # The crops' reference size is 1440p at half scale, i.e. 720p's own pixels.
         scale = min(1.0, 720.0 / self.spec.height)
+        # The game runs fullscreen in an X server of its own size, so the picture fills the window: no bars to
+        # find, and none to imagine in a dark first frame, which would crop the policy's view for good.
         return FollowWindow(lambda: ScreenCapture(window=self.config.window_title, display=self.spec.display,
-                                                  hud_regions=regions, hud_scale=scale))
+                                                  hud_regions=regions, hud_scale=scale, bars=NO_BARS))
 
     def sink(self):
         from zombiesai.realgame.xtest import XTestSink
