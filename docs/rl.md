@@ -319,7 +319,7 @@ Traffic is ~415 KB/s per game before compression (128x72 frames at 15 Hz): nothi
 worth checking on Wi-Fi.
 
 **On the site.** Each worker PC can report itself to lts the way the training PC does (`publish_live.py
---worker <id>`; README.md, "Live on the site"): the Training Room shows a card per machine, with what its worker
+--worker <id>`; README.md, "Live on the site"): the Training Room shows a collapsible panel per machine, with what its worker
 is doing, read from the `runs/fleet/status.json` the worker rewrites every few seconds.
 
 ## Rehearse without the game first

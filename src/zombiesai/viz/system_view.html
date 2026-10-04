@@ -37,8 +37,10 @@
 /* The machine, every 2 s, from /api/system (viz/system.py): what btop shows, beside the training it is running.
    The server samples whether or not anyone looks and keeps half an hour, so this asks only for what it lacks. */
 // opts.tiles: the headline tiles (the local page has its own, /api/machine's); opts.full: every process column
-// (the public page gets names and load only -- a command line carries paths).
-const sysview = { history: [], since: 0, built: false, nodes: {}, charts: [], opts: { tiles: true, full: true } };
+// (the public page gets names and load only -- a command line carries paths). The local page has one machine, in
+// #system (buildSystem, renderSystem); the live page has one view per machine (buildSystemView, renderSystemView).
+const sysview = { history: [], since: 0, built: false, view: null, opts: { tiles: true, full: true } };
+const SYSTEM_VIEWS = new Set();  // every view on the page, for the resize redraw
 // Two series to a chart, always the first validated pair: the machine's side in slot 0, the GPU's in slot 1.
 const SLOT0 = "#3987e5", SLOT1 = "#d95926";
 
@@ -91,7 +93,7 @@ function SystemChart(spec) {
   const height = 150, pad = { l: 50, r: 12, t: 8, b: 24 };
   let hover = null;
 
-  function draw(points) {
+  function draw(points, empty = "collecting…") {
     mount(legend, spec.series.map((s) => {
       const last = [...points].reverse().find((p) => p[s.key] != null);
       return el("span", {}, [el("i", { style: `background:${s.color}` }), document.createTextNode(s.name),
@@ -102,7 +104,7 @@ function SystemChart(spec) {
     const frame = svg("svg", { width, height, role: "img", "aria-label": spec.title });
     plot.append(frame);
     if (points.length < 2) {
-      frame.append(Object.assign(svg("text", { x: pad.l, y: height / 2, class: "axis" }), { textContent: "collecting…" }));
+      frame.append(Object.assign(svg("text", { x: pad.l, y: height / 2, class: "axis" }), { textContent: empty }));
       return;
     }
     const x0 = points[0].t, x1 = Math.max(points[points.length - 1].t, x0 + 1);
@@ -183,10 +185,11 @@ const SYSTEM_CHARTS = [
 ];
 
 /* -- the panel ------------------------------------------------------------- */
-function buildSystem() {
-  const n = sysview.nodes;
+// A machine's whole panel, mounted into `holder`, its one-line specs into `specs`; render it with renderSystemView.
+function buildSystemView(holder, specs, opts) {
+  const n = {};
+  const view = { nodes: n, specs, opts, holder, history: [], empty: undefined, charts: SYSTEM_CHARTS.map(SystemChart) };
   n.tiles = el("div", { class: "tiles machine-tiles" });
-  sysview.charts = SYSTEM_CHARTS.map(SystemChart);
   n.cores = el("div", { class: "cores" });
   n.coresAside = el("span", { class: "aside" });
   n.gpu = el("dl", { class: "kv" });
@@ -199,11 +202,11 @@ function buildSystem() {
   n.procsAside = el("span", { class: "aside" });
   const card = (title, body, aside) => el("article", { class: "card" }, [
     el("div", { class: "title" }, [typeof title === "string" ? document.createTextNode(title) : title, aside]), body]);
-  const head = sysview.opts.full ? ["PID", "Name", "User", "CPU", "Memory", "Mem %", "Threads", "Command"]
+  const head = opts.full ? ["PID", "Name", "User", "CPU", "Memory", "Mem %", "Threads", "Command"]
                                  : ["Name", "CPU", "Memory", "Mem %", "Threads"];
-  mount(document.getElementById("system"), [
-    sysview.opts.tiles ? n.tiles : null,
-    el("div", { class: "machine-charts" }, sysview.charts.map((c) => c.node)),
+  mount(holder, [
+    opts.tiles ? n.tiles : null,
+    el("div", { class: "machine-charts" }, view.charts.map((c) => c.node)),
     el("div", { class: "machine-cards" }, [
       card("CPU cores", n.cores, n.coresAside),
       card(n.gpuTitle, n.gpu),
@@ -221,8 +224,17 @@ function buildSystem() {
     ]),
   ]);
   n.procsAside.setAttribute("style", "margin-left:auto;font:500 12px var(--mono);color:var(--chalk-faint)");
+  SYSTEM_VIEWS.add(view);
+  return view;
+}
+
+function buildSystem() {
+  if (sysview.view) SYSTEM_VIEWS.delete(sysview.view);
+  sysview.view = buildSystemView(document.getElementById("system"), document.getElementById("system-specs"), sysview.opts);
   sysview.built = true;
 }
+
+const redrawSystemView = (view) => { for (const c of view.charts) c.draw(view.history, view.empty); };
 
 function tile(label, value, sub, verdict) {
   return el("div", { class: "card" }, [
@@ -232,7 +244,7 @@ function tile(label, value, sub, verdict) {
   ]);
 }
 
-function renderSpecs(sp, now) {
+function renderSpecs(node, sp, now) {
   if (!sp) return;
   const parts = [
     ...(sp.host ? [["", sp.host]] : []),
@@ -242,19 +254,22 @@ function renderSpecs(sp, now) {
     ...(sp.os ? [["", sp.kernel ? `${sp.os}, kernel ${sp.kernel}` : sp.os]] : []),
   ];
   if (now && now.uptime_s != null) parts.push(["up ", fmtDuration(now.uptime_s)]);
-  mount(document.getElementById("system-specs"), parts.map(([pre, b], i) =>
+  mount(node, parts.map(([pre, b], i) =>
     el("span", {}, [pre ? document.createTextNode(pre) : null, i === 0 && sp.host ? el("b", { text: b }) : document.createTextNode(b)])));
 }
 
-function renderSystem(data) {
-  const now = data.now, n = sysview.nodes, lim = now.limits;
-  renderSpecs(data.specs, now);
+// `empty` is what a chart says with fewer than two points (default: collecting…).
+function renderSystemView(view, data, history, empty) {
+  const now = data.now, n = view.nodes, lim = now.limits;
+  view.history = history;
+  view.empty = empty;
+  renderSpecs(view.specs, data.specs, now);
   const cpu = now.cpu, mem = now.memory, gpu = now.gpus[0];
   const disk = now.disks.reduce((a, d) => [a[0] + (d.read || 0), a[1] + (d.write || 0)], [0, 0]);
   const net = now.net.reduce((a, d) => [a[0] + (d.rx || 0), a[1] + (d.tx || 0)], [0, 0]);
   // The driver reports "power cap" even idling at 15 W; a reason to slow down is only news while the GPU works.
   const slow = gpu && gpu.util >= 20 && gpu.slowdown.length ? ` · slowing: ${gpu.slowdown.join(", ")}` : "";
-  if (sysview.opts.tiles) mount(n.tiles, [
+  if (view.opts.tiles) mount(n.tiles, [
     tile("CPU", fmtPct(cpu.pct), `${cpu.freq ?? "--"} GHz avg · load ${cpu.load.map((l) => l ?? "-").join(" ")}`),
     tile("CPU temperature", fmtC(cpu.temp), `throttles at ${lim.cpu[1]}°C`, heat("cpu", cpu.temp, lim)),
     gpu ? tile("GPU", fmtPct(gpu.util), `${gpu.power?.toFixed(0) ?? "--"} of ${gpu.power_limit?.toFixed(0) ?? "--"} W · ${gpu.clock ?? "--"} MHz${slow}`) : null,
@@ -264,7 +279,7 @@ function renderSystem(data) {
     tile("Disk", fmtRate(disk[0] + disk[1]), `read ${fmtRate(disk[0])} · write ${fmtRate(disk[1])}`),
     tile("Network", fmtRate(net[0]), `down · up ${fmtRate(net[1])}`),
   ]);
-  for (const c of sysview.charts) c.draw(sysview.history);
+  redrawSystemView(view);
 
   n.coresAside.textContent = `${cpu.tasks} tasks · ${cpu.threads} threads`;
   mount(n.cores, cpu.cores.map((pct, i) =>
@@ -314,7 +329,7 @@ function renderSystem(data) {
     [el("p", { class: "empty-note", text: "No network interface has moved a byte." })]);
 
   n.procsAside.textContent = "100% is one whole core";
-  const full = sysview.opts.full;
+  const full = view.opts.full;
   mount(n.procs, now.procs.map((p) => el("tr", {}, [
     full ? el("td", { text: String(p.pid) }) : null, el("td", { text: p.name, style: "text-align:left" }),
     full ? el("td", { text: p.user, style: "text-align:left" }) : null, el("td", { text: fmtPct(p.cpu) }),
@@ -323,9 +338,16 @@ function renderSystem(data) {
   ])));
 }
 
+function renderSystem(data) { renderSystemView(sysview.view, data, sysview.history); }
+
 let sysviewResize = null;
 window.addEventListener("resize", () => {
   clearTimeout(sysviewResize);
-  sysviewResize = setTimeout(() => { for (const c of sysview.charts) c.draw(sysview.history); }, 120);
+  sysviewResize = setTimeout(() => {
+    for (const view of SYSTEM_VIEWS) {
+      if (!view.holder.isConnected) SYSTEM_VIEWS.delete(view);
+      else if (view.holder.offsetParent !== null) redrawSystemView(view);  // a closed panel draws when it opens
+    }
+  }, 120);
 });
 </script>
