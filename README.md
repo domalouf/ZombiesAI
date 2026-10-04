@@ -46,6 +46,8 @@ Linux is [`docs/linux.md`](./docs/linux.md).
   the HUD reward, console and reset handling, and the live player.
 - `src/zombiesai/rl/` — PPO fine-tuning: actors (one per game), the learner, and
   the fleet protocol that lets other PCs play for it.
+- `src/zombiesai/session.py` — `./zai start | status | stop`: a training session's games, trainer and
+  cleanup in one command each.
 - `src/zombiesai/viz/` — the Training Room dashboard, the live site, the
   supervision page and the stream overlay.
 - `src/zombiesai/synthetic.py` — a stand-in for the game when there is no game:
@@ -53,6 +55,110 @@ Linux is [`docs/linux.md`](./docs/linux.md).
   real game has. It keeps the recorder, BC, the actors, the learner and the fleet
   testable in CI and lets a PC with no game rehearse the RL plumbing. Nothing
   learned on it is meant to transfer.
+
+## Training: start and stop
+
+Training on this PC is three commands, run from the top of the checkout:
+
+```sh
+./zai start      # bring the games up and start training in the background
+./zai status     # how the run is doing
+./zai stop       # save everything and close everything
+```
+
+The game, Plutonium and the fleet need a one-time setup first: [`docs/linux.md`](./docs/linux.md) and
+[`docs/rl.md`](./docs/rl.md) ("Setup, once").
+
+### Starting a run
+
+`./zai start` does, in order:
+
+1. **Checks nothing is already training.** If a run is already playing the games, it says so and stops.
+   Run `./zai stop` first.
+2. **Picks what to start from.** By default it continues the newest real-game run's `checkpoint.pt`.
+   If there is none, it uses the newest `bc.pt`, and failing that a fresh policy. Continuing loses
+   nothing: the update count, the KL weight and the anchor to the BC policy all carry over.
+3. **Brings the games up**, one at a time, waiting for each window. This takes a minute or so per game.
+   Games that are already running are kept.
+4. **Starts the trainer in the background** as the next free `runs/rl<N>`, with its log in
+   `runs/rl<N>.log`. It runs in a session of its own, so closing the terminal does not stop it.
+
+Options:
+
+```sh
+./zai start --games 6                    # play six games (remembered for next time)
+./zai start --games auto                 # as many games as this PC can carry (see "How many games")
+./zai start --from runs/bc1/bc.pt        # start from this checkpoint instead; --from fresh for a new policy
+./zai start --name rl-lr1e4 -- --lr 1e-4 # choose the run's name; anything after -- goes to train_rl.py
+./zai start --watch                      # also open the game viewers on Hyprland workspace 9
+./zai start -- --env synthetic           # a rehearsal of the plumbing with no game: nothing is launched
+```
+
+### How many games
+
+Without `--games`, `start` plays the same number of games as last time: the fleet's size in
+`runs/instances/fleet.json`. `--games N` changes it, and the new number is kept.
+
+With `--games auto`, or the first time when there is no fleet yet, the PC is measured instead
+(`src/zombiesai/rl/capacity.py`, the same as `train_rl.py --actors auto`). CPUs, free RAM and free VRAM
+each give a limit, after setting aside a share for the desktop and the learner. The smallest limit wins,
+and the total is capped at 8, the most ever tried on one PC:
+
+| resource | each game costs | set aside | this PC (2026-10-04) |
+|---|---|---|---|
+| CPU | 1 logical CPU (game + its actor) | 2 desktop + 2 learner | 16 CPUs: 12 games |
+| RAM | 1.3 GB game + 0.7 GB actor | 4 GB desktop + 4 GB learner | 24 GB free: 8 games |
+| VRAM | 1 GB (1440p under DXVK) | 1.5 GB desktop + 2.5 GB learner | 10.2 GB free: **6 games** |
+
+The per-game costs are estimates from earlier runs, not a benchmark. If the run's late-step share
+(`bad` in the log and on the dashboard) climbs past about 10%, the PC is overloaded: use fewer games.
+
+### Watching a run
+
+```sh
+./zai status                                     # update, steps/s, mean round and return; games up
+tail -f runs/rl<N>.log                           # one line per PPO update and per finished game
+uv run python scripts/view_instances.py          # the games themselves, on workspace 9
+uv run python scripts/supervise.py               # the supervision page: curves, games, start and stop
+```
+
+The run's best game so far is kept as `runs/rl<N>/best/best.mp4`.
+
+### Stopping a run
+
+`./zai stop` saves first, then closes everything a training session uses on this PC:
+
+1. **The trainer stops gracefully.** Every `train_rl.py` and fleet worker is asked to stop, as Ctrl-C
+   does. The learner finishes the step it is on and **writes `checkpoint.pt` before anything else**,
+   then stops its actors. Every key is released, and a game that has just ended can finish encoding
+   as the run's best film. This normally takes a few seconds. A trainer that is still running after
+   `--timeout` (300 s) is killed, keeping its last periodic checkpoint.
+2. **The games come down**, with their X servers (Xwayland, headless weston) and per-game sound sinks.
+3. **Everything else of ours is closed:** the game viewers, the supervision dashboard, and anything
+   left behind, such as an actor orphaned by a crash. Processes are matched by command line,
+   environment and parent, so the desktop's own Xwayland, a BC training run and other programs are
+   never touched.
+4. **It reports what was saved** for each run (checkpoint age, updates, steps, games, best round) and
+   ends with `all stopped`. If anything would not stop, it lists it and exits non-zero.
+
+What a stopped run leaves in `runs/rl<N>/`: `checkpoint.pt` (continue from it, or play it with
+`play_real.py`), `metrics.jsonl`, `episodes.jsonl`, `config.json` and `best/`.
+
+`./zai stop --keep-games` stops only the trainer and leaves the games up, so the next `start` skips the
+wait for them to load.
+
+### Good to know
+
+- `./zai stop` is safe to run when nothing is running, and `./zai status` never changes anything.
+- The trainer saves its checkpoint however it is stopped: `./zai stop`, Ctrl-C, `kill`, a closed
+  terminal, or the dashboard's Stop button. The only exception is `kill -9`, which leaves the last
+  periodic checkpoint.
+- The site's reporter (`zombiesai-live.service`) is left running and shows the PC as idle. To stop it
+  too, run `systemctl --user stop zombiesai-live`.
+- `./zai` runs this checkout's `.venv` directly (a worktree without one borrows the main checkout's)
+  and never runs `uv sync`.
+- The individual scripts (`instances.py`, `train_rl.py`, `view_instances.py`) still work on their own
+  when you need finer control; see [Commands](#commands).
 
 ## Commands
 
@@ -70,7 +176,7 @@ uv run python scripts/train_bc.py data/clips/session1 data/demos --out runs/bc1
 uv run python scripts/eval_bc.py runs/bc1/bc.pt --clips data/demos-heldout
 uv run python scripts/play_real.py runs/bc1/bc.pt --minutes 3       # watch it play; F7 hands it the controls
 
-# Then PPO on several games at once (docs/rl.md)
+# Then PPO on several games at once (docs/rl.md); ./zai start / ./zai stop (above) do this in one step
 uv run python scripts/instances.py up --n 4                          # four games, four private X servers
 uv run python scripts/spike_instances.py --counts-per-degree 9.09   # does each take input, alone?
 uv run python scripts/train_rl.py runs/bc1/bc.pt --actors auto --out runs/rl1   # as many games as this PC carries
