@@ -164,10 +164,11 @@ them with `cache: "no-store"`. If a CDN sits in front, keep it from caching
 `/zombies/training/live/`.
 
 **The other gaming PCs** (the ones playing for the learner, `scripts/fleet_worker.py`)
-show up on the same page, one card each beside the training PC: live or offline,
-CPU, GPU and RAM, and what its worker is doing (waiting for a run, or playing N
-games for which run, segments sent, best round). Click a card for that machine in
-full. Each PC pushes only its own `live/machine-<id>.json`, never `runs.json` or
+show up on the same page, one collapsible panel each below the training PC's. The
+summary says live or offline, CPU, GPU and RAM, and what its worker is doing (waiting
+for a run, or playing N games for which run, segments sent, best round); open it for
+that machine in full. The training PC starts open, the others closed, and the page
+remembers what each reader opened. Each PC pushes only its own `live/machine-<id>.json`, never `runs.json` or
 `stream.json`; nothing is relayed through the learner, so a PC shows up between
 runs too. The id is the file name on the site (a-z, 0-9, `-`); the label is what
 the page calls it, and the host name is never published.

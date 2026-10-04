@@ -6,11 +6,11 @@
    The other gaming PCs, which play for it (rl/fleet.py), push live/machine-<id>.json each; the ids are baked
    into the page when it is built (window.LIVE_MACHINES), since a static site cannot be asked what is there. */
 sysview.opts.full = false;  // a public process list is names and load: no ids, users or command lines
-const pub = { at: null, every: 0, idle: false, runsAt: null, failed: false, selected: 0 };
+const pub = { at: null, every: 0, idle: false, runsAt: null, failed: false };
 const OFFLINE_AFTER_S = 30;  // past when the next report was due
 const liveOfflineAfter = (every) => OFFLINE_AFTER_S + (every || 0);
-const MACHINES = [{ id: null, file: "machine.json", data: null }].concat(
-  (window.LIVE_MACHINES || []).map((id) => ({ id, file: `machine-${id}.json`, data: null })));
+const MACHINES = [{ id: null, file: "machine.json", data: null, ui: null }].concat(
+  (window.LIVE_MACHINES || []).map((id) => ({ id, file: `machine-${id}.json`, data: null, ui: null })));
 const FLEET = MACHINES.length > 1;
 
 async function liveJSON(name) {
@@ -74,47 +74,78 @@ function liveMachineDoing(m) {
   }[f.state] || "Its worker is not running.";
 }
 
-function liveMachineCard(m, i) {
+// The summary line: who it is, live or not, its CPU, GPU and RAM, and what it is doing. Rebuilt every poll inside
+// the same <summary>, so a reader's focus and scroll stay where they were.
+function liveMachineCard(m) {
   const now = m.data && m.data.now;
   const cpu = now && now.cpu, mem = now && now.memory, gpu = now && now.gpus && now.gpus[0];
   const live = liveMachineUp(m);
-  return el("button", {
-    type: "button", class: "card machine-card", "aria-pressed": String(i === pub.selected), "data-index": i,
-    onclick: () => { pub.selected = i; renderFleet(); renderSelected(); },
-  }, [
+  return [
     el("div", { class: "top" }, [
       el("span", { class: "name", text: liveMachineName(m) }),
       el("span", { class: "role", text: m.id ? "plays games for it" : "trains the model" }),
       flag(m.data ? (live ? { level: "good", text: "OK live" } : { level: "warning", text: "! offline" }) : null),
     ]),
-    cpu ? meterRow("CPU", cpu.pct, fmtPct(cpu.pct), fmtC(cpu.temp)) : null,
-    gpu ? meterRow("GPU", gpu.util, fmtPct(gpu.util), fmtC(gpu.temp)) : null,
-    mem ? meterRow("RAM", mem.pct, fmtPct(mem.pct)) : null,
-    el("div", { class: "facts", text: liveMachineDoing(m) }),
-  ]);
+    m.data && !live && now ? el("div", { class: "stale-note",
+      text: `Last numbers from ${fmtClock(m.data.at)}, ${fmtDuration(liveMachineAge(m))} ago` }) : null,
+    cpu || gpu || mem ? el("div", { class: "meters" }, [
+      cpu ? meterRow("CPU", cpu.pct, fmtPct(cpu.pct), fmtC(cpu.temp)) : null,
+      gpu ? meterRow("GPU", gpu.util, fmtPct(gpu.util), fmtC(gpu.temp)) : null,
+      mem ? meterRow("RAM", mem.pct, fmtPct(mem.pct)) : null,
+    ]) : null,
+    m.data && !live && now ? null : el("div", { class: "facts", text: liveMachineDoing(m) }),  // the note says it
+  ];
 }
 
-function renderFleet() {
-  if (!FLEET) return;
-  const holder = document.getElementById("fleet");
-  // Rebuilt every poll: keep a keyboard reader's place on the card they were on.
-  const focused = holder.contains(document.activeElement) ? document.activeElement.dataset.index : null;
-  mount(holder, MACHINES.map(liveMachineCard));
-  if (focused != null) holder.querySelector(`[data-index="${focused}"]`)?.focus();
+// Which panels a reader opened or closed, kept in their browser; the training PC starts open, the others closed.
+const LIVE_OPEN_KEY = "zombies-live-open";
+function liveOpenState() {
+  try { return JSON.parse(localStorage.getItem(LIVE_OPEN_KEY)) || {}; } catch (e) { return {}; }
+}
+function liveRememberOpen(m) {
+  try {
+    const state = liveOpenState();
+    state[m.id || ""] = m.ui.details.open;
+    localStorage.setItem(LIVE_OPEN_KEY, JSON.stringify(state));
+  } catch (e) { /* private window: it just starts as the default next time */ }
 }
 
-function renderSelected() {
-  const m = MACHINES[pub.selected];
-  if (FLEET) document.getElementById("system-which").textContent = liveMachineName(m);
+function liveMachinePanel(m) {
+  const remembered = liveOpenState()[m.id || ""];
+  const ui = { summary: el("summary"), specs: el("p", { class: "specs" }), system: el("div"), view: null };
+  ui.details = el("details", { class: "card machine-panel" }, [
+    ui.summary, el("div", { class: "body" }, [ui.specs, ui.system])]);
+  ui.details.open = remembered ?? !m.id;
+  ui.details.addEventListener("toggle", () => { liveRememberOpen(m); liveRenderBody(m); });
+  m.ui = ui;
+  return ui.details;
+}
+
+// The machine in full, drawn only while its panel is open: a closed panel has no width to draw charts at.
+function liveRenderBody(m) {
+  const ui = m.ui;
+  if (!ui.details.open) return;
   if (!m.data || !m.data.now) {
-    mount(document.getElementById("system"), [el("p", { class: "empty-note", text: `Waiting for ${liveMachineName(m)} to report…` })]);
-    mount(document.getElementById("system-specs"), []);
-    sysview.built = false;
+    mount(ui.system, [el("p", { class: "empty-note", text: `Waiting for ${liveMachineName(m)} to report…` })]);
+    mount(ui.specs, []);
+    ui.view = null;
     return;
   }
-  if (!sysview.built) buildSystem();
-  sysview.history = m.data.history;  // the whole half hour each time: at 10 s a point it is small
-  renderSystem(m.data);
+  if (!ui.view) ui.view = buildSystemView(ui.system, ui.specs, sysview.opts);
+  // The whole half hour each time (at 10 s a point it is small). A machine with nothing training samples only
+  // when it reports, every few minutes, so it has no history to draw until something trains.
+  const sparse = m.data.every_s > OFFLINE_AFTER_S;
+  renderSystemView(ui.view, m.data, m.data.history, sparse ? "no history while nothing trains" : undefined);
+}
+
+function renderMachines() {
+  const holder = document.getElementById("machines");
+  if (!MACHINES[0].ui) mount(holder, MACHINES.map(liveMachinePanel));
+  for (const m of MACHINES) {
+    m.ui.details.classList.toggle("stale", !!m.data && !liveMachineUp(m));  // offline: its numbers fade
+    mount(m.ui.summary, liveMachineCard(m));
+    liveRenderBody(m);
+  }
 }
 
 function nowRunCard(t) {
@@ -172,16 +203,11 @@ async function pollLive() {
       await pollLiveRuns();
     }
   }
-  renderFleet();
-  if (MACHINES.some((x) => x.data) || FLEET) renderSelected();
+  renderMachines();
   liveStatus();
 }
 
-if (FLEET) {
-  document.getElementById("system-title").textContent = "The machines";
-  document.getElementById("fleet").hidden = false;
-  document.getElementById("system-which").hidden = false;
-}
+if (FLEET) document.getElementById("system-title").textContent = "The machines";
 document.getElementById("footer").textContent =
   (FLEET ? "Live from the gaming PCs it trains and plays on: each pushes its numbers"
          : "Live from the gaming PC it trains on: it pushes these numbers") +
