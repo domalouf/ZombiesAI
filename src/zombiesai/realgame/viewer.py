@@ -225,8 +225,9 @@ class _DamageNotify(ctypes.Structure):
 class AgentInset:
     """Draws the agent's view of a frame into the frame's top right corner (see the module docstring).
 
-    The crop box is found on the first frame and kept, as the capture keeps it. The inset is `share` of the
-    picture's width, rounded to a whole number of screen pixels per observation pixel."""
+    The crop is the whole picture, as the instances' capture takes it (`Instance.capture`: an instance has no
+    bars). The inset is `share` of the picture's width, rounded to a whole number of screen pixels per
+    observation pixel."""
 
     MARGIN = 32  # screen pixels between the inset's border and the picture's edges
     BORDER = 4
@@ -236,7 +237,7 @@ class AgentInset:
         self.h, self.w = fr.FRAME_H * self.scale, fr.FRAME_W * self.scale
         self.y = self.MARGIN + self.BORDER
         self.x = width - self.MARGIN - self.BORDER - self.w
-        self.box: tuple[int, int, int, int] | None = None
+        self.box = fr.crop_box(height, width, fr.NO_BARS, "crop")
 
     @property
     def bottom(self) -> int:
@@ -246,8 +247,6 @@ class AgentInset:
     def draw(self, frame: np.ndarray) -> np.ndarray:
         """`frame` (H, W, 4) BGRX with the inset drawn in: in place when the array allows it (a grab's shared
         segment, which the next grab overwrites anyway), else on a copy."""
-        if self.box is None:
-            self.box = fr.crop_box(*frame.shape[:2], fr.detect_bars(frame[..., fr.BGRX]), "crop")
         seen = fr.to_policy_frame(frame, self.box, "crop", channels=fr.BGRX)  # RGB, read before drawing
         out = frame if frame.flags.writeable else frame.copy()
         b = self.BORDER

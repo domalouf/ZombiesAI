@@ -154,6 +154,22 @@ def test_a_read_only_grab_is_drawn_on_a_copy():
     assert out is not frame and not frame.any() and out.any()
 
 
+def test_the_agent_view_is_the_whole_picture_even_when_the_first_frame_is_dark():
+    """As the instances' capture takes it: a dark room's edges are not letterbox bars."""
+    import numpy as np
+
+    from zombiesai.demos import frames as fr
+    from zombiesai.realgame.viewer import AgentInset
+
+    frame = np.full((1440, 2560, 4), 10, np.uint8)
+    frame[432:1008, 1280:2304, :3] = 120  # one lit doorway, right of centre
+    seen = fr.to_policy_frame(frame, (0, 0, 1440, 2560), channels=fr.BGRX)
+    inset = AgentInset(1440, 2560)
+    out = inset.draw(frame.copy())
+    drawn = out[inset.y:inset.y + inset.h, inset.x:inset.x + inset.w, 2::-1]
+    assert np.array_equal(drawn[::inset.scale, ::inset.scale], seen)
+
+
 def test_with_a_socket_mpv_listens_for_the_overlay_and_without_one_draws_nothing():
     assert "--input-ipc-server=/run/v.sock" in mpv_command(2560, 1440, "t", "/run/v.sock")
     assert "--osd-level=0" in mpv_command(2560, 1440, "t")

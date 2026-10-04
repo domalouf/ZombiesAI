@@ -1,3 +1,4 @@
+import shutil
 from dataclasses import replace
 
 import numpy as np
@@ -155,6 +156,13 @@ def test_parallel_training_runs_end_to_end_on_the_synthetic_stand_in(bc_checkpoi
     assert games and {"round_reached", "seconds", "shots", "hits", "step", "actor"} <= set(games[0])
     assert all(0 <= g["hits"] <= g["shots"] and g["seconds"] > 0 for g in games)
     assert BCAgent(checkpoint).act({"pixels": frame(9)}).shape == (len(spec.ACTION_NVEC),)
+    if shutil.which("ffmpeg"):  # the run's best game, filmed
+        from zombiesai.rl.best_episode import episode_rank, read_best
+
+        best = read_best(tmp_path / "run" / "best")
+        assert best is not None and (tmp_path / "run" / "best" / "best.mp4").stat().st_size > 0
+        # at least the best logged game: one that ends as the learner stops is filmed but never logged
+        assert tuple(best["rank"]) >= max(episode_rank(g) for g in games)
 
 
 def test_a_continued_run_keeps_its_anchor_on_the_original_prior(bc_checkpoint, tmp_path):

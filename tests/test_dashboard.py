@@ -71,6 +71,22 @@ def test_reads_a_ppo_run_and_names_its_progress(tmp_path):
     assert run["eta_s"] > run["elapsed_s"] * 200
 
 
+def test_best_round_is_the_furthest_single_game_not_the_average(tmp_path):
+    run_dir = write_run(tmp_path, "rl1", ppo_rows(5, env_metrics=True), {"env": "real-waw"})
+    assert read_run(run_dir)["stats"]["best_round"] is None  # no episodes.jsonl: nothing to say
+    games = run_dir / "episodes.jsonl"
+    games.write_text("".join(json.dumps({"episode": i, "round_reached": r}) + "\n" for i, r in enumerate([1, 3, 2])))
+    with open(games, "a") as f:
+        f.write('{"episode": 3, "round_rea')  # a trainer mid-write: not read until its line is whole
+    assert read_run(run_dir)["stats"]["best_round"] == 3
+    with open(games, "a") as f:
+        f.write('ched": 5}\n')
+    assert read_run(run_dir)["stats"]["best_round"] == 5  # the rest of that line, read on the next rebuild
+    games.unlink()
+    games.write_text(json.dumps({"round_reached": 2}) + "\n")  # a new file in its place is read afresh
+    assert read_run(run_dir)["stats"]["best_round"] == 2
+
+
 def test_a_half_written_last_line_is_skipped_not_fatal(tmp_path):
     run = write_run(tmp_path, "live", ppo_rows(12), {"env": "synthetic", "total_steps": 500_000})
     with (run / "metrics.jsonl").open("a") as f:
@@ -307,3 +323,19 @@ def test_the_site_shows_machine_numbers_never_their_names(tmp_path):
     assert public["runs"][0]["machines"]["names"] == {} and "DomPC" not in json.dumps(public)
     index = write_dashboard_site(payload, tmp_path / "site", "intro", [], "d")
     assert "DomPC" not in index.read_text() and "machinesSection" in index.read_text()
+
+
+
+def test_a_run_carries_its_best_game_without_saying_where_it_was_played(tmp_path):
+    run = write_run(tmp_path, "rl9", ppo_rows(5), {"env": "real-waw"})
+    assert read_run(run)["best_game"] is None  # nothing filmed yet
+    (run / "best").mkdir()
+    (run / "best" / "best.mp4").write_bytes(b"film")
+    (run / "best" / "best.json").write_text(json.dumps({
+        "rank": [4, 1210, 17], "round": 4, "points": 1210, "kills": 17, "host": "DomPC-mk3", "actor": 2,
+        "episode": 31, "recorded_unix": 1_790_000_000.0, "summary": {"seconds": 412.5, "reason": "down"}}))
+    game = public_payload(build_dashboard(tmp_path))["runs"][0]["best_game"]
+    assert {k: game[k] for k in ("round", "points", "kills", "seconds", "episode", "bytes")} == {
+        "round": 4, "points": 1210, "kills": 17, "seconds": 412.5, "episode": 31, "bytes": 4}
+    assert game["version"] == int((run / "best" / "best.mp4").stat().st_mtime)
+    assert "DomPC" not in json.dumps(game)

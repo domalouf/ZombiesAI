@@ -53,12 +53,18 @@ const liveMachineUp = (m) => {
 };
 const liveMachineName = (m) => (m.data && m.data.label) || m.id || "The training PC";
 
+/* The site shows the agent playing the real game alone (live_site.REAL_ENV). The training PC's publisher filters
+   too, but one still on older code pushes every run, so the page holds the line itself. */
+const REAL_ENV = "real-waw";
+const realRuns = (data) => Object.assign({}, data, { runs: (data.runs || []).filter((r) => r.env === REAL_ENV) });
+const realTraining = (list) => (list || []).filter((t) => t.env ? t.env === REAL_ENV : t.script === "train_rl.py");
+
 function liveMachineDoing(m) {
   const d = m.data;
   if (!d) return "Not reporting yet.";
   if (!liveMachineUp(m)) return `Last reported ${fmtDuration(liveMachineAge(m))} ago.`;
   if (d.role !== "worker") {
-    const runs = (d.training || []).map((t) => t.run).filter(Boolean);
+    const runs = realTraining(d.training).map((t) => t.run).filter(Boolean);
     return runs.length ? `Training ${runs.join(", ")}.` : "Not training right now.";
   }
   const f = d.fleet || {};
@@ -180,7 +186,7 @@ function renderTrainingNow(training) {
 
 async function pollLiveRuns() {
   try {
-    refreshData(await liveJSON("runs.json"));  // the page's own renderer: what the reader chose stays chosen
+    refreshData(realRuns(await liveJSON("runs.json")));  // the page's own renderer: what the reader chose stays chosen
   } catch (e) { /* the machine's file says when there is a newer one; next time */ }
 }
 
@@ -197,7 +203,7 @@ async function pollLive() {
     pub.at = m.at;
     pub.every = m.every_s || 0;
     pub.idle = !(m.training || []).length && pub.every > OFFLINE_AFTER_S;
-    renderTrainingNow(m.training);
+    renderTrainingNow(realTraining(m.training));
     if (m.runs_at && m.runs_at !== pub.runsAt) {
       pub.runsAt = m.runs_at;
       await pollLiveRuns();

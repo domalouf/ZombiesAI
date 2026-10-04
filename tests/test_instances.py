@@ -27,6 +27,40 @@ def fake_install(tmp_path: Path, client: str = "steam") -> FleetConfig:
                        template_prefix=str(template), client=client, plutonium_dir=str(pluto))
 
 
+def test_an_instances_capture_takes_the_whole_picture_however_dark_its_first_frame(tmp_path, monkeypatch):
+    """The game fills its X server, so the policy sees all of it: a dark first frame must not be read as
+    letterbox bars and crop the view for the rest of the run."""
+    import numpy as np
+
+    from zombiesai.demos import frames as fr
+    from zombiesai.demos import x11_capture
+
+    config = fake_install(tmp_path)
+    spec = specs(config)[0]
+    frame = np.full((spec.height, spec.width, 4), 10, np.uint8)
+    frame[spec.height // 3:spec.height * 2 // 3, spec.width // 2:spec.width * 9 // 10, :3] = 120  # one lit doorway
+
+    class Grabber:
+        def __init__(self, window=None, display=None, region=None):
+            pass
+
+        def grab_bgrx(self):
+            return frame
+
+        def describe(self):
+            return {"kind": "x11"}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(x11_capture, "X11Grabber", Grabber)
+    capture = Instance(config, spec, say=lambda m: None).capture()
+    policy = capture.read()
+    assert capture.describe()["box"] == (0, 0, spec.height, spec.width)
+    np.testing.assert_array_equal(policy, fr.to_policy_frame(frame, (0, 0, spec.height, spec.width),
+                                                             channels=fr.BGRX))
+
+
 def test_each_instance_gets_its_own_display_prefix_and_sink(tmp_path):
     config = fake_install(tmp_path)
     s = specs(config)
