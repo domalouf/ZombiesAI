@@ -38,6 +38,7 @@ def test_history_is_bucket_means_that_keep_gaps_as_gaps():
 
 def run(name, status="running", kind="ppo"):
     return {"name": name, "status": status, "kind": kind, "env": "real-waw", "color": "#3987e5", "progress": 0.5,
+            "updated": live_site.PUBLISHED_SINCE + 3600.0,
             "progress_text": "update 1 of 2", "eta_s": 60.0, "stats": {"sps": 40}, "headline": "return_mean",
             "series": {"return_mean": {"label": "Return", "last": -3.0, "best": -1.0, "trend": {"verdict": "flat"}}},
             "config": {"clips": "/home/dgm/clips/a.npz", "lr": 0.001}, "last_row": {"step": 5}}
@@ -259,3 +260,19 @@ def test_the_publisher_pushes_each_runs_best_film_and_then_links_it(tmp_path, mo
     pub.tick(now=110.0)
     assert len([c for c in calls if "--include=best/*.mp4" in c]) == 1  # an unchanged film is not pushed again
     assert any("best-game films on the site: rl4" in s for s in said)
+
+
+def test_runs_from_before_the_cutoff_are_off_the_site_and_off_the_stream(tmp_path, monkeypatch):
+    old = dict(run("rl3"), updated=live_site.PUBLISHED_SINCE - 1.0)
+    out = public_runs({"runs": [run("rl9"), old], "run_paths": {}}, [])
+    assert [r["name"] for r in out["runs"]] == ["rl9"]
+    monkeypatch.setattr(live_site, "build_payload", lambda roots: {
+        "runs": [old], "run_paths": {str(tmp_path / "runs" / "rl3"): "rl3"}})
+    monkeypatch.setattr(live_site, "run_roots", lambda repo: [])
+    monkeypatch.setattr(live_site, "live_trainers", lambda paths: [])
+    pub = LivePublisher(tmp_path, tmp_path / "out", None, sampler=FakeSampler(), say=lambda m: None, idle_every_s=0)
+    pub.tick(now=100.0)
+    assert json.loads((tmp_path / "out" / "runs.json").read_text())["runs"] == []
+    assert json.loads((tmp_path / "out" / "stream.json").read_text())["run"] is None
+    html = live_site.write_live_page(tmp_path, tmp_path / "site", "d").read_text()
+    assert f"window.LIVE_SINCE = {live_site.PUBLISHED_SINCE};" in html  # the page drops them from older publishers
