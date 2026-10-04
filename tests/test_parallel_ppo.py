@@ -96,7 +96,7 @@ def synthetic_segments(learner: Learner, n: int = 3, steps: int = 40, seed: int 
                       logp=np.zeros(steps, np.float32), rewards=rng.normal(0, 1, steps).astype(np.float32),
                       bad=rng.random(steps) < 0.1, terminated=k == 0)
         with torch.no_grad():
-            px, _, _ = learner._gather([seg], np.arange(steps), np.zeros(steps, int))
+            px, _, _, _ = learner._gather([seg], np.arange(steps), np.zeros(steps, int))
             dist = learner.net.dist(px)
             seg.logp = dist.log_prob(torch.from_numpy(actions)).numpy().astype(np.float32)
         out.append(seg)

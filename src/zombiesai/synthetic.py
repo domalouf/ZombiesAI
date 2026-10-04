@@ -32,6 +32,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from zombiesai import spec
+from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE
 from zombiesai.reward import REWARD_TERMS, RewardConfig, RewardShaper, StepSignals
 
 FRAME_H, FRAME_W = spec.PIXELS_SHAPE[:2]
@@ -359,8 +360,18 @@ class SyntheticWorld:
             out[:, -3:, :] += 2.0
         return out
 
+    def hud_view(self) -> np.ndarray:
+        """The HUD corner a policy with `use_hud_view` gets (demos/hud_crops.py), drawn the way the real one
+        shows a pistol's magazine: a row of one-pixel marks ending at column 35, loaded ones bright, spent ones
+        dim, spent from the left. Nothing else of the real corner is drawn."""
+        view = np.full(HUD_VIEW_SHAPE, 30, np.uint8)
+        size = self.config.mag_size
+        for k in range(size):
+            view[56:58, 35 - k] = 75 if k < self.mag else 40  # the real view's contrasts: ~+40 loaded, ~+10 spent
+        return view
+
     def observe(self) -> dict:
-        obs = {"pixels": self.render()}
+        obs = {"pixels": self.render(), "hud_view": self.hud_view()}
         if self.config.audio_shape is not None:
             obs["audio"], obs["audio_mask"] = self.hear(), 1.0
         return obs

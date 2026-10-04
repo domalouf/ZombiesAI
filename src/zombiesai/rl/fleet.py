@@ -69,6 +69,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 from zombiesai import spec
+from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE
 from zombiesai.rl.discovery import BEACON_INTERVAL_S, BEACON_PORT, Announcer, Beacon
 
 DEFAULT_PORT = 47860
@@ -116,7 +117,7 @@ class NameInUse(FleetError):
 # GIL-holding decode on the learner beside its update. So segments travel stored; `compress` (fleet_worker.py
 # --compress) deflates them for a PC on Wi-Fi, and the learner reads either. The weights stay a plain torch blob:
 # deflate saves 7.6% of the 10.6 MB for 310 ms, and they go out once per update.
-SEGMENT_ARRAYS = ("frames", "actions", "logp", "rewards", "bad", "meta", "audio", "audio_mask")
+SEGMENT_ARRAYS = ("frames", "actions", "logp", "rewards", "bad", "meta", "audio", "audio_mask", "hud_view")
 
 
 def encode_segment(segment, *, compress: bool = False) -> bytes:
@@ -130,6 +131,8 @@ def encode_segment(segment, *, compress: bool = False) -> bytes:
     if segment.audio is not None:
         arrays["audio"] = segment.audio
         arrays["audio_mask"] = segment.audio_mask
+    if getattr(segment, "hud_view", None) is not None:
+        arrays["hud_view"] = segment.hud_view
     buf = io.BytesIO()
     (np.savez_compressed if compress else np.savez)(buf, **arrays)
     return buf.getvalue()
@@ -148,11 +151,12 @@ def _check_archive(data: bytes) -> None:
         raise ValueError("a segment that unpacks past MAX_BODY")
 
 
-def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[int, ...] | None):
+def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[int, ...] | None,
+                   hud_view: bool = False):
     """The inverse of `encode_segment`, checked against the learner's policy: a malformed segment raises
     ValueError, never trains. `context` is the policy's frame history depth (the oldest offset), which the
     learner's index arithmetic assumes every segment carries; `audio_shape` is one step's audio feature, or None
-    for a policy that does not hear."""
+    for a policy that does not hear; `hud_view` is whether the policy looks at the HUD corner."""
     from zombiesai.rl.parallel_ppo import Segment
 
     _check_archive(data)
@@ -162,10 +166,11 @@ def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[
             raise ValueError("a segment's header is a JSON object")
         audio = z["audio"] if "audio" in z.files else None
         audio_mask = z["audio_mask"] if "audio_mask" in z.files else None
+        views = z["hud_view"] if "hud_view" in z.files else None
         seg = Segment(actor=actor, version=int(meta["version"]), context=int(meta["context"]), frames=z["frames"],
                       actions=z["actions"].astype(np.int64), logp=z["logp"].astype(np.float32),
                       rewards=z["rewards"].astype(np.float32), bad=z["bad"].astype(bool),
-                      terminated=bool(meta["terminated"]), audio=audio, audio_mask=audio_mask)
+                      terminated=bool(meta["terminated"]), audio=audio, audio_mask=audio_mask, hud_view=views)
     if meta.get("spec_version") != spec.SPEC_VERSION:
         raise ValueError(f"segment from spec {meta.get('spec_version')}, learner is on {spec.SPEC_VERSION}")
     if seg.context != context:
@@ -178,6 +183,13 @@ def decode_segment(data: bytes, actor: int, *, context: int, audio_shape: tuple[
         raise ValueError("actions, log-probs, rewards and bad flags disagree on the segment's length")
     if (seg.actions < 0).any() or (seg.actions >= np.asarray(spec.ACTION_NVEC)).any():
         raise ValueError("an action outside its head's range")
+    if not hud_view:
+        if seg.hud_view is not None:
+            raise ValueError("HUD views for a policy that does not look at the HUD corner")
+    elif seg.hud_view is None:
+        raise ValueError("no HUD views for a policy that looks at the HUD corner")
+    elif seg.hud_view.dtype != np.uint8 or seg.hud_view.shape != (n + 1, *HUD_VIEW_SHAPE):
+        raise ValueError(f"HUD views {seg.hud_view.dtype} {seg.hud_view.shape} for {n + 1} observations")
     if audio_shape is None:
         if seg.audio is not None or seg.audio_mask is not None:
             raise ValueError("audio for a policy that does not hear")
@@ -339,13 +351,14 @@ class FleetServer:
     hear), for `decode_segment` to check."""
 
     def __init__(self, address: str, token: str, *, config, run_dir: Path, settings: dict | None, context: int,
-                 audio_shape: tuple[int, ...] | None, inbox_size: int = 32, say=print,
+                 audio_shape: tuple[int, ...] | None, hud_view: bool = False, inbox_size: int = 32, say=print,
                  beacon_port: int | None = BEACON_PORT, beacon_targets: list[str] | None = None,
                  beacon_interval_s: float = BEACON_INTERVAL_S):
         if not token:
             raise ValueError(f"a fleet needs a shared token: set {TOKEN_ENV} on every machine")
         self.token, self.config, self.run_dir, self.say = token, config, Path(run_dir), say
         self.context, self.audio_shape = int(context), None if audio_shape is None else tuple(audio_shape)
+        self.hud_view = bool(hud_view)
         self.settings = settings  # None until a worker brings some, if this machine has no game
         self.provenance = provenance()
         self.inbox: queue_mod.Queue = queue_mod.Queue(maxsize=inbox_size)
@@ -595,7 +608,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 local = self._local_actor(int(self.headers.get("X-Actor", "-1")), worker)
                 segment = decode_segment(data, worker.first_actor + local, context=fleet.context,
-                                         audio_shape=fleet.audio_shape)
+                                         audio_shape=fleet.audio_shape, hud_view=fleet.hud_view)
             except (ValueError, KeyError, TypeError, OSError, EOFError, zipfile.BadZipFile) as error:
                 worker.refused += 1
                 self._reply(400, {"error": f"bad segment: {error}"})

@@ -26,6 +26,7 @@ class Segment:
     terminated: bool
     audio: np.ndarray | None = None  # (T + 1, *feature) float32, one per observation
     audio_mask: np.ndarray | None = None  # (T + 1,) float32
+    hud_view: np.ndarray | None = None  # (T + 1, 60, 80, 3) uint8, one per observation (demos/hud_crops.py)
 
     @property
     def n(self) -> int:

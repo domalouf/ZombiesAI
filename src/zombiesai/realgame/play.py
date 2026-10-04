@@ -71,6 +71,7 @@ from zombiesai.demos.clips import (
     FLAG_CLIP_START,
     ClipWriter,
 )
+from zombiesai.demos.hud_crops import hud_view
 from zombiesai.demos.inputs import InputConfig, InputFolder, Labels, actions_from, label_confidence
 
 KILL_KEY = "f9"  # WaW binds nothing to it; F8 is the recorder's mark key
@@ -392,7 +393,8 @@ def play(
             look = None
             if reason is None:
                 announce("acting")
-                obs = {"pixels": frame}
+                obs = {"pixels": frame,
+                       "hud_view": hud_view((getattr(capture, "last_hud", None) or {}).get("points_ammo"))}
                 if hearing is not None:
                     obs["audio"], obs["audio_mask"] = hearing.observe(t_frame)
                 action = np.asarray(agent.act(obs), dtype=np.int64)

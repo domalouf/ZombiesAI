@@ -25,6 +25,7 @@ from scipy.signal import lfilter
 from torch import nn
 
 from zombiesai import spec
+from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE, hud_view
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.encoders import precision
@@ -141,7 +142,8 @@ def calm_looks(net) -> None:
 
 
 def prepare_init(config: RLConfig, run_dir: str | Path) -> RLConfig:
-    """`init="fresh"`: no behavioural prior. Build a new pixel+audio policy, save it as an ordinary BC-format
+    """`init="fresh"`: no behavioural prior. Build a new pixel+audio policy that also looks at the HUD corner
+    (demos/hud_crops.py), save it as an ordinary BC-format
     checkpoint at `run_dir/init.pt` (so the actors, the fleet's workers and every BC tool load it as they load
     any start), and return the config pointing there -- with no KL anchor and no critic warm-up, since there is
     no cloned behaviour to protect. Any other config comes back unchanged."""
@@ -152,7 +154,7 @@ def prepare_init(config: RLConfig, run_dir: str | Path) -> RLConfig:
 
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    bc_config = bc.BCConfig(frame_offsets=FRESH_OFFSETS, use_audio=True, seed=config.seed)
+    bc_config = bc.BCConfig(frame_offsets=FRESH_OFFSETS, use_audio=True, use_hud_view=True, seed=config.seed)
     features = AudioFeatureConfig()
     torch.manual_seed(config.seed)
     path = run_dir / "init.pt"
@@ -172,6 +174,7 @@ class Staged:
     audio: torch.Tensor | None  # (observations, *feature) float32
     audio_mask: torch.Tensor | None  # (observations,) float32
     obs_counts: list[int]  # observations per segment, its steps plus the final one
+    hud_view: torch.Tensor | None = None  # (observations, 60, 80, 3) uint8
 
 
 class Learner:
@@ -217,15 +220,18 @@ class Learner:
             from zombiesai.demos.hearing import AudioFeatureConfig, feature_config
 
             self.audio_shape = (feature_config(self.meta.get("audio_features")) or AudioFeatureConfig()).shape
+        self.uses_hud_view = self.bc_config.use_hud_view
         self.scaler = RunningStd(config.gamma)
 
-    def _forward(self, net, pixels, audio=None, mask=None):
-        return net(pixels, None, audio, mask)
+    def _forward(self, net, pixels, audio=None, mask=None, hud=None):
+        # The frozen prior may predate the HUD corner: a network without that branch ignores `hud`.
+        return net(pixels, None, audio, mask, hud)
 
     def _gather(self, segments: list[Segment], rows: np.ndarray, which: np.ndarray):
-        """Stacked pixels (and audio) of rows (segment, t) -- t may be n for the final observation -- built on
-        the CPU, row by row. The plain statement of what `_stage` and `_minibatch` compute in bulk."""
-        pixels, audio, masks = [], [], []
+        """Stacked pixels (and audio, and the HUD corner) of rows (segment, t) -- t may be n for the final
+        observation -- built on the CPU, row by row. The plain statement of what `_stage` and `_minibatch`
+        compute in bulk."""
+        pixels, audio, masks, views = [], [], [], []
         for s_idx, t in zip(which, rows):
             seg = segments[s_idx]
             idx = seg.context + t - np.asarray(self.offsets)
@@ -233,11 +239,14 @@ class Learner:
             if self.uses_audio:
                 audio.append(seg.audio[t])
                 masks.append(seg.audio_mask[t])
+            if self.uses_hud_view:
+                views.append(seg.hud_view[t] if seg.hud_view is not None else hud_view(None))
         out = [torch.from_numpy(np.stack(pixels)).to(self.device)]
         if self.uses_audio:
             out += [torch.from_numpy(np.stack(audio)).to(self.device), torch.from_numpy(np.asarray(masks)).to(self.device)]
         else:
             out += [None, None]
+        out.append(torch.from_numpy(np.stack(views)).to(self.device) if self.uses_hud_view else None)
         return out
 
     def _stage(self, segments: list[Segment]) -> Staged:
@@ -264,16 +273,25 @@ class Learner:
                 audio[base : base + count] = torch.from_numpy(np.asarray(seg.audio, np.float32)) if heard else 0.0
                 mask[base : base + count] = torch.from_numpy(np.asarray(seg.audio_mask, np.float32)) if heard else 0.0
             audio, mask = audio.to(self.device, non_blocking=True), mask.to(self.device, non_blocking=True)
+        views = None
+        if self.uses_hud_view:
+            # One view per observation, like the audio; a segment without them (impossible past decode_segment,
+            # but an in-process actor's) sees an empty corner.
+            views = torch.empty((sum(obs_counts), *HUD_VIEW_SHAPE), dtype=torch.uint8, pin_memory=pinned)
+            for base, count, seg in zip(obs_base, obs_counts, segments):
+                views[base : base + count] = torch.from_numpy(seg.hud_view) if seg.hud_view is not None else 0
+            views = views.to(self.device, non_blocking=True)
         return Staged(frames=host.to(self.device, non_blocking=True), stacks=torch.from_numpy(stacks).to(self.device),
                       row_obs=torch.from_numpy(row_obs).to(self.device), audio=audio, audio_mask=mask,
-                      obs_counts=obs_counts)
+                      obs_counts=obs_counts, hud_view=views)
 
     def _minibatch(self, staged: Staged, obs: torch.Tensor):
-        """Stacked pixels (and audio) of the observations `obs`, gathered on the device."""
+        """Stacked pixels (and audio, and the HUD corner) of the observations `obs`, gathered on the device."""
         pixels = staged.frames[staged.stacks[obs]]
+        views = staged.hud_view[obs] if staged.hud_view is not None else None
         if staged.audio is None:
-            return pixels, None, None
-        return pixels, staged.audio[obs], staged.audio_mask[obs]
+            return pixels, None, None, views
+        return pixels, staged.audio[obs], staged.audio_mask[obs], views
 
     @torch.no_grad()
     def _evaluate(self, net, staged: Staged, obs: torch.Tensor):
@@ -328,11 +346,11 @@ class Learner:
                 if len(mb) < 2:
                     continue
                 rows = to_device(mb)
-                px, au, mk = self._minibatch(staged, staged.row_obs[rows])
+                px, au, mk, hd = self._minibatch(staged, staged.row_obs[rows])
                 target = ret_t[rows]
                 if warmup:
                     with torch.no_grad(), autocast():
-                        h = self.net.features(px, None, au, mk)
+                        h = self.net.features(px, None, au, mk, hd)
                     with autocast():
                         value = self.net.critic(h).squeeze(-1)
                     value_loss = 0.5 * ((value.float() - target) ** 2).mean()
@@ -343,7 +361,7 @@ class Learner:
                     stats["value_loss"].append(value_loss.detach())
                     continue
                 with autocast():
-                    logits, value, _ = self._forward(self.net, px, au, mk)
+                    logits, value, _ = self._forward(self.net, px, au, mk, hd)
                 logits, value = logits.float(), value.float()
                 dist = FactoredCategorical(logits, spec.ACTION_NVEC)
                 log_ratio = dist.log_prob(actions_t[rows]) - old_logp_t[rows]

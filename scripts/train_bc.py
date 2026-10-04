@@ -59,6 +59,9 @@ def main() -> None:
     parser.add_argument("--audio", action="store_true",
                         help="hear the game too: a stereo log-mel of the 0.5 s before each frame (clips "
                              "recorded without audio still train, with their audio masked out)")
+    parser.add_argument("--hud-view", action="store_true",
+                        help="also look at the HUD corner at a size its text survives (demos/hud_crops.py), cut "
+                             "from the clips' recorded HUD crops (clips without them train with an empty corner)")
     parser.add_argument("--audio-cache", type=Path, default=DEFAULT_CACHE,
                         help="where per-clip audio features are cached (never inside the clips)")
     parser.add_argument("--no-augment", action="store_true")
@@ -88,7 +91,7 @@ def main() -> None:
         use_prev_actions=args.prev_actions, epochs=args.epochs,
         batch_size=args.batch_size, lr=args.lr, hidden=args.hidden, min_confidence=args.min_confidence,
         correction_weight=args.correction_weight, augment=not args.no_augment, device=args.device, seed=args.seed,
-        use_audio=args.audio, val_fraction=args.val_fraction, focal_gamma=args.focal_gamma,
+        use_audio=args.audio, use_hud_view=args.hud_view, val_fraction=args.val_fraction, focal_gamma=args.focal_gamma,
         class_balance=args.class_balance, class_balance_power=args.class_balance_power,
     )
     if args.audio:

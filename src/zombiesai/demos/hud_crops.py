@@ -48,6 +48,15 @@ HUD_REGIONS: dict[str, tuple[float, float, float, float]] = {
 }
 HUD_SCALE = 0.5
 
+# The policy's own look at the HUD corner (`hud_view`): at 128x72 the points, the gun's name, the grenade count
+# and the magazine marks are a smear of a few pixels, so a policy built with `use_hud_view` also gets this --
+# the points_ammo crop from the points line down to the reserve, halved again. It is the screen's pixels, not
+# a reading of them: what the marks and words mean, the policy learns from reward. 60x80 keeps the name and the
+# digits legible and every magazine tick one pixel (a loaded tick ~40 levels above a spent one), for 14 KB a step.
+POINTS_AMMO_SHAPE = (135, 190)  # the points_ammo crop at 2560x1440 and HUD_SCALE: the boxes below are in it
+HUD_VIEW_BOX = (15, 135, 0, 160)  # rows, then columns, of that crop
+HUD_VIEW_SHAPE = (60, 80, 3)
+
 
 def region_box(height: int, width: int, frac: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
     """(left, top, width, height) in pixels, clipped to the frame."""
@@ -62,6 +71,18 @@ def region_box(height: int, width: int, frac: tuple[float, float, float, float])
 def crop_shape(height: int, width: int, frac, scale: float = HUD_SCALE) -> tuple[int, int, int]:
     _, _, w, h = region_box(height, width, frac)
     return max(1, int(round(h * scale))), max(1, int(round(w * scale))), 3
+
+
+def hud_view(points_ammo: np.ndarray | None) -> np.ndarray:
+    """A points_ammo crop (at any 16:9 resolution) -> the policy's (60, 80, 3) uint8 view of the HUD corner;
+    zeros when there is no crop (a clip recorded without one, a frame that could not be grabbed)."""
+    if points_ammo is None:
+        return np.zeros(HUD_VIEW_SHAPE, np.uint8)
+    crop = np.asarray(points_ammo)
+    if crop.shape[:2] != POINTS_AMMO_SHAPE:
+        crop = area_resize(crop, *POINTS_AMMO_SHAPE)
+    r0, r1, c0, c1 = HUD_VIEW_BOX
+    return area_resize(crop[r0:r1, c0:c1], *HUD_VIEW_SHAPE[:2])
 
 
 def crop_regions(
