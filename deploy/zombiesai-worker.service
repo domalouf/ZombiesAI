@@ -17,7 +17,8 @@ After=network-online.target
 [Service]
 EnvironmentFile=%h/.config/zombiesai/fleet.env
 WorkingDirectory=%h/Projects/ZombiesAI
-ExecStart=/usr/bin/uv run --no-sync python -u scripts/fleet_worker.py --actors auto --yield-to-games
+# The project's own venv, as `uv run --no-sync` would pick: uv is not always in /usr/bin (mise, ~/.local/bin).
+ExecStart=%h/Projects/ZombiesAI/.venv/bin/python -u scripts/fleet_worker.py --actors auto --yield-to-games
 # A refusal (another commit, other settings) exits; trying again every minute picks up a fix once it is made.
 Restart=always
 RestartSec=60
