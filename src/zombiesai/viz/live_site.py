@@ -54,6 +54,9 @@ LIVE_INTRO = (
 # The site shows the agent playing the real game and nothing else: the simulator and benchmark runs (nacht-state,
 # cartpole, lunarlander), synthetic rehearsals, and behavioural cloning and the IDM stay on the local dashboards.
 REAL_ENV = "real-waw"
+# Runs last written before this are not shown on the site: everything before it was trained on code that misread
+# the game (rounds it never reached among them). Their files stay where they are. Move it to retire a batch.
+PUBLISHED_SINCE = 1791138600  # 2026-10-04 12:30 MDT
 PROC_FIELDS = ("name", "cpu", "rss", "mem_pct", "threads")
 # A worker machine's id is its file name on the site and nothing else: short, lower case, no dots or slashes.
 MACHINE_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
@@ -152,11 +155,12 @@ def public_system(payload: dict, step_s: float = 10.0) -> dict:
 
 
 def live_runs(payload: dict, trainers: list[dict]) -> dict:
-    """supervise.build_payload's real-game runs (REAL_ENV) with "running" meaning a trainer is writing the run now,
-    and without run_paths -- absolute paths keyed by run, the one part of it that is purely local."""
+    """supervise.build_payload's real-game runs (REAL_ENV) written since PUBLISHED_SINCE, with "running" meaning a
+    trainer is writing the run now, and without run_paths -- absolute paths keyed by run, the one part of it that
+    is purely local."""
     writing = {t["run"] for t in trainers}
     runs = [dict(r, status="stopped") if r["status"] == "running" and r["name"] not in writing else r
-            for r in payload["runs"] if r.get("env") == REAL_ENV]
+            for r in payload["runs"] if r.get("env") == REAL_ENV and (r.get("updated") or 0) >= PUBLISHED_SINCE]
     return dict({k: v for k, v in payload.items() if k != "run_paths"}, runs=runs, live=True)
 
 
@@ -180,7 +184,7 @@ def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[
     return write_dashboard_site(
         runs, out_dir, LIVE_INTRO, SITE_LINKS, description,
         body_before=(here / "live_panel.html").read_text(),
-        script_after=f"<script>window.LIVE_MACHINES = {json.dumps(ids)};</script>\n"
+        script_after=f"<script>window.LIVE_MACHINES = {json.dumps(ids)}; window.LIVE_SINCE = {PUBLISHED_SINCE};</script>\n"
                      + (here / "system_view.html").read_text() + (here / "live_public.html").read_text(),
         reward=reward.describe(undetected=UNDETECTED_TERMS),
     )
@@ -280,7 +284,8 @@ class LivePublisher:
             self.run_paths = payload["run_paths"]
             trainers = live_trainers(self.run_paths)
             self.runs, self.runs_at = public_runs(payload, trainers), now
-            self.stream.choose(self.run_paths, trainers)
+            shown = {r["name"] for r in self.runs["runs"]}  # the stream follows only a run the site shows
+            self.stream.choose({p: n for p, n in self.run_paths.items() if n in shown}, trainers)
             self.stage_films()
             self.films_changed = True
         if self.films_changed:

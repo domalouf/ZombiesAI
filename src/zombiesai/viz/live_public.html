@@ -53,10 +53,12 @@ const liveMachineUp = (m) => {
 };
 const liveMachineName = (m) => (m.data && m.data.label) || m.id || "The training PC";
 
-/* The site shows the agent playing the real game alone (live_site.REAL_ENV). The training PC's publisher filters
-   too, but one still on older code pushes every run, so the page holds the line itself. */
+/* The site shows the agent playing the real game alone (live_site.REAL_ENV), and only runs written since
+   live_site.PUBLISHED_SINCE (window.LIVE_SINCE). The training PC's publisher filters too, but one still on older
+   code pushes every run, so the page holds the line itself. */
 const REAL_ENV = "real-waw";
-const realRuns = (data) => Object.assign({}, data, { runs: (data.runs || []).filter((r) => r.env === REAL_ENV) });
+const realRuns = (data) => Object.assign({}, data, { runs: (data.runs || []).filter((r) =>
+  r.env === REAL_ENV && (r.updated || 0) >= (window.LIVE_SINCE || 0)) });
 const realTraining = (list) => (list || []).filter((t) => t.env ? t.env === REAL_ENV : t.script === "train_rl.py");
 
 function liveMachineDoing(m) {

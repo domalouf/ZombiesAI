@@ -836,6 +836,10 @@ function table() {
 }
 
 function blankSlate() {
+  // The site (viz/live_site.py) after a batch of runs was retired: say so, not how to start a run on this PC.
+  if (DATA.live) return el("div", { class: "blank" }, [el("p", { text:
+    "No runs on the current code yet. Earlier runs were trained on code that misread the game, so they were " +
+    "taken down; the next run will show up here as soon as it starts training." })]);
   return el("div", { class: "blank" }, [
     el("p", { text: `No run in ${DATA.root} has written a metrics.jsonl yet. Start one and this page fills in:` }),
     el("pre", { text: [
