@@ -436,7 +436,10 @@ class RealGameEnv:
         bad = late or stale or not focused or console
         self.bad_steps += bad
         info = {"bad": bad, "points": tracked.points, "round": self.signals.round, "terms": result.terms,
-                "weapon": WEAPONS[tracked.weapon].key if tracked.weapon >= 0 else None, **ammo_info(reading)}
+                "weapon": WEAPONS[tracked.weapon].key if tracked.weapon >= 0 else None, **ammo_info(reading),
+                # this step's settled points change, for the moments the actor films (rl/moments.py)
+                "points_event": tracked.points_event, "points_delta": tracked.points_delta,
+                "repair": signals.repair_points > 0}
         if terminated or truncated:
             self.dispatcher.release_all()
             self._ended_by_death = terminated

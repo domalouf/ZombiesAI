@@ -38,6 +38,10 @@ distance from the BC policy. Every finished game is also a line of `episodes.jso
 lived, how many shots it fired and landed -- which the stream overlay is built from (viz/stream.py).
 `checkpoint.pt` is a BC-format checkpoint with an `rl` section, so everything that plays a BC policy --
 `play_real.py`, `eval_bc.py`, `watch.py` -- plays the fine-tuned one unchanged.
+
+The training clock (rl/clock.py) -- hours trained, games played, across every run continued from this one's
+checkpoint -- goes out with each set of weights and into each checkpoint, and every `snapshot_every_h` hours of
+it a copy of the checkpoint is kept as `snapshots/h<hours>.pt`, so the agent can be played as it was then.
 """
 
 import json
@@ -68,6 +72,7 @@ from zombiesai.rl.actors import (  # noqa: F401
     make_actor_env,
     make_real_env,
 )
+from zombiesai.rl.clock import RunClock, TrainingClock
 from zombiesai.rl.config import RLConfig, resolve_device  # noqa: F401
 from zombiesai.rl.learner import Learner, RunningStd, compute_gae, kl_to_reference, root_prior  # noqa: F401
 from zombiesai.rl.segments import FrameHistory, Segment, stack_indices  # noqa: F401
@@ -77,7 +82,7 @@ from zombiesai.rl.weights import WeightFollower, publish  # noqa: F401
 # What episodes.jsonl keeps of an actor's episode summary: the numbers, not the per-term breakdowns.
 EPISODE_FIELDS = ("actor", "episode", "reason", "return", "length", "seconds", "round_reached", "shots", "hits",
                   "points_gained", "kills", "end_points", "end_kills", "end_headshots", "bad_steps", "repair_share",
-                  "max_term_share")
+                  "max_term_share", "longest_without_kill_s")
 
 
 class MachineStats:
@@ -244,7 +249,11 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     np.random.seed(config.seed)
     learner = Learner(config, resolve_device(config.device))
     version = 0
-    publish(run_dir / "weights.pt", learner.net, version)
+    clock = RunClock(TrainingClock.from_dict(learner.clock_start), time.time())
+    snapshots = Snapshots(run_dir / "snapshots", config.snapshot_every_h, clock.start)
+    first_clock = clock.at(time.time(), 0, learner.updates)
+    publish(run_dir / "weights.pt", learner.net, version, first_clock.to_dict())
+    snapshots.maybe(learner, 0, first_clock, say)
     fleet = None
     if config.listen:
         from zombiesai.rl.fleet import FleetServer, play_settings
@@ -308,10 +317,12 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                     batch_n += payload.n
             elif kind == "episode":
                 episodes += 1
+                clock.game(payload.get("seconds"))
                 recent.append(payload)
                 if machines is not None:
                     machines.episode(i, payload)
                 episode_log.write(json.dumps({"t": round(time.time(), 1), "step": step, "version": version,
+                                              "clock": clock.at(time.time(), step, learner.updates).to_dict(),
                                               **{k: v for k, v in payload.items() if k in EPISODE_FIELDS}},
                                              default=_json_scalar) + "\n")
                 say(episode_line(i, payload))
@@ -332,7 +343,8 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 stats = learner.update(batch)
                 step += batch_n
                 version += 1
-                publish(run_dir / "weights.pt", learner.net, version)
+                now_clock = clock.at(time.time(), step, learner.updates)
+                publish(run_dir / "weights.pt", learner.net, version, now_clock.to_dict())
                 alive = sum(p.is_alive() for p in procs.values())
                 per_machine = None
                 if fleet is not None:
@@ -360,14 +372,16 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 _print_row(row, say)
                 batch, batch_n, lags = [], 0, []
                 if learner.updates % config.checkpoint_every == 0:
-                    learner.checkpoint(checkpoint, step, {"episodes": episodes})
+                    learner.checkpoint(checkpoint, step, {"episodes": episodes, "clock": now_clock.to_dict()})
+                snapshots.maybe(learner, step, now_clock, say)
     except KeyboardInterrupt:
         stopping.requested = True
     finally:
         # The checkpoint first: it is the run's one result, and nothing after this changes it.
         stopping.saving()
         stop.set()
-        learner.checkpoint(checkpoint, step, {"episodes": episodes})
+        learner.checkpoint(checkpoint, step,
+                           {"episodes": episodes, "clock": clock.at(time.time(), step, learner.updates).to_dict()})
         log.close()
         episode_log.close()
         if stopping.requested:
@@ -385,6 +399,32 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 p.terminate()
         stopping.uninstall()
     return checkpoint
+
+
+class Snapshots:
+    """A copy of the checkpoint every `every_h` hours of the training clock: `<dir>/h<hours>.pt`. The first
+    is the policy training starts from, when it starts from nothing trained yet."""
+
+    def __init__(self, directory: Path, every_h: float, start: TrainingClock):
+        self.dir, self.every_h = Path(directory), every_h
+        self.done = int(start.hours / every_h) if every_h > 0 else 0
+        self.first = every_h > 0 and start.train_s == 0
+
+    def path(self, clock: TrainingClock) -> Path:
+        return self.dir / f"h{clock.hours:07.2f}.pt"
+
+    def maybe(self, learner, step: int, clock: TrainingClock, say=print) -> Path | None:
+        if self.every_h <= 0:
+            return None
+        mark = int(clock.hours / self.every_h)
+        if not self.first and mark <= self.done:
+            return None
+        self.first, self.done = False, mark
+        self.dir.mkdir(parents=True, exist_ok=True)
+        path = self.path(clock)
+        learner.checkpoint(path, step, {"clock": clock.to_dict(), "snapshot": True})
+        say(f"  snapshot of the policy at {clock.label().lower()}: {path}")
+        return path
 
 
 def episode_line(actor, payload: dict) -> str:
