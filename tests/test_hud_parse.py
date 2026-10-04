@@ -321,6 +321,24 @@ def test_online_tracker_holds_the_round_through_a_jump_the_game_cannot_make():
     assert seen[-1] == 2  # the next round is still taken
 
 
+def test_online_tracker_holds_the_gun_while_its_name_is_faded_out():
+    from zombiesai.hud.parse import HudReading
+    from zombiesai.hud.track import HudTracker
+    from zombiesai.hud.weapons import WEAPON_INDEX
+
+    colt, kar = WEAPON_INDEX["colt"], WEAPON_INDEX["kar98k"]
+    tracker = HudTracker()
+    seq = [(colt, OK)] * 5 + [(-1, ABSENT)] * 30 + [(kar, OK)] + [(-1, UNREADABLE)] * 3 + [(kar, OK)] * 3
+    seen = []
+    for v, s in seq:
+        t = tracker.step(HudReading(weapon=v, weapon_status=s))
+        seen.append((t.weapon, t.weapon_changed))
+    assert seen[1] == (-1, False) and seen[2] == (colt, False)  # settles on the third read; no swap from nothing
+    assert all(w == colt for w, _ in seen[2:40])  # held through the fade; one kar98k read is not a swap yet
+    # unreadable steps do not break a run of reads: the third kar98k read settles it
+    assert seen[40] == (kar, True) and seen[41] == (kar, False) and sum(c for _, c in seen) == 1
+
+
 def test_lowres_round_reader_counts_tallies_in_policy_frames(crops):
     from zombiesai.demos.frames import area_resize
     from zombiesai.hud.lowres import find_offset, round_from_frames

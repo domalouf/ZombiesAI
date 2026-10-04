@@ -17,7 +17,8 @@ The per-frame reader (`hud/parse.py`) can be confidently wrong; the game's rules
   counts as 9 (and so on until the tenth stroke, which is visible, confirms it).
 - **Grenades** go down one at a time and come back at a round start (up to 4). **Magazine** goes down
   while the fire button is held (cross-checked against the recordings' input labels) and jumps up on a
-  reload or weapon swap. **Reserve** changes on reloads, ammo buys and weapon swaps.
+  reload or weapon swap. **Reserve** changes on reloads, ammo buys and weapon swaps. **Weapon** (its name)
+  changes only on a swap or a purchase, so a one-step change is a misread.
 
 `check_clip` runs all of it over one clip's parsed arrays and returns per-step consistency flags (the
 accuracy estimate) plus the events a summary is built from (`hud/summary.py`).
@@ -287,7 +288,9 @@ def check_clip(parsed: dict[str, np.ndarray], fire: np.ndarray | None = None, pl
     stats["round"]["implausible_changes"] = sum(e.kind == "implausible" for e in out.round_events)
     stats["round"]["blips"] = int(counter_blips(r, rok)[playing].sum())
 
-    for name in ("grenades", "reserve", "mag"):
+    for name in ("grenades", "reserve", "mag", "weapon"):
+        if name not in parsed:  # parsed before the weapon reader existed
+            continue
         v, ok = parsed[name], parsed[f"{name}_status"] == OK
         blips = counter_blips(v, ok)
         stats[name] = _rates(ok, ok & ~blips, playing)
@@ -327,6 +330,10 @@ class Tracked:
     fresh: bool = False  # this step's points read agreed with the settled value or a roll toward it
     suspect_streak: int = 0  # settled changes in a row that the rules call implausible
     hud_lost: bool = False  # the reader has lost the HUD: too many implausible changes in a row
+    # The held gun (index into hud/weapons.py WEAPONS), -1 until one settles. Its name fades with the ammo
+    # counter, so this is the last one read on SETTLE ok steps in a row, held until another one is.
+    weapon: int = -1
+    weapon_changed: bool = False
 
 
 class HudTracker:
@@ -349,11 +356,19 @@ class HudTracker:
         self._extra = 0
         self._flash_steps: list[int] = []
         self._flash_since_settle = False
+        self._weapon_cand, self._weapon_n = None, 0
         self.state = Tracked()
 
     def step(self, r) -> Tracked:
         s = self.state
         s.points_event, s.points_delta, s.round_changed, s.fresh = "", 0, False, False
+        s.weapon_changed = False
+        if r.weapon_status == OK:
+            self._weapon_n = self._weapon_n + 1 if r.weapon == self._weapon_cand else 1
+            self._weapon_cand = r.weapon
+            if self._weapon_n == SETTLE and r.weapon != s.weapon:
+                s.weapon_changed = s.weapon >= 0
+                s.weapon = r.weapon
         t = self._step
         self._step += 1
         if r.points_status == OK:

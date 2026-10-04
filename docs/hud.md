@@ -1,9 +1,13 @@
 # Reading the HUD (M4)
 
 `src/zombiesai/hud/` turns a recording's full-resolution HUD crops (`demos/hud_crops.py`) into numbers:
-points, round, grenades, reserve ammo and the magazine, each with a confidence and a status, then checks
-them against how the game can actually change them. It runs on anything with the crops: demos from
-`record_demo.py` and AI runs from `play_real.py`, raw or packed as video.
+points, round, grenades, reserve ammo, the magazine and the held weapon, each with a confidence and a
+status, then checks them against how the game can actually change them. It runs on anything with the crops:
+demos from `record_demo.py` and AI runs from `play_real.py`, raw or packed as video, and live in the env.
+
+What reads it: the reward (`realgame/hud_reward.py`, points and round), the env's per-step `info` (the
+weapon, magazine, reserve and grenades), the live viewer's labels and the clip summaries. The policy does not:
+it sees the 128x72 frames (and audio), where these counters are a few pixels of smear.
 
 ```
 uv run python scripts/parse_hud.py data/demos/demo_0002        # writes demo_0002/hud.npz + hud_summary.json
@@ -21,7 +25,9 @@ from the recordings themselves, not OCR'd (PLAN.md, "Perception"). Per text line
    opaque red brush stroke: ink is min(G, B), which is ~255 on a digit, ~3 on the brush and ~0 on the
    yellow "+N" popups that float over the points. Grenades and reserve ammo are light grey, or red when
    low, drawn straight on the scene: ink is R where G ≈ B (brown walls, blue stone and muzzle flash are
-   not), followed by a 5 px top-hat so a pale wall behind the counter is not ink.
+   not), followed by a 5 px top-hat so a pale wall behind the counter is not ink. An empty grenade count
+   is an orange red, ~(155, 35, 10), where G ≠ B; it counts as ink too, since G and B are both under 0.4 R,
+   which no brown or orange in Nacht's scene is.
 2. **Segment.** Columns with ink form runs, one per digit (the font leaves a gap). Runs shorter than a
    digit (tick marks, dashes, specks) are dropped; digits closer than 7 columns belong to one number.
    The points line is anchored: it must start at columns 41-48.
@@ -48,8 +54,21 @@ Round 11+ is drawn in numerals, which no recording shows yet -- they read as UNR
 
 **Magazine** is the row of marks left of the reserve: thin ticks two columns apart for most guns, dashes
 for the Kar98k and the shotguns, bright when loaded, dim when spent, spent from the left. It is the length
-of the chain of bright marks ending at column ~72. A chain that runs off the crop's left edge (the
-Kar98k's fifth dash, long box-gun magazines) is UNREADABLE.
+of the chain of bright marks ending at column ~72. A chain that runs off the crop's left edge is a lower
+bound: with the held gun known (below), it is reported as that many with `MAG_AT_LEAST` set, or as exact
+when the gun holds no more. A Kar98k shows three dashes and a sliver of the fourth, its fifth is off the
+crop, so a loaded one reads 4 with `MAG_AT_LEAST` (four or five rounds) and 3, 2, 1, 0 exactly. With the
+gun unknown, or more marks than it holds, the chain is UNREADABLE (long box-gun magazines).
+
+**Weapon** is the gun's name, drawn in white between the points and the grenade icon, right-aligned, and
+only while the ammo counter is (it fades with it). It is matched as a whole word: ink is the light, neutral
+text after the same 5 px top-hat, scaled to a peak of 1, compared with per-weapon templates in
+`hud/weapon_names.npz` (several per gun: faded, over different scenes) plus reject templates for scene that
+gets through the ink rule. Measured on 1,173 live frames: a name sits within 0.008 of its own weapon's
+templates, also when the templates come from other games, and 0.086+ from another weapon's; a pale wall
+with no name is 0.073+ from any. The cut is 0.04, so a gun with no template yet (a box gun no sample has
+shown) reads UNREADABLE, not as the nearest known one. The value is an index into `hud/weapons.py`
+`WEAPONS`, append-only, which also holds each gun's magazine size for the magazine reader.
 
 Statuses: `0` ok, `1` absent (nothing drawn: the ammo counter fades out a few seconds after the last shot,
 the round counter is blank between rounds, menus, black frames), `2` unreadable, `3` transition (round
@@ -69,8 +88,10 @@ only: the flash, count still valid). Values are -1 unless the status is ok or tr
 - **Grenades** go down by 1-2 and back up to ≤ 4 at a round start. **Reserve/mag**: one-step "blips"
   (a read that differs from both neighbours while they agree) are counted as misreads; magazine drops are
   cross-checked with the recorded fire button.
+- **Weapon** only changes on a swap or a buy, so a one-step change is a misread (counted as a blip).
 - `HudTracker` does the same step by step for a live loop (hold the last settled value, flag `hud_lost`
-  after 3 implausible changes in a row). It is not wired into `play_real.py` yet.
+  after 3 implausible changes in a row). It also holds the gun: the last weapon read on 3 ok steps in a
+  row, through the steps its name is faded out. The env uses it (`realgame/env.py`).
 
 ## Accuracy
 
@@ -95,10 +116,12 @@ approximate -- about 1 read in 300 is off by a few rounds for a step, on busy ba
 
 What it does not see: rounds past 10 (numerals: no examples yet), round 9 as distinct from 8 in a single
 frame, points behind a solid-white flash, the ammo counter over a wall as pale as its text (unreadable,
-~3% of visible steps), the Kar98k's magazine.
+~3% of visible steps), a loaded Kar98k's fourth round from its fifth, any gun's name before it has a template.
 
 Speed: 0.7 ms a step on one core for all fields (a 20-minute recording in ~13 s; ~1.1 ms with the
-packed-video decode), p99 0.8 ms a step live -- inside the plan's 3 ms budget.
+packed-video decode), p99 0.8 ms a step live -- inside the plan's 3 ms budget. The weapon name adds ~0.4 ms
+and reading the empty grenade count (once skipped as absent) ~0.2 ms: measured on a PC also running six games
+and training, where the points_ammo crop went from 1.1 to 1.7 ms a step, p99 2.5 ms.
 
 ## The summary (`hud_summary.json`)
 
@@ -145,3 +168,23 @@ uv run pytest -q tests/test_hud_parse.py
 Harvesting is deterministic (seeded k-means over the same clips and stride), so the committed labels
 rebuild the committed atlas. Other 16:9 resolutions work by area-resizing crops to the 1440p reference;
 only 1440p has been measured.
+
+### Adding a weapon
+
+The name templates only know the guns a sample has shown: the Colt M1911 and the Kar98k so far, from the
+agents' own games. Any other gun reads UNREADABLE until its name is harvested. Clips work as sources (the
+human demos have the box guns); so does a sample of the running fleet's games, taken without touching them:
+
+```
+uv run python scripts/sample_hud.py --minutes 30 --out data/hud_samples/live.npz
+uv run --with pillow python scripts/build_hud_atlas.py harvest-weapons data/hud_samples/live.npz \
+    data/demos/demo_0002 --out /tmp/weapons
+# look at /tmp/weapons/names.png: row k is cluster k (its centre, then members as the screen shows them);
+# /tmp/weapons/names.txt has the current templates' guess for each cluster
+# edit configs/hud/weapon_labels.json: one weapon key per cluster (hud/weapons.py WEAPONS; add the gun there
+# first, at the end, if it is missing), '?' for scene with no name, '-' to drop the cluster
+uv run python scripts/build_hud_atlas.py build-weapons /tmp/weapons configs/hud/weapon_labels.json
+uv run pytest -q tests/test_hud_parse.py
+```
+
+Raise `--k` when there are more guns than a few clusters each.

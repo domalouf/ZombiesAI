@@ -6,7 +6,7 @@
     uv run python scripts/parse_hud.py data/demos --dry-run           # summaries only, write nothing
     uv run python scripts/parse_hud.py data/demos --lowres --dry-run  # clips without crops: round only
 
-Per clip: hud.npz (per-step points, round, grenades, reserve and magazine with confidences and statuses,
+Per clip: hud.npz (per-step points, round, grenades, reserve, magazine and weapon with confidences and statuses,
 plus the temporally checked tracks) and hud_summary.json (games, highest round, score, points per minute,
 game overs, read and consistency rates). See docs/hud.md for what the numbers mean. The table at the end
 is the comparison across clips.

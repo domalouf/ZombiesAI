@@ -43,9 +43,21 @@ import numpy as np
 from zombiesai import spec
 from zombiesai.hud.parse import ABSENT, OK
 from zombiesai.hud.track import START_POINTS, HudTracker
+from zombiesai.hud.weapons import WEAPONS
 from zombiesai.realgame.hud_reward import HudSignals, SignalConfig
 from zombiesai.realgame.instances import NACHT
 from zombiesai.reward import REWARD_TERMS, RewardConfig, RewardShaper
+
+
+def ammo_info(reading) -> dict:
+    """This step's ammo reads for `info`: None where the HUD did not show them (faded out, unreadable).
+    `mag_at_least` is set when the magazine's marks run off the crop (a full Kar98k): `mag` is a floor."""
+    def ok(name):
+        return getattr(reading, name) if reading is not None and getattr(reading, f"{name}_status") == OK else None
+
+    mag = ok("mag")
+    return {"mag": mag, "mag_at_least": mag is not None and bool(reading.mag_flags), "reserve": ok("reserve"),
+            "grenades": ok("grenades")}
 
 
 # More marks than this gone between two good reads is a misread or a weapon swap, not a burst.
@@ -364,6 +376,7 @@ class RealGameEnv:
         if reading is None:
             # Nothing new read: carry the settled state, but no event is re-reported.
             tracked.points_event, tracked.points_delta, tracked.round_changed = "", 0, False
+            tracked.weapon_changed = False
         signals = self.signals.step(tracked, action)
         self._count_shots(reading, action)
         shown = self.downed is not None and self.downed()
@@ -400,7 +413,8 @@ class RealGameEnv:
         truncated = reason is not None and not terminated
         bad = late or stale or not focused or console
         self.bad_steps += bad
-        info = {"bad": bad, "points": tracked.points, "round": self.signals.round, "terms": result.terms}
+        info = {"bad": bad, "points": tracked.points, "round": self.signals.round, "terms": result.terms,
+                "weapon": WEAPONS[tracked.weapon].key if tracked.weapon >= 0 else None, **ammo_info(reading)}
         if terminated or truncated:
             self.dispatcher.release_all()
             self._ended_by_death = terminated

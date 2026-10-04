@@ -1,5 +1,7 @@
 """RealGameEnv end to end on a fake game: scripted HUD reads, a fake clock, a dispatcher that only records."""
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -82,6 +84,23 @@ def test_the_first_reset_waits_for_a_settled_500_without_typing():
     obs, info = env.reset()
     assert obs["pixels"].shape == spec.PIXELS_SHAPE
     assert typed == [] and game.reads >= 13  # ten blank reads, then 500 has to hold for three
+
+
+def test_info_carries_the_held_gun_and_this_steps_ammo():
+    from zombiesai.hud.parse import MAG_AT_LEAST, UNREADABLE
+    from zombiesai.hud.weapons import WEAPON_INDEX
+
+    env, game, _, _, _ = make_env([500] * 4)
+    env.reset()
+    reads = iter([dict(weapon=WEAPON_INDEX["kar98k"], weapon_status=OK, mag=4, mag_status=OK, mag_flags=MAG_AT_LEAST,
+                       reserve=50, reserve_status=OK, grenades=0, grenades_status=OK)] * 3
+                 + [dict(grenades_status=UNREADABLE)])
+    env.reader = lambda crops: replace(reader(crops), **next(reads))
+    infos = [env.step(IDLE)[4] for _ in range(4)]
+    assert infos[0]["weapon"] is None and infos[2]["weapon"] == "kar98k"  # settles on the third read
+    assert (infos[2]["mag"], infos[2]["mag_at_least"], infos[2]["reserve"], infos[2]["grenades"]) == (4, True, 50, 0)
+    assert infos[3]["weapon"] == "kar98k"  # held while the name is gone
+    assert (infos[3]["mag"], infos[3]["mag_at_least"], infos[3]["reserve"], infos[3]["grenades"]) == (None, False, None, None)
 
 
 def test_a_gain_pays_once_it_settles_and_a_death_terminates():

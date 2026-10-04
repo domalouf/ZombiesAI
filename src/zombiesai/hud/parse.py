@@ -1,4 +1,5 @@
-"""One step's HUD crops -> numbers: points, round, grenades, reserve ammo, magazine, each with a confidence.
+"""One step's HUD crops -> numbers: points, round, grenades, reserve ammo, magazine and the held weapon
+(hud/weapons.py), each with a confidence.
 
 This is the per-frame reader. It never looks at other steps; `hud/track.py` is where temporal consistency
 (plausible point deltas, the round only ever going up by one) accepts or rejects what it reads.
@@ -42,6 +43,7 @@ from zombiesai.hud.glyphs import (
     load_atlas,
     patch,
 )
+from zombiesai.hud.weapons import NAMES_PATH, WEAPONS, load_names, read_weapon
 
 OK, ABSENT, UNREADABLE, TRANSITION = 0, 1, 2, 3
 STATUS_NAMES = ("ok", "absent", "unreadable", "transition")
@@ -74,6 +76,7 @@ class NumberRead:
     status: int = ABSENT
     start: int = -1  # ink-map column the first digit starts at (for the ammo lines, where it varies)
     end: int = -1  # and the column after the last digit
+    flags: int = 0
 
 
 def _glyph_confidence(dist: np.ndarray, margin: np.ndarray) -> np.ndarray:
@@ -343,8 +346,11 @@ def read_round(crop: np.ndarray) -> RoundRead:
 # The magazine is drawn as a row of marks left of the reserve: thin ticks two columns apart for most guns,
 # dashes for the Kar98k and the shotguns. Loaded rounds are bright, spent ones dim, and spending goes from
 # the left, so the magazine is the count of bright marks. Their right end is fixed near column 73; a long
-# magazine (the Kar98k's fifth dash, a box gun's belt) runs off the crop's left edge, and then the count is
-# only a lower bound unless the leftmost visible mark is already spent.
+# magazine (the Kar98k's fourth and fifth dashes, a box gun's belt) runs off the crop's left edge, and then the
+# count is only a lower bound unless the leftmost visible mark is already spent. Knowing the gun helps: a
+# Kar98k shows three dashes and a sliver of the fourth, its fifth is off the crop, so four bright marks there
+# are four or five rounds -- reported as 4 with MAG_AT_LEAST, not as unreadable.
+MAG_AT_LEAST = 1  # flag: the marks run off the crop, so the magazine holds at least this many
 MAG_CORE = (128, 130)  # rows through the marks' bright core
 MAG_BG = ((124, 126), (132, 134))  # rows above and below them: the scene behind
 MAG_COLS = (0, 76)
@@ -358,8 +364,10 @@ MAG_PITCH = 2
 MAG_END = (69, 75)  # where the chain's right end lies (exclusive), whatever the gun: measured 71-72
 
 
-def read_mag(crop: np.ndarray) -> NumberRead:
-    """Bright magazine marks in a points_ammo crop (only meaningful while the ammo counter is drawn)."""
+def read_mag(crop: np.ndarray, capacity: int | None = None) -> NumberRead:
+    """Bright magazine marks in a points_ammo crop (only meaningful while the ammo counter is drawn).
+    `capacity` is the held gun's full magazine, when the weapon reader knows it: marks that run off the crop
+    are then a lower bound (MAG_AT_LEAST), or exact if as many as the gun holds are already visible."""
     x0, x1 = MAG_COLS
     lum = crop[:, x0:x1, 0].astype(np.float32)  # red: loaded marks are white, or red when ammo is low
     core = lum[MAG_CORE[0] : MAG_CORE[1]].mean(0)
@@ -391,17 +399,20 @@ def read_mag(crop: np.ndarray) -> NumberRead:
             break
         chain.append(m)
     lo = chain[-1][0]
-    if lo <= 1:  # runs off the crop's edge: more loaded rounds than can be seen
-        return NumberRead(status=UNREADABLE)
     # Ticks are counted by the chain's length at their fixed pitch, so a tick the peak finder missed in
     # the middle does not drop the count.
     n = len(chain) if max_gap == MAG_DASH_GAP else (chain[0][1] - 1 - lo) // MAG_PITCH + 1
+    flags = 0
+    if lo <= 1:  # runs off the crop's edge: there may be more loaded rounds than can be seen
+        if capacity is None or n > capacity:
+            return NumberRead(status=UNREADABLE)
+        flags = MAG_AT_LEAST if n < capacity else 0
     seg = slice(lo, MAG_END[1])
     ambiguous = np.count_nonzero((c[seg] >= MAG_AMBIGUOUS[0]) & (c[seg] < MAG_AMBIGUOUS[1]) & ~_near(bright, 1)[seg])
     conf = 1.0 / (1.0 + 0.5 * ambiguous)
     if conf < MIN_CONFIDENCE:
         return NumberRead(-1, conf, UNREADABLE, lo)
-    return NumberRead(int(n), conf, OK, lo)
+    return NumberRead(int(n), conf, OK, lo, flags=flags)
 
 
 def _runs(on: np.ndarray):
@@ -438,6 +449,10 @@ class HudReading:
     mag: int = -1
     mag_conf: float = 0.0
     mag_status: int = ABSENT
+    mag_flags: int = 0  # MAG_AT_LEAST: the marks run off the crop, the magazine holds at least `mag`
+    weapon: int = -1  # index into hud/weapons.py WEAPONS
+    weapon_conf: float = 0.0
+    weapon_status: int = ABSENT
 
     @classmethod
     def field_names(cls) -> list[str]:
@@ -447,10 +462,11 @@ class HudReading:
 class HudParser:
     """Reads HUD crops, one step at a time (`parse`) or a clip's worth (`parse_many`)."""
 
-    def __init__(self, atlas_path=ATLAS_PATH):
+    def __init__(self, atlas_path=ATLAS_PATH, names_path=NAMES_PATH):
         atlas = load_atlas(atlas_path)
         self.points_glyphs = atlas["points"]
         self.ammo_glyphs = atlas["ammo"]
+        self.weapon_names = load_names(names_path)
         _strokes(atlas_path)
 
     def parse(self, crops: dict[str, np.ndarray]) -> HudReading:
@@ -473,6 +489,10 @@ class HudParser:
                                band_of(crop, line))
         out.points, out.points_conf, out.points_status = p.value, p.confidence, p.status
 
+        w = read_weapon(crop, self.weapon_names)
+        out.weapon, out.weapon_conf, out.weapon_status = w.value, w.confidence, w.status
+        capacity = WEAPONS[w.value].mag if w.status == OK else None
+
         line = LINES["grenades"]
         inked = ink(band_of(crop, line), line.ink)
         g = _unless_washed_out(read_number(inked, line, self.ammo_glyphs), band_of(crop, line))
@@ -489,8 +509,8 @@ class HudParser:
             on = inked > 0.5
             px = band[on].astype(np.int16)
             out.reserve_low = bool(len(px) and np.median(px[:, 0] - px[:, 1]) > 80)
-            m = read_mag(crop)
-            out.mag, out.mag_conf, out.mag_status = m.value, m.confidence, m.status
+            m = read_mag(crop, capacity)
+            out.mag, out.mag_conf, out.mag_status, out.mag_flags = m.value, m.confidence, m.status, m.flags
         elif r.status == UNREADABLE:
             out.mag_status = UNREADABLE
 

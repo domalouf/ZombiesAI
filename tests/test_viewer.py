@@ -183,6 +183,20 @@ def test_the_hud_marks_say_what_the_parser_read_or_why_not():
     assert "reward reads: ?" in events and "round \u2013" in events
 
 
+def test_the_gun_label_says_what_is_held_and_how_much_is_left():
+    from zombiesai.hud.parse import MAG_AT_LEAST, HudReading
+    from zombiesai.hud.weapons import WEAPON_INDEX
+    from zombiesai.realgame.viewer import gun_text
+
+    colt = HudReading(weapon=WEAPON_INDEX["colt"], weapon_status=0, mag=6, mag_status=0, reserve=32,
+                      reserve_status=0, grenades=0, grenades_status=0)
+    assert gun_text(colt) == "Colt M1911 \u00b7 6/32 \u00b7 0 grenades"
+    kar = HudReading(weapon=WEAPON_INDEX["kar98k"], weapon_status=0, mag=4, mag_status=0, mag_flags=MAG_AT_LEAST,
+                     reserve=50, reserve_status=0, grenades_status=2)
+    assert gun_text(kar) == "Kar98k \u00b7 4+/50 \u00b7 ? grenades"
+    assert gun_text(HudReading()) == "\u2013 \u00b7 \u2013/\u2013 \u00b7 \u2013 grenades"
+
+
 def test_text_from_outside_cannot_open_an_ass_tag():
     from zombiesai.realgame.viewer import _ass
 

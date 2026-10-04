@@ -40,7 +40,7 @@ Linux is [`docs/linux.md`](./docs/linux.md).
 - `src/zombiesai/demos/` — learning from real gameplay: the demo recorder (X11
   capture, evdev input, game audio), video ingest, the inverse dynamics model,
   hearing, and behavioural cloning.
-- `src/zombiesai/hud/` — reading points, round, grenades and ammo off the HUD.
+- `src/zombiesai/hud/` — reading points, round, grenades, ammo and the held weapon off the HUD.
 - `src/zombiesai/realgame/` — the game as an environment: the agent's hands
   (uinput, and XTEST into one instance's X server), the instances themselves,
   the HUD reward, console and reset handling, and the live player.

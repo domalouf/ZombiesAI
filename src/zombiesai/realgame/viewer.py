@@ -339,6 +339,20 @@ def stats_panel(stats: dict | None, run: str | None, live: bool, height: int) ->
     return out
 
 
+def gun_text(reading) -> str:
+    """The gun, magazine/reserve and grenades the parser reads: "Colt M1911 · 6/32 · 2 grenades"."""
+    from zombiesai.hud.weapons import WEAPONS
+
+    if reading is None:
+        return "–"
+    gun = WEAPONS[reading.weapon].name if reading.weapon_status == 0 else STATUS_TEXT.get(reading.weapon_status, "?")
+    mag = (f"{reading.mag}+" if reading.mag_flags else str(reading.mag)) if reading.mag_status == 0 \
+        else STATUS_TEXT.get(reading.mag_status, "?")
+    reserve = str(reading.reserve) if reading.reserve_status == 0 else STATUS_TEXT.get(reading.reserve_status, "?")
+    grenades = str(reading.grenades) if reading.grenades_status == 0 else STATUS_TEXT.get(reading.grenades_status, "?")
+    return f"{gun} · {mag}/{reserve} · {grenades} grenades"
+
+
 def hud_marks(boxes: dict[str, tuple[int, int, int, int]], reading, height: int) -> list[str]:
     """The reward's HUD regions outlined, each with what the parser reads in it."""
     k = height / 1080
@@ -352,6 +366,7 @@ def hud_marks(boxes: dict[str, tuple[int, int, int, int]], reading, height: int)
         if name == "points_ammo":
             text = "reward reads: " + ("\u2013" if reading is None else value(reading.points, reading.points_status, " pts"))
             out.append(_text(left + w - 8 * k, top - 6 * k, 3, 18 * k, AMBER, text, bold=True))
+            out.append(_text(left + w - 8 * k, top - 30 * k, 3, 18 * k, AMBER, gun_text(reading), bold=True))
         elif name == "round":
             text = "round " + ("\u2013" if reading is None else value(reading.round, reading.round_status))
             out.append(_text(left + 8 * k, top - 6 * k, 1, 18 * k, AMBER, text, bold=True))
