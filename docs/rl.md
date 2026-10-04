@@ -160,7 +160,8 @@ scoreboard's numbers when they were read, else the HUD's -- and a tie keeps the 
 game's own picture at 720p and 15 fps (every other pixel of each 1440p grab, ~1 ms of the tick), encoded by
 ffmpeg on NVENC where there is one, else x264; about 18 MB a minute. A game cut short by stopping the run is
 not kept. A fleet's other PCs keep the best of their own games in their own copy of the run. `--no-record-best`
-turns it off (`rl/best_episode.py`).
+turns it off (`rl/best_episode.py`). The Training Room shows each real run's best game under "Best games":
+`publish_live.py` pushes the film to the site whenever it changes (`viz/live_site.py`).
 
 ## What the first real runs taught (2026-09-27)
 

@@ -139,6 +139,14 @@
   .chart .end-label { font: 600 12px var(--ui); fill: var(--chalk); }
   .chart .crosshair { stroke: var(--chalk-dim); stroke-width: 1; shape-rendering: crispEdges; }
   .empty-note { font-size: 13px; color: var(--chalk-faint); padding: 18px 0; }
+  /* auto-fill: one run's film keeps a column's width rather than stretching across the page */
+  .films { grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); }
+  .film { display: grid; gap: 10px; }
+  .film video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 3px; }
+  .film figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 13.5px; color: var(--chalk-dim); }
+  .film figcaption .who { display: inline-flex; align-items: center; gap: 7px; font: 700 15px/1.2 var(--ui); color: var(--chalk); }
+  .film figcaption .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  .film figcaption b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
   .section-note { margin: -4px 0 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 72ch; }
 
   .tip {
@@ -275,6 +283,9 @@ const SECTION_EXPLAIN = {
   gates: "Checks that the AI is winning the game, not gaming the scoring. Its reward comes from several sources; " +
     "if one source starts to dominate, it may have found a loophole instead of learning to play. Each red dashed " +
     "line is a limit the curve should stay under.",
+  films: "A recording of the single best game the AI has played in each run: the highest round it reached, with " +
+    "the most points and then the most kills breaking a tie. It is replaced whenever the AI beats it, so this is " +
+    "the best it has done so far, as it saw it.",
   hood: "Diagnostics for the training algorithm itself. They don't measure skill, but they warn early when " +
     "something is off: learning stalled, updates too large, or the computer running slowly.",
 };
@@ -340,6 +351,44 @@ function refreshData(next) {
   if (!groups.some((g) => g.key === state.group)) state.group = groups.length ? groups[0].key : null;
   for (const r of runs) if (!known.has(r.name)) state.visible.add(r.name);
   render();
+}
+
+/* -- best games -------------------------------------------------------------
+   Each run's best game, as its actors filmed it (rl/best_episode.py), where the page knows where the film is
+   (the live site: viz/live_site.py links it). The page rebuilds itself whenever new numbers arrive, so each
+   <video> is kept and moved into the new page rather than made again: a refresh never stops one playing, and a
+   better game's film takes over only once the old one is not being watched. */
+const films = new Map();
+function film(run) {
+  const game = run.best_game;
+  let video = films.get(run.name);
+  if (!video || (video.dataset.src !== game.video && (video.paused || video.ended))) {
+    video = el("video", { src: game.video, "data-src": game.video, controls: "", preload: "metadata", playsinline: "",
+                          "aria-label": `${run.name}: its best game, round ${game.round}` });
+    films.set(run.name, video);
+  }
+  return video;
+}
+
+function bestGames() {
+  const games = inGroup().filter((r) => r.best_game && r.best_game.video);
+  if (!games.length) return null;
+  return el("section", {}, [
+    el("h2", {}, [document.createTextNode("Best games"), explain(SECTION_EXPLAIN.films)]),
+    el("div", { class: "grid films" }, games.map((r) => {
+      const g = r.best_game;
+      const bits = [["Round", fmtInt(g.round)], ["Points", fmtInt(g.points)], ["Kills", fmtInt(g.kills)]];
+      if (g.seconds != null) bits.push(["Lasted", fmtDuration(g.seconds)]);
+      return el("figure", { class: "card film" }, [
+        film(r),
+        el("figcaption", {}, [
+          el("span", { class: "who" }, [el("span", { class: "key", style: `background:${r.color}` }), el("span", { text: r.name })]),
+          ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
+          g.recorded ? el("span", { text: "played " + fmtAgo(Math.max(0, Date.now() / 1000 - g.recorded)) }) : null,
+        ]),
+      ]);
+    })),
+  ]);
 }
 
 /* -- chart ------------------------------------------------------------------
@@ -805,6 +854,7 @@ function renderScoped() {
       chartCard("val.accuracy.mean_balanced", { big: true, hint: "mean per-class recall across the action heads, on held-out clips" }),
       chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
     ], SECTION_EXPLAIN.learning),
+    bestGames(),
     machinesSection(),
     section("Reward hacking gates (PLAN.md, M7 T1)", [
       chartCard("max_term_share_mean", { gate: { value: DATA.gates.max_term_share.limit, label: "gate 0.60" }, zero: true }),
