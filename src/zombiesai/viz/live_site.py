@@ -37,6 +37,8 @@ import threading
 import time
 from pathlib import Path
 
+from zombiesai import reward
+from zombiesai.realgame.hud_reward import UNDETECTED_TERMS
 from zombiesai.viz.dashboard import public_payload, write_dashboard_site
 from zombiesai.viz.stream import StreamFeed
 from zombiesai.viz.supervise import build_payload, live_trainers, run_roots
@@ -180,6 +182,7 @@ def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[
         body_before=(here / "live_panel.html").read_text(),
         script_after=f"<script>window.LIVE_MACHINES = {json.dumps(ids)};</script>\n"
                      + (here / "system_view.html").read_text() + (here / "live_public.html").read_text(),
+        reward=reward.describe(undetected=UNDETECTED_TERMS),
     )
 
 

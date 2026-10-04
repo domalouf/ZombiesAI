@@ -6,6 +6,8 @@ import time
 import webbrowser
 from pathlib import Path
 
+from zombiesai import reward
+from zombiesai.realgame.hud_reward import UNDETECTED_TERMS
 from zombiesai.viz.dashboard import build_dashboard, write_dashboard, write_dashboard_site
 from zombiesai.viz.live_site import write_live_page
 
@@ -75,6 +77,7 @@ def main() -> None:
             intro=SITE_INTRO,
             links=[("← domalouf.com", "/"), ("Live stream", "/zombies/live/"), ("Code on GitHub", REPO_URL)],
             description=SITE_DESCRIPTION,
+            reward=reward.describe(undetected=UNDETECTED_TERMS),
         )
         summarize(payload)
         print(f"site page: {index.resolve()}")

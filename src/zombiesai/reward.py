@@ -124,3 +124,35 @@ class RewardShaper:
         st.points_gained += gain_raw + repair_points
         st.repair_points += repair_points
         return RewardResult(reward, terms, gain_raw > c.gain_cap, reward != total)
+
+
+# What each term pays for, in words a visitor to the training page can read (viz/dashboard_template.html).
+TERM_EVENTS = {
+    "gain": "Points scored (hits and kills)",
+    "repair": "Rebuilding a barricade",
+    "round": "Surviving a round",
+    "door": "Opening a door or debris, first time each",
+    "wall_weapon": "Buying a wall weapon, first time each",
+    "ammo": "Rebuying ammo with the reserve under half",
+    "damage": "Taking a hit",
+    "death": "Going down (solo, so the game is over)",
+}
+
+
+def describe(config: RewardConfig | None = None, undetected: tuple[str, ...] = ()) -> dict:
+    """The reward as the training page shows it: each term's event, its value in game points and in reward, and
+    its cap -- read from the config, so the page cannot drift from what the agent is paid. `undetected` are terms
+    the backend cannot see yet, which always pay zero."""
+    c = config or RewardConfig()
+    points = {"gain": 100.0, "repair": 100.0 * c.repair_weight, "round": c.round_complete, "door": c.door_opened,
+              "wall_weapon": c.wall_weapon, "ammo": c.ammo_rebuy, "damage": c.damage_event, "death": c.death}
+    caps = {"gain": f"at most {c.gain_cap:g} points a step",
+            "repair": f"only the first {c.repair_points_cap_per_round:g} repair points a round count"}
+    return {
+        "points_scale": c.points_scale,
+        "clip": [c.clip_low, c.clip_high],
+        "terms": [{"term": t, "event": TERM_EVENTS[t], "points": points[t], "reward": points[t] / c.points_scale,
+                   "per": "per 100 points" if t in ("gain", "repair") else "each", "cap": caps.get(t),
+                   "detected": t not in undetected}
+                  for t in REWARD_TERMS],
+    }

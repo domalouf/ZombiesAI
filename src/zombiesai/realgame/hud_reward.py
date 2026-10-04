@@ -38,6 +38,8 @@ from zombiesai.reward import StepSignals
 KILL_MIN_POINTS = 50
 DOOR_PRICES = (1000,)
 WALL_WEAPON_PRICES = (200, 600, 1200)
+# The shaper's terms the HUD cannot see yet (see above): they stay zero on the real game.
+UNDETECTED_TERMS = ("ammo", "damage")
 USE = spec.BUTTONS.index("use")
 
 
