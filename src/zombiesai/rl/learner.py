@@ -121,6 +121,23 @@ def root_prior(path: str | Path) -> str:
 
 # The history a policy started from nothing gets: half a second, dense where motion is read.
 FRESH_OFFSETS = (0, 1, 2, 4, 8)
+# A policy started from nothing would pick every look bin alike: a mean 12 degrees a decision, ~175 degrees a
+# second of random jerking, flicks of 30 as often as no turn. Instead it starts with a turn of d degrees
+# exp(-|d| / scale) as likely as none: ~2 degrees a decision of yaw, mostly level pitch. Only the starting
+# point -- the bins are all still there and PPO moves the odds from here.
+FRESH_LOOK_SCALE_DEG = {spec.YAW: 4.0, spec.PITCH: 2.0}
+
+
+def calm_looks(net) -> None:
+    """Set the actor's yaw and pitch biases so small turns are the likely ones (FRESH_LOOK_SCALE_DEG). Its
+    weights start near zero (std 0.01), so the biases are the starting odds."""
+    bins = {spec.YAW: spec.YAW_BINS_DEG, spec.PITCH: spec.PITCH_BINS_DEG}
+    starts = np.concatenate([[0], np.cumsum(spec.ACTION_NVEC)])
+    with torch.no_grad():
+        for head, scale in FRESH_LOOK_SCALE_DEG.items():
+            logits = -np.abs(np.asarray(bins[head])) / scale
+            net.actor.bias[starts[head]:starts[head + 1]] = torch.as_tensor(logits - logits.max(),
+                                                                            dtype=net.actor.bias.dtype)
 
 
 def prepare_init(config: RLConfig, run_dir: str | Path) -> RLConfig:
@@ -139,7 +156,9 @@ def prepare_init(config: RLConfig, run_dir: str | Path) -> RLConfig:
     features = AudioFeatureConfig()
     torch.manual_seed(config.seed)
     path = run_dir / "init.pt"
-    bc.save(path, bc.build_net(bc_config, features), bc_config, 0, {}, {}, features)
+    net = bc.build_net(bc_config, features)
+    calm_looks(net)
+    bc.save(path, net, bc_config, 0, {}, {}, features)
     return replace(config, init=str(path), kl_coef=0.0, kl_min=0.0, critic_warmup_updates=0)
 
 

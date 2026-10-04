@@ -39,7 +39,12 @@ class RLConfig:
     checkpoint_every: int = 10
     # real env
     fleet_root: str = "runs/instances"
-    counts_per_degree: float = 9.09
+    # Mouse counts per degree of turn. None: worked out from the sensitivity and m_yaw the games play with
+    # (rl/actors.py), so a look bin turns the same number of degrees on every PC whatever its config says.
+    counts_per_degree: float | None = None
+    # Mouse motor time constant (s): a look sets a turn rate the mouse eases into, as a hand does, instead of a
+    # burst per decision. 0 sends each decision's turn as sub-moves inside its tick.
+    look_smoothing_s: float = 0.08
     bindings: str = "configs/waw_bindings.json"
     record_every: int = 0  # record every k-th episode of each actor as a clip (0: never)
     hear: bool = True  # a checkpoint trained with audio hears its own instance's sink

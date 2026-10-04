@@ -176,6 +176,7 @@ class ActionDispatcher:
         clock=time.monotonic,
         motor: bool = False,
         motor_time_constant_s: float = 0.08,
+        motor_dead_zone_deg_s: tuple[float, float] = (6.0, 2.25),
     ):
         self.sink = sink
         self.config = config or DispatchConfig()
@@ -184,7 +185,7 @@ class ActionDispatcher:
         self.lock = threading.Lock()
         self.motor = (
             MouseMotor(sink, self.config.counts_per_degree, self.lock, clock=clock,
-                       time_constant_s=motor_time_constant_s).start()
+                       time_constant_s=motor_time_constant_s, dead_zone_deg_s=motor_dead_zone_deg_s).start()
             if motor else None
         )
         self.codes = self.config.codes  # inverted once, not per key event on the hot path

@@ -37,7 +37,13 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
     bindings_path = Path(config.bindings)
     bindings = json.loads(bindings_path.read_text()) if bindings_path.exists() else dict(DEFAULT_BINDINGS)
     sink = instance.sink()
-    dispatcher = ActionDispatcher(sink, DispatchConfig(counts_per_degree=config.counts_per_degree, bindings=bindings))
+    cpd = counts_per_degree(config, say=lambda m: print(f"[actor {index}] {m}", flush=True))
+    # Sampled bins are whole turns the policy chose, so no dead zone: the motor's is for play_real's mean look,
+    # where it keeps a near-zero average from drifting the view, and here it would shave 2-degree turns by a fifth.
+    smoothing = config.look_smoothing_s
+    dispatcher = ActionDispatcher(sink, DispatchConfig(counts_per_degree=cpd, bindings=bindings),
+                                  motor=smoothing > 0, motor_time_constant_s=smoothing or 0.08,
+                                  motor_dead_zone_deg_s=(0.0, 0.0))
     hearing = None
     if audio_features is not None and config.hear:
         from zombiesai.demos.audio import PulseMonitorStream
@@ -62,6 +68,31 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
                        downed=lambda: scoreboard_shown((capture.last_hud or {}).get("scores")),
                        end_screen=lambda: read_end_screen(capture.grab()),
                        hearing=hearing, say=lambda m: print(f"[actor {index}] {m}", flush=True))
+
+
+# What --counts-per-degree defaulted to before it was derived: sensitivity 5 x m_yaw 0.022, the demos' settings.
+FALLBACK_COUNTS_PER_DEGREE = 9.09
+
+
+def counts_per_degree(config: RLConfig, say=print) -> float:
+    """Mouse counts per degree for this machine's games. The engine turns `sensitivity * m_yaw` degrees a
+    count, so derived from the config the games play with, a look bin means the same turn on every PC; the
+    learner already turns away a PC whose sensitivity differs (rl/fleet.py), so every PC derives the same
+    number. An explicit `counts_per_degree` (a calibration) wins, but a large gap from the config is said."""
+    from zombiesai.demos.game_settings import CPD_MISMATCH, implied_counts_per_degree
+    from zombiesai.rl.fleet import play_settings
+
+    settings = play_settings(config.fleet_root)
+    implied = implied_counts_per_degree(settings["dvars"]) if settings is not None else None
+    if config.counts_per_degree is not None:
+        if implied and abs(config.counts_per_degree / implied - 1.0) > CPD_MISMATCH:
+            say(f"counts_per_degree {config.counts_per_degree:g}, but the game's sensitivity implies "
+                f"{implied:.2f}: every turn will be {config.counts_per_degree / implied:.2f}x what the policy chose")
+        return config.counts_per_degree
+    if implied is None:
+        say(f"no sensitivity and m_yaw in the game's config: assuming {FALLBACK_COUNTS_PER_DEGREE} counts per degree")
+        return FALLBACK_COUNTS_PER_DEGREE
+    return implied
 
 
 def make_actor_env(config: RLConfig, index: int, audio_features=None):

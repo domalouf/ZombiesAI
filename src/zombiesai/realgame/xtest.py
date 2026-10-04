@@ -26,6 +26,7 @@ exactly the physical keys a uinput sink would -- the same bindings, the same lab
 import ctypes
 import ctypes.util
 import os
+import threading
 
 from zombiesai.realgame.uinput import code_for
 
@@ -96,6 +97,9 @@ class XTestSink:
     `focus(window)` hands a window the server's input focus. Nothing else in a private server would, and Wine
     only treats a window as the foreground -- the one DirectInput delivers to -- once the server says it has
     focus.
+
+    One lock guards the connection: Xlib is not thread-safe without XInitThreads, and an RL actor's mouse motor
+    sends from its own thread while the decision loop checks focus and types into the console.
     """
 
     def __init__(self, display: str, *, lib=None):
@@ -110,40 +114,46 @@ class XTestSink:
             self.dpy = None
             raise XTestError(f"X display {display} has no XTEST extension")
         self.events = 0
+        self._lock = threading.RLock()
 
     def key(self, code: str, down: bool, t: float = 0.0) -> None:
         name = code.lower()
-        if name in BUTTONS:
-            self.lib.fake_button(self.dpy, BUTTONS[name], 1 if down else 0, CURRENT_TIME)
-        elif name in WHEEL:
-            if down:  # a notch is a click, not a hold: the release half is sent with it
-                self.lib.fake_button(self.dpy, WHEEL[name], 1, CURRENT_TIME)
-                self.lib.fake_button(self.dpy, WHEEL[name], 0, CURRENT_TIME)
-        else:
-            self.lib.fake_key(self.dpy, x_keycode(name), 1 if down else 0, CURRENT_TIME)
-        self.events += 1
+        with self._lock:
+            if name in BUTTONS:
+                self.lib.fake_button(self.dpy, BUTTONS[name], 1 if down else 0, CURRENT_TIME)
+            elif name in WHEEL:
+                if down:  # a notch is a click, not a hold: the release half is sent with it
+                    self.lib.fake_button(self.dpy, WHEEL[name], 1, CURRENT_TIME)
+                    self.lib.fake_button(self.dpy, WHEEL[name], 0, CURRENT_TIME)
+            else:
+                self.lib.fake_key(self.dpy, x_keycode(name), 1 if down else 0, CURRENT_TIME)
+            self.events += 1
 
     def move(self, dx: int, dy: int, t: float = 0.0) -> None:
         if dx or dy:
-            self.lib.fake_relative_motion(self.dpy, int(dx), int(dy), CURRENT_TIME)
-            self.events += 1
+            with self._lock:
+                self.lib.fake_relative_motion(self.dpy, int(dx), int(dy), CURRENT_TIME)
+                self.events += 1
 
     def sync(self) -> None:
-        self.lib.flush(self.dpy)
+        with self._lock:
+            self.lib.flush(self.dpy)
 
     def focused_window(self) -> int:
         window, revert = ctypes.c_ulong(), ctypes.c_int()
-        self.lib.get_input_focus(self.dpy, ctypes.byref(window), ctypes.byref(revert))
+        with self._lock:
+            self.lib.get_input_focus(self.dpy, ctypes.byref(window), ctypes.byref(revert))
         return int(window.value)
 
     def focus(self, window: int) -> bool:
         """Give `window` the input focus if it does not have it. True when it had to be moved."""
-        if self.focused_window() == window:
-            return False
-        self.lib.raise_window(self.dpy, window)
-        self.lib.set_input_focus(self.dpy, window, REVERT_TO_PARENT, CURRENT_TIME)
-        self.lib.sync(self.dpy, 0)
-        return True
+        with self._lock:
+            if self.focused_window() == window:
+                return False
+            self.lib.raise_window(self.dpy, window)
+            self.lib.set_input_focus(self.dpy, window, REVERT_TO_PARENT, CURRENT_TIME)
+            self.lib.sync(self.dpy, 0)
+            return True
 
     def describe(self) -> dict:
         return {"kind": "xtest", "display": self.display_name}
