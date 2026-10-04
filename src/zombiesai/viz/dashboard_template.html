@@ -292,8 +292,10 @@ const CHART_EXPLAIN = {
     "can learn to farm them instead of fighting. Should stay under 0.25.",
   entropy: "How random the AI's choices are. It starts high (exploring) and should drift down as it settles on " +
     "what works. A crash to zero too early means it stopped trying new things.",
-  approx_kl: "How much the AI's behaviour changes in one update. Small and steady is healthy; big spikes mean " +
-    "updates are too large and learning can become unstable.",
+  approx_kl: "KL is short for Kullback-Leibler divergence, a standard measure of how different two probability " +
+    "distributions are. Here it compares the AI's choices before and after one update: how much its behaviour " +
+    "changed. \"Approx.\" because it is estimated from a sample of moves. Small and steady is healthy; big spikes " +
+    "mean updates are too large and learning can become unstable.",
   clipfrac: "How often an update hit PPO's safety limit on change size. A little is normal; a lot means the AI " +
     "is trying to change faster than allowed.",
   explained_variance: "How well the AI predicts the reward it's about to get. 1 is perfect, 0 is no better than " +
