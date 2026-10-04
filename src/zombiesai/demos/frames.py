@@ -26,10 +26,13 @@ from zombiesai import spec
 
 FRAME_H, FRAME_W = spec.PIXELS_SHAPE[:2]
 ASPECT = FRAME_W / FRAME_H
-# Below this max luminance a row or column is a letterbox bar, not dark gameplay. WaW's darkest interiors
-# still sit well above it; encoder ringing around a hard black bar sits just under.
+# Below this max luminance a row or column is a letterbox bar, not dark gameplay. Encoder ringing around a hard
+# black bar sits just under it -- and so, on one frame, can a dark corner of Nacht: a live 1440p frame has read
+# as 10 rows of bar above and 37 below. So bars are for footage of unknown framing, judged over many frames; a
+# picture known to fill its frame (the instances' own X servers) passes NO_BARS rather than guessing from one.
 BAR_LUMA = 18.0
 MIN_BAR_PX = 2
+NO_BARS = (0, 0, 0, 0)  # (top, bottom, left, right), as `detect_bars` returns them
 # Rec. 601 luma, the weighting every encoder in the chain already assumes.
 LUMA = np.array([0.299, 0.587, 0.114], dtype=np.float32)
 
