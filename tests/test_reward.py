@@ -75,3 +75,23 @@ def test_reset_clears_novelty_and_stats(shaper):
     shaper.reset()
     assert shaper(StepSignals(doors_opened=("help_door",))).reward == pytest.approx(3.0)
     assert shaper.stats.term_sums[T["door"]] == pytest.approx(3.0)
+
+
+def test_describe_matches_the_shaper():
+    from zombiesai.reward import (
+        REWARD_TERMS,
+        RewardConfig,
+        RewardShaper,
+        StepSignals,
+        describe,
+    )
+
+    table = describe(undetected=("damage",))
+    terms = {t["term"]: t for t in table["terms"]}
+    assert [t["term"] for t in table["terms"]] == list(REWARD_TERMS)
+    assert table["clip"] == [RewardConfig.clip_low, RewardConfig.clip_high]
+    assert not terms["damage"]["detected"] and terms["death"]["detected"]
+    # What the page says one round and one death pay is what the shaper pays.
+    assert RewardShaper()(StepSignals(rounds_completed=1)).reward == terms["round"]["reward"]
+    assert RewardShaper()(StepSignals(death=True)).reward == terms["death"]["reward"]
+    assert RewardShaper()(StepSignals(delta_points=100)).reward == terms["gain"]["reward"]
