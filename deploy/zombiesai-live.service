@@ -21,7 +21,8 @@ After=network-online.target
 Environment=ZOMBIES_LIVE_DEST=zombies-live:
 EnvironmentFile=-%h/.config/zombiesai/live.env
 WorkingDirectory=%h/Projects/ZombiesAI
-ExecStart=/usr/bin/uv run --no-sync python -u scripts/publish_live.py
+# The project's own venv, as `uv run --no-sync` would pick: uv is not always in /usr/bin (mise, ~/.local/bin).
+ExecStart=%h/Projects/ZombiesAI/.venv/bin/python -u scripts/publish_live.py
 Restart=always
 RestartSec=30
 Nice=10
