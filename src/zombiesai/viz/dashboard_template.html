@@ -595,10 +595,14 @@ function heroCard() {
   if (rounds.length) {
     const best = rounds.reduce((a, b) => (a.series.round_reached_mean.best >= b.series.round_reached_mean.best ? a : b));
     const s = best.series.round_reached_mean;
+    // The furthest one game got, which only runs that log their games one by one can say (episodes.jsonl).
+    const games = runs.filter((r) => r.stats.best_round != null);
+    const far = games.length ? games.reduce((a, b) => (a.stats.best_round >= b.stats.best_round ? a : b)) : null;
     return el("div", { class: "card hero" }, [
-      el("div", { class: "label", text: "Best round reached, averaged over 100 episodes" }),
+      el("div", { class: "label", text: "Highest average round, over 100 games in a row" }),
       el("div", { class: "value", text: s.best.toFixed(2) }),
-      el("div", { class: "sub", text: `${best.name} — now ${s.last.toFixed(2)}` }),
+      el("div", { class: "sub", text: `${best.name} — its last 100 games average round ${s.last.toFixed(2)}` }),
+      far ? el("div", { class: "sub", text: `Furthest single game: round ${far.stats.best_round} (${far.name})` }) : null,
     ]);
   }
   const withReturn = runs.filter((r) => r.series.return_mean);
@@ -711,7 +715,8 @@ function table() {
     ["Progress", (r) => r.progress_text],
     ["Return", (r) => (r.series.return_mean ? fmtValue(r.series.return_mean.last) : "--")],
     ["Best return", (r) => (r.series.return_mean ? fmtValue(r.series.return_mean.best) : "--")],
-    ["Round", (r) => (r.series.round_reached_mean ? r.series.round_reached_mean.last.toFixed(2) : "--")],
+    ["Avg round (last 100)", (r) => (r.series.round_reached_mean ? r.series.round_reached_mean.last.toFixed(2) : "--")],
+    ["Best round", (r) => (r.stats.best_round != null ? String(r.stats.best_round) : "--")],
     ["Val bal. acc.", (r) => {
       const s = r.stats["val.accuracy.mean_balanced"] || r.stats["val.mean_balanced"];
       return s ? s.last.toFixed(3) : "--";
@@ -796,7 +801,7 @@ function renderScoped() {
     filterRow(),
     section("Is it learning?", [
       chartCard("return_mean", { big: true, title: "Return", hint: "mean over the trailing 100 episodes — the one curve that answers the question" }),
-      chartCard("round_reached_mean", { big: true, title: "Round reached", hint: "how far into Nacht der Untoten it survives, mean of the last 100 games" }),
+      chartCard("round_reached_mean", { big: true, title: "Average round reached", hint: "how far into Nacht der Untoten it survives, mean of the last 100 games" }),
       chartCard("val.accuracy.mean_balanced", { big: true, hint: "mean per-class recall across the action heads, on held-out clips" }),
       chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
     ], SECTION_EXPLAIN.learning),
