@@ -46,6 +46,8 @@ import multiprocessing as mp
 import numbers
 import os
 import queue as queue_mod
+import signal
+import threading
 import time
 from collections import deque
 from dataclasses import asdict
@@ -147,6 +149,60 @@ class MachineStats:
         return out
 
 
+# How long the learner waits for its actors to stop before terminating them. An actor that just finished a game
+# may still be encoding it as the run's best film (rl/best_episode.py gives that 120 s), and a terminated actor
+# loses it; an actor that is not filming stops within a step.
+ACTOR_STOP_S = 150.0
+STOP_SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+class StopRequest:
+    """Ctrl-C, `kill` and a closed terminal, all as one request to stop: finish the step in hand, write the
+    checkpoint, stop the actors. Without this only Ctrl-C saved anything -- SIGTERM and SIGHUP killed the learner
+    where it stood, and a second Ctrl-C while it was saving stopped the save.
+
+    The first signal sets `requested`, which the training loop checks every item. A second, while the loop still
+    runs, interrupts it at once (KeyboardInterrupt, as before) -- for a learner stuck inside an update. Once
+    shutting down (`saving()`), further signals only say so: the checkpoint is never cut short. Handlers can only
+    be installed from the main thread; anywhere else this is inert and KeyboardInterrupt still works."""
+
+    def __init__(self, say=print):
+        self.say = say
+        self.requested = False
+        self._saving = False
+        self._previous: dict[int, object] = {}
+
+    def install(self) -> "StopRequest":
+        if threading.current_thread() is threading.main_thread():
+            for sig in STOP_SIGNALS:
+                self._previous[sig] = signal.signal(sig, self._handle)
+        return self
+
+    def uninstall(self) -> None:
+        for sig, handler in self._previous.items():
+            signal.signal(sig, handler)
+        self._previous = {}
+
+    def saving(self) -> None:
+        self._saving = True
+
+    def tell(self, message: str) -> None:
+        try:  # a closed terminal (SIGHUP) cannot be printed to; that must not stop the save
+            self.say(message)
+        except OSError:
+            pass
+
+    def _handle(self, signum, frame) -> None:
+        name = signal.Signals(signum).name
+        if self._saving:
+            self.tell(f"{name}: still stopping -- the checkpoint is written, the actors are finishing")
+        elif self.requested:
+            raise KeyboardInterrupt
+        else:
+            self.requested = True
+            self.tell(f"{name}: stopping after this step (send it again to interrupt the step)")
+
+
 def _next_item(out, inbox, timeout_s: float = 1.0):
     """The next thing an actor sent: this machine's actors first (they drop a segment rather than wait, so they
     must not queue behind a busy network), then a remote worker's, already decoded in this process."""
@@ -236,8 +292,9 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     lags: list[int] = []
     start = time.time()
     checkpoint = run_dir / "checkpoint.pt"
+    stopping = StopRequest(say).install()
     try:
-        while step < config.total_steps:
+        while step < config.total_steps and not stopping.requested:
             kind, i, payload = _next_item(out, fleet.inbox if fleet is not None else None)
             if kind == "segment":
                 lag = version - payload.version
@@ -261,7 +318,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
             elif kind == "error":
                 say(f"  actor {i} failed:\n{payload}")
             for j, p in list(procs.items()):
-                if not p.is_alive() and not stop.is_set():
+                if not p.is_alive() and not stop.is_set() and not stopping.requested:
                     if restarts[j] >= config.actor_restarts:
                         say(f"  actor {j} has died {restarts[j]} times; leaving it down")
                         del procs[j]
@@ -305,12 +362,19 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                 if learner.updates % config.checkpoint_every == 0:
                     learner.checkpoint(checkpoint, step, {"episodes": episodes})
     except KeyboardInterrupt:
-        say("interrupted: stopping the actors")
+        stopping.requested = True
     finally:
+        # The checkpoint first: it is the run's one result, and nothing after this changes it.
+        stopping.saving()
         stop.set()
+        learner.checkpoint(checkpoint, step, {"episodes": episodes})
+        log.close()
+        episode_log.close()
+        if stopping.requested:
+            stopping.tell(f"interrupted: checkpoint written ({checkpoint}); stopping the actors")
         if fleet is not None:
             fleet.close()  # the workers stop their games when they lose us
-        deadline = time.time() + 20
+        deadline = time.time() + ACTOR_STOP_S
         while any(p.is_alive() for p in procs.values()) and time.time() < deadline:
             try:  # keep draining so no actor blocks on a full queue while it shuts down
                 out.get(timeout=0.2)
@@ -319,9 +383,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
         for p in procs.values():
             if p.is_alive():
                 p.terminate()
-        log.close()
-        episode_log.close()
-        learner.checkpoint(checkpoint, step, {"episodes": episodes})
+        stopping.uninstall()
     return checkpoint
 
 

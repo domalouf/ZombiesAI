@@ -145,13 +145,20 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     writer = None
     best = BestEpisodeRecorder(run_dir, index, say=lambda m: print(f"[actor {index}] {m}", flush=True)) \
         if config.record_best else None
+    # A learner killed outright (SIGKILL, a crash) never sets `stop`, and its actors are re-parented: an actor
+    # whose parent changed stops as if told to, rather than play on for nobody with keys held in a live game.
+    parent = os.getppid()
+
+    def stopping() -> bool:
+        return stop.is_set() or os.getppid() != parent
+
     try:
         obs, _ = env.reset()
         history.reset(obs["pixels"])
         if best is not None:
             best.start(episode)
             best.add(_video_frame(env, obs))
-        while not stop.is_set():
+        while not stopping():
             version = follower.poll(net)
             if version < 0:
                 time.sleep(0.1)  # the learner has not published yet
@@ -203,7 +210,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     _offer(out, ("episode", index, {**info.get("episode", {}), "actor": index, "episode": episode}))
                     ended = True
                     break
-                if stop.is_set():
+                if stopping():
                     break
             if not actions:
                 break

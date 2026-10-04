@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Start, check and stop training on this PC: ./zai start | status | stop  (scripts/session.py; --help for more).
+#
+# Runs the checkout's own .venv python, or the main checkout's from a worktree without one, with this checkout's
+# src/ first -- not `uv run`, which would sync a venv the worktrees share.
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+python="$here/.venv/bin/python"
+if [[ ! -x "$python" ]]; then
+    main="$(git -C "$here" worktree list --porcelain | sed -n '1s/^worktree //p')"
+    python="$main/.venv/bin/python"
+fi
+if [[ ! -x "$python" ]]; then
+    echo "no .venv here or in the main checkout: run 'uv sync' in the main checkout first" >&2
+    exit 1
+fi
+export PYTHONPATH="$here/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$python" -u "$here/scripts/session.py" "$@"

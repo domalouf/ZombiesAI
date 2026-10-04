@@ -502,7 +502,8 @@ def launch_options(repo: Path, trainers: list[dict]) -> dict:
 
 
 def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, extra: str,
-              trainers: list[dict], *, settings: dict | None = None, env: str = "real") -> dict:
+              trainers: list[dict], *, settings: dict | None = None, env: str = "real",
+              origin: str = "the dashboard") -> dict:
     """Start `scripts/train_rl.py` in a tree, as a session of its own (the dashboard can stop and start again
     without taking the run with it), writing runs/<name>/ and printing to runs/<name>.log. Refuses what would
     fail or collide: a fleet with too few games up, a fleet another trainer is already playing, a name in use.
@@ -514,7 +515,7 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
         return {"error": "a run name is letters, digits, '-', '_' and '.', starting with a letter or digit"}
     if (tree / "runs" / name).exists():
         return {"error": f"runs/{name} already exists in {tree_label}"}
-    if init not in {c["path"] for c in checkpoints(tree)}:
+    if init != "fresh" and init not in {c["path"] for c in checkpoints(tree)}:
         return {"error": f"{init} is not a checkpoint in {tree_label}/runs"}
     if not 1 <= actors <= 16:
         return {"error": "between 1 and 16 games"}
@@ -551,7 +552,7 @@ def start_run(repo: Path, tree_label: str, init: str, actors: int, name: str, ex
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tree / "src"), env.get("PYTHONPATH")]))
     log = tree / "runs" / f"{name}.log"
     with open(log, "ab") as out:
-        out.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} started from the dashboard: "
+        out.write(f"# {time.strftime('%Y-%m-%d %H:%M:%S')} started from {origin}: "
                   f"{shlex.join(argv[1:])}\n".encode())
         out.flush()
         proc = subprocess.Popen(argv, cwd=tree, env=env, stdin=subprocess.DEVNULL, stdout=out,
