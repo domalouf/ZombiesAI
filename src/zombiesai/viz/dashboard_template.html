@@ -272,6 +272,9 @@ function explain(text) {
 const SECTION_EXPLAIN = {
   learning: "The headline curves. If training is working, these climb over time; flat or falling means the AI " +
     "isn't getting better at the game.",
+  gates: "Checks that the AI is winning the game, not gaming the scoring. Its reward comes from several sources; " +
+    "if one source starts to dominate, it may have found a loophole instead of learning to play. Each red dashed " +
+    "line is a limit the curve should stay under.",
   hood: "Diagnostics for the training algorithm itself. They don't measure skill, but they warn early when " +
     "something is off: learning stalled, updates too large, or the computer running slowly.",
 };
@@ -283,6 +286,10 @@ const CHART_EXPLAIN = {
     "never trained on. Higher is better; balanced so rare actions count as much as common ones.",
   "val.mean_balanced": "How well the model guesses which buttons were pressed between two video frames, on clips " +
     "it never trained on. Higher is better.",
+  max_term_share_mean: "The share of the AI's reward that comes from its single biggest source (points, rounds, " +
+    "purchases...). Should stay under 0.60: above it, the AI is likely farming one thing rather than playing well.",
+  repair_share_mean: "The share of points that come from rebuilding barricades. Repairs are easy points, so an AI " +
+    "can learn to farm them instead of fighting. Should stay under 0.25.",
   entropy: "How random the AI's choices are. It starts high (exploring) and should drift down as it settles on " +
     "what works. A crash to zero too early means it stopped trying new things.",
   approx_kl: "How much the AI's behaviour changes in one update. Small and steady is healthy; big spikes mean " +
@@ -795,7 +802,7 @@ function renderScoped() {
     section("Reward hacking gates (PLAN.md, M7 T1)", [
       chartCard("max_term_share_mean", { gate: { value: DATA.gates.max_term_share.limit, label: "gate 0.60" }, zero: true }),
       chartCard("repair_share_mean", { gate: { value: DATA.gates.repair_share.limit, label: "gate 0.25" }, zero: true }),
-    ]),
+    ], SECTION_EXPLAIN.gates),
     section("Under the hood", [
       chartCard("entropy"),
       chartCard("approx_kl"),
