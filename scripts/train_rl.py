@@ -13,7 +13,8 @@ actors follow) and checkpoint.pt, a BC-format policy that play_real.py and eval_
 
     uv run python scripts/play_real.py runs/rl1/checkpoint.pt --minutes 3
 
-Ctrl-C stops the actors (every key released) and writes the checkpoint.
+Ctrl-C (or SIGTERM, or closing its terminal) finishes the step in hand, writes the checkpoint, then stops the
+actors (every key released). `./zai start` and `./zai stop` (scripts/session.py) do all of this, games included.
 
 Other PCs' games join with --listen (docs/rl.md, "Several PCs"): each runs scripts/fleet_worker.py, and every
 machine has the same ZOMBIES_FLEET_TOKEN in its environment.
