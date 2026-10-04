@@ -122,6 +122,20 @@ def test_red_scene_over_the_round_counter_is_unreadable(crops, parser):
     assert parser.parse({"round": crop}).round_status == UNREADABLE
 
 
+def test_the_hurt_screen_red_wash_is_not_round_ten(parser):
+    """Measured on a live game going down in round 1: the scene ~(78, 1, 1), the one stroke ~(101, 1, 0). Every
+    stroke is tally red then, and the reader used to settle a confident round 10 on it."""
+    from zombiesai.hud.parse import _strokes, stroke_evidence
+
+    crop = np.empty((140, 160, 3), np.uint8)
+    crop[:] = (78, 1, 1)
+    crop.reshape(-1, 3)[_strokes().idx[0]] = (101, 1, 0)
+    reds, _ = stroke_evidence(crop)
+    assert (reds[~np.isnan(reds)] == 1).all()  # red alone says all ten strokes
+    r = parser.parse({"round": crop})
+    assert (r.round, r.round_status) == (-1, UNREADABLE)
+
+
 def test_popup_covering_a_digit_is_not_misread(crops, parser):
     crop = crops["points_ammo"][0].copy()  # 940
     crop[24:34, 60:68] = (255, 255, 0)  # a yellow "+N" over the last digit
@@ -294,6 +308,17 @@ def test_online_tracker_agrees_with_the_offline_checks():
     assert max(seen_rounds) == inferred.max() == 9 and seen_rounds[-1] == 1
     assert events[0] == ("gain", 560)  # the one-step 5555 never settled
     assert [k for k, _ in events][:3] == ["gain", "gain", "downed"]
+
+
+def test_online_tracker_holds_the_round_through_a_jump_the_game_cannot_make():
+    from zombiesai.hud.parse import HudReading
+    from zombiesai.hud.track import HudTracker
+
+    tracker = HudTracker()
+    seq = [(1, OK)] * 20 + [(10, OK)] * 40 + [(8, OK)] * 20 + [(1, OK)] * 10 + [(2, OK)] * 10
+    seen = [tracker.step(HudReading(round=v, round_status=s)).round for v, s in seq]
+    assert seen[19] == 1 and max(seen[:90]) == 1  # 1 -> 10 and 1 -> 8 are misreads: round 1 held
+    assert seen[-1] == 2  # the next round is still taken
 
 
 def test_lowres_round_reader_counts_tallies_in_policy_frames(crops):

@@ -394,14 +394,17 @@ class HudTracker:
             self._round_n = self._round_n + 1 if r.round == self._round_cand else 1
             self._round_cand = r.round
             if self._round_n == 5:
-                prev = self._round_settled
-                if r.round != prev:
-                    self._extra = 0
-                    s.round_changed = prev >= 0
-                elif r.round == 8 and self._flash_since_settle:
-                    self._extra += 1
-                    s.round_changed = True
-                self._round_settled = r.round
-                self._flash_since_settle = False
-                s.round = r.round + (self._extra if r.round == 8 else 0)
+                prev, cur = self._round_settled, s.round
+                # The moves round_track calls plausible: the next round, back to 1, or 8 -> flash -> 8. Any
+                # other jump (1 -> 10) is a misread, held like an implausible points change.
+                if prev < 0 or r.round in (prev, cur, cur + 1, 1):
+                    if r.round != prev:
+                        self._extra = 0
+                        s.round_changed = prev >= 0 and r.round != cur
+                    elif r.round == 8 and self._flash_since_settle:
+                        self._extra += 1
+                        s.round_changed = True
+                    self._round_settled = r.round
+                    self._flash_since_settle = False
+                    s.round = r.round + (self._extra if r.round == 8 else 0)
         return s
