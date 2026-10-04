@@ -133,6 +133,12 @@ memory, disks, network, the busiest processes by name), and every run, and says
 on it is opened to the network. Both files go through the same scrub as the
 site build, plus: no host name, no process ids, users or command lines.
 
+Each run's best game goes up too, as the video its actors kept
+(`live/best/<run>.mp4`), shown under "Best games" with its round, points and
+kills. A film is pushed when it changes, on its own so the 5 s reports never
+wait on it, and the page links it only once it is on the site. Long games make
+films of hundreds of MB, one per run.
+
 One-time setup, with the site on `lts`:
 
 ```sh

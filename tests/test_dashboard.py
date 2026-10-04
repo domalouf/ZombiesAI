@@ -307,3 +307,19 @@ def test_the_site_shows_machine_numbers_never_their_names(tmp_path):
     assert public["runs"][0]["machines"]["names"] == {} and "DomPC" not in json.dumps(public)
     index = write_dashboard_site(payload, tmp_path / "site", "intro", [], "d")
     assert "DomPC" not in index.read_text() and "machinesSection" in index.read_text()
+
+
+
+def test_a_run_carries_its_best_game_without_saying_where_it_was_played(tmp_path):
+    run = write_run(tmp_path, "rl9", ppo_rows(5), {"env": "real-waw"})
+    assert read_run(run)["best_game"] is None  # nothing filmed yet
+    (run / "best").mkdir()
+    (run / "best" / "best.mp4").write_bytes(b"film")
+    (run / "best" / "best.json").write_text(json.dumps({
+        "rank": [4, 1210, 17], "round": 4, "points": 1210, "kills": 17, "host": "DomPC-mk3", "actor": 2,
+        "episode": 31, "recorded_unix": 1_790_000_000.0, "summary": {"seconds": 412.5, "reason": "down"}}))
+    game = public_payload(build_dashboard(tmp_path))["runs"][0]["best_game"]
+    assert {k: game[k] for k in ("round", "points", "kills", "seconds", "episode", "bytes")} == {
+        "round": 4, "points": 1210, "kills": 17, "seconds": 412.5, "episode": 31, "bytes": 4}
+    assert game["version"] == int((run / "best" / "best.mp4").stat().st_mtime)
+    assert "DomPC" not in json.dumps(game)

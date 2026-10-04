@@ -287,6 +287,30 @@ def _elapsed(kind: str, rows: list[dict]) -> float | None:
     return _num(last.get("seconds"))
 
 
+def best_game(run_dir: Path) -> dict | None:
+    """The run's best game, as its actors filmed and kept it (rl/best_episode.py): what it scored, and `version`,
+    its film's mtime, which changes whenever a better game replaces it. Only the numbers: best.json also names the
+    host that played it, and the film's place on disk is the publisher's business (viz/live_site.py)."""
+    try:
+        record = json.loads((run_dir / "best" / "best.json").read_text())
+        film = (run_dir / "best" / "best.mp4").stat()
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    summary = record.get("summary") if isinstance(record.get("summary"), dict) else {}
+    return {
+        "round": _num(record.get("round")),
+        "points": _num(record.get("points")),
+        "kills": _num(record.get("kills")),
+        "seconds": _num(summary.get("seconds")),
+        "episode": _num(record.get("episode")),
+        "recorded": _num(record.get("recorded_unix")),
+        "version": int(film.st_mtime),
+        "bytes": film.st_size,
+    }
+
+
 def read_run(run_dir: Path, buckets: int = 160, stale_after: float = 600.0, now: float | None = None) -> dict | None:
     """One run's config, curves, headline numbers and verdicts. None if the directory holds no metrics."""
     metrics = run_dir / "metrics.jsonl"
@@ -358,6 +382,7 @@ def read_run(run_dir: Path, buckets: int = 160, stale_after: float = 600.0, now:
         "series": series,
         "last_row": rows[-1] if rows else {},
         "machines": machine_series(rows, x_key, buckets, fleet_names(run_dir)) if kind == "ppo" else None,
+        "best_game": best_game(run_dir) if kind == "ppo" else None,
     }
     run["stats"] = _stats(run)
     run["notes"] = _notes(run)

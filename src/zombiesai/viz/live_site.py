@@ -7,6 +7,12 @@ zombies/training/live/:
     runs.json     every 60 s  every run's curves: the payload the static training page is built from
     stream.json   every 5 s   the stream overlay's numbers and its page's details (viz/stream.py)
 
+and each real run's best game, as its actors filmed it (rl/best_episode.py):
+
+    best/<run>.mp4  when it changes  pushed on a thread of its own, since a long game's film is hundreds of MB and
+                                     the 5 s reports must not wait on it. runs.json links a run's film only once
+                                     that version of it is on the site, so the page never points at a missing one
+
 That is while something trains. With nothing training, the training PC only looks for a trainer every few
 seconds (a read of /proc) and reports every 5 minutes, its sampler asleep in between; a trainer starting, or the
 last one ending, is reported at once. machine.json and stream.json carry `every_s`, how soon the next report is
@@ -27,6 +33,7 @@ import os
 import re
 import shlex
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -54,6 +61,27 @@ WORKER_FIELDS = ("state", "run", "actors", "alive", "sent", "dropped", "version"
                  "best_round")
 WORKER_STALE_S = 30.0  # the worker rewrites its status every 5-10 s; older than this, it is not running
 WARMUP_S = 10.0  # an idle learner wakes its sampler this long before reporting: a sample to take rates from
+FILMS = "best"  # live/best/<run>.mp4: each run's best game
+
+
+def film_name(run: str) -> str:
+    """A run's best-game film on the site, in live/best/. The run's name is public already; a tree's prefix
+    ("wt/rl4") joins it with a dash."""
+    return re.sub(r"[^a-z0-9]+", "-", run.lower()).strip("-") + ".mp4"
+
+
+def with_films(runs: dict, films: dict[str, dict]) -> dict:
+    """runs.json with a run's best game the one whose film is on the site (`films`: run name -> its best_game as
+    it was pushed), linked to that film. A newer best still uploading is shown once it is there."""
+    out = []
+    for r in runs["runs"]:
+        game = films.get(r["name"])
+        if r.get("best_game") and game:
+            r = dict(r, best_game=dict(game, video=f"live/{FILMS}/{film_name(r['name'])}?v={game['version']}"))
+        elif r.get("best_game"):
+            r = dict(r, best_game=None)
+        out.append(r)
+    return dict(runs, runs=out)
 
 
 def machine_id(value: str) -> str:
@@ -144,8 +172,11 @@ def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[
     payload = build_payload(run_roots(repo))
     here = Path(__file__).parent
     ids = [machine_id(m) for m in machines]
+    runs = live_runs(payload, live_trainers(payload["run_paths"]))
+    # The publisher on this PC keeps the films on the site current, so the baked page links what is here.
+    runs = with_films(runs, {r["name"]: r["best_game"] for r in runs["runs"] if r.get("best_game")})
     return write_dashboard_site(
-        live_runs(payload, live_trainers(payload["run_paths"])), out_dir, LIVE_INTRO, SITE_LINKS, description,
+        runs, out_dir, LIVE_INTRO, SITE_LINKS, description,
         body_before=(here / "live_panel.html").read_text(),
         script_after=f"<script>window.LIVE_MACHINES = {json.dumps(ids)};</script>\n"
                      + (here / "system_view.html").read_text() + (here / "live_public.html").read_text(),
@@ -209,6 +240,12 @@ class LivePublisher:
                     f"-o ControlPath={shlex.quote(str(control))} -o ControlPersist=300")
         self.runs: dict | None = None
         self.runs_at = 0.0
+        self.runs_written_at = 0.0  # runs.json is rewritten between rebuilds when a film reaches the site
+        self.films: dict[str, tuple[Path, dict]] = {}  # run name -> (its best.mp4, its best_game), real runs only
+        self.films_pushed: dict[str, dict] = {}  # run name -> the best_game whose film is on the site
+        self.films_changed = False
+        self.films_failing: str | None = "not tried yet"
+        self._film_push: threading.Thread | None = None
         self.run_paths: dict[str, str] = {}  # a run's directory -> its public name, as of the last runs.json
         self.training = False  # whether the last report had anything training
         self.reported_at: float | None = None
@@ -241,11 +278,16 @@ class LivePublisher:
             trainers = live_trainers(self.run_paths)
             self.runs, self.runs_at = public_runs(payload, trainers), now
             self.stream.choose(self.run_paths, trainers)
-            _write(self.out_dir / "runs.json", self.runs)
+            self.stage_films()
+            self.films_changed = True
+        if self.films_changed:
+            self.films_changed = False
+            _write(self.out_dir / "runs.json", with_films(self.runs, dict(self.films_pushed)))
+            self.runs_written_at = now
         every_s = self.every_s if training or not self.idle_every_s else self.idle_every_s
         machine = public_system(self.sampler.payload())
         machine["at"], machine["every_s"] = now, every_s
-        machine["runs_at"] = self.runs_at
+        machine["runs_at"] = self.runs_written_at
         machine["training"] = training_now(trainers, self.runs)
         machine["label"], machine["role"] = self.label, "learner"
         _write(self.out_dir / "machine.json", machine)
@@ -257,6 +299,52 @@ class LivePublisher:
             self.sampler.pause()
         if self.dest:
             self.push()
+            self.push_films()
+
+    def stage_films(self) -> None:
+        """Link each real run's best.mp4 into the staging directory as best/<run>.mp4 (a link: the films are
+        large, and the staging directory is in RAM), and drop links to runs no longer shown."""
+        paths = {name: Path(path) for path, name in self.run_paths.items()}
+        self.films = {r["name"]: (paths[r["name"]] / "best" / "best.mp4", r["best_game"])
+                      for r in (self.runs or {}).get("runs", []) if r.get("best_game") and r["name"] in paths}
+        staged = self.out_dir / FILMS
+        staged.mkdir(exist_ok=True)
+        want = {film_name(name): source for name, (source, _) in self.films.items()}
+        for link in staged.iterdir():
+            if link.name not in want:
+                link.unlink(missing_ok=True)
+        for name, source in want.items():
+            link = staged / name
+            if not link.is_symlink() or Path(os.readlink(link)) != source:
+                link.unlink(missing_ok=True)
+                link.symlink_to(source)
+
+    def push_films(self) -> None:
+        """Start pushing the films whose best game changed since they were last pushed, unless a push is on."""
+        if self._film_push is not None and self._film_push.is_alive():
+            return
+        todo = {name: game for name, (_, game) in self.films.items() if self.films_pushed.get(name) != game}
+        if not todo:
+            return
+        self._film_push = threading.Thread(target=self._push_films, args=(todo,), name="film push", daemon=True)
+        self._film_push.start()
+
+    def _push_films(self, todo: dict[str, dict]) -> None:
+        # -L sends what each link points at. Only best/: the JSON is the 5 s push's.
+        argv = ["rsync", "-aL", "--timeout=60", "-e", self.ssh, f"--include={FILMS}/", f"--include={FILMS}/*.mp4",
+                "--exclude=*", f"{self.out_dir}/", self.dest]
+        try:
+            result = self.run(argv, capture_output=True, text=True, timeout=3600)
+            problem = None if result.returncode == 0 else (result.stderr.strip().splitlines() or ["rsync failed"])[-1]
+        except (OSError, subprocess.TimeoutExpired) as error:
+            problem = str(error)
+        if problem is None:
+            self.films_pushed.update(todo)
+            self.films_changed = True  # the next tick links them in runs.json
+        if problem != self.films_failing:
+            self.say(f"{time.strftime('%H:%M:%S')}  " + (f"best-game films failing: {problem}" if problem else
+                                                         f"best-game films on the site: {', '.join(sorted(todo))}"))
+            self.films_failing = problem
 
     def push(self) -> bool:
         files = [f"--include={worker_file(self.worker)}"] if self.worker else ["--include=*.json"]

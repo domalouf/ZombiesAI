@@ -214,3 +214,48 @@ def test_the_live_pages_scripts_never_declare_one_name_twice(tmp_path, monkeypat
     names = top_level_names(html)
     assert {"machineCard", "liveMachineCard", "runTile", "tile", "refreshData", "renderSystem"} <= set(names)
     assert [name for name, count in Counter(names).items() if count > 1] == []
+
+
+
+def test_a_runs_film_is_named_for_the_site_and_linked_only_once_it_is_there():
+    assert live_site.film_name("rl4") == "rl4.mp4" and live_site.film_name("wt/RL 4") == "wt-rl-4.mp4"
+    game = {"round": 3, "points": 900, "kills": 9, "version": 7}
+    runs = {"runs": [dict(run("rl4"), best_game=game), dict(run("rl3"), best_game=game), run("rl2")]}
+    linked = live_site.with_films(runs, {"rl4": dict(game, round=2, version=5)})
+    films = [r.get("best_game") for r in linked["runs"]]
+    # the game whose film is on the site, not a newer one still uploading; none for a run with none there yet
+    assert films == [dict(game, round=2, version=5, video="live/best/rl4.mp4?v=5"), None, None]
+
+
+def test_the_publisher_pushes_each_runs_best_film_and_then_links_it(tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "rl4"
+    (run_dir / "best").mkdir(parents=True)
+    (run_dir / "best" / "best.mp4").write_bytes(b"film")
+    game = {"round": 3, "points": 900, "kills": 9, "version": 7}
+    rl4 = dict(run("rl4"), best_game=game)
+    monkeypatch.setattr(live_site, "build_payload",
+                        lambda roots: {"runs": [rl4, run("rl3")], "run_paths": {str(run_dir): "rl4"}})
+    monkeypatch.setattr(live_site, "run_roots", lambda repo: [])
+    monkeypatch.setattr(live_site, "live_trainers", lambda paths: [])
+    calls, said = [], []
+
+    def fake_rsync(argv, **kw):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stderr="")
+
+    out = tmp_path / "out"
+    pub = LivePublisher(tmp_path, out, "lts:", sampler=FakeSampler(), run=fake_rsync, say=said.append, idle_every_s=0)
+    pub.tick(now=100.0)
+    pub._film_push.join(5)
+    assert (out / "best" / "rl4.mp4").resolve() == (run_dir / "best" / "best.mp4").resolve()
+    films = [c for c in calls if "--include=best/*.mp4" in c]
+    assert len(films) == 1 and films[0][:2] == ["rsync", "-aL"] and films[0][-2:] == [f"{out}/", "lts:"]
+    assert all("--include=*.json" not in c for c in films)
+    # pushed, but not linked in the runs.json of the tick that started the push ...
+    assert json.loads((out / "runs.json").read_text())["runs"][0]["best_game"] is None
+    pub.tick(now=105.0)  # ... linked in the next, and the page told to fetch runs.json again
+    assert json.loads((out / "runs.json").read_text())["runs"][0]["best_game"]["video"] == "live/best/rl4.mp4?v=7"
+    assert json.loads((out / "machine.json").read_text())["runs_at"] == 105.0
+    pub.tick(now=110.0)
+    assert len([c for c in calls if "--include=best/*.mp4" in c]) == 1  # an unchanged film is not pushed again
+    assert any("best-game films on the site: rl4" in s for s in said)
