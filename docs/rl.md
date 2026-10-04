@@ -209,14 +209,31 @@ found by watching a run go wrong, then fixed:
 ## Running it unattended
 
 ```sh
-uv run python scripts/instances.py up --n 4        # once; the games keep running between training runs
-setsid nohup uv run python -u scripts/train_rl.py runs/bc_real3/bc.pt --actors 4 --out runs/rlN \
-    > runs/rlN.log 2>&1 < /dev/null &              # survives the terminal closing
-tail -f runs/rlN.log                               # one line per PPO update, one per episode
-pkill -INT -f scripts/train_rl.py                  # stop: releases every key, writes checkpoint.pt
+./zai start                  # games up, then the newest real run continued as runs/rl<next>, detached
+tail -f runs/rlN.log         # one line per PPO update, one per episode (or ./zai status)
+./zai stop                   # checkpoint written, actors stopped (every key released), then everything closed
 ```
 
-To continue, pass the last run's `checkpoint.pt` as the first argument with a new `--out`: the update count
+`./zai` is `scripts/session.py` (`zombiesai/session.py`). `start` brings up the fleet's games (`--games N`
+to change how many), then starts `train_rl.py` the way the dashboard does: `python -u`, in a session of its own
+so closing the terminal leaves it running, printing to `runs/<run>.log`. It continues the newest real-game
+`checkpoint.pt` unless given `--from` (a checkpoint, or `fresh`), and passes anything after `--` to
+`train_rl.py`. It refuses to start while another run is already playing the games.
+
+`stop` sends SIGINT to every `train_rl.py` and `fleet_worker.py` on the PC and waits. The learner finishes the
+step it is on, writes `checkpoint.pt` before anything else, then gives its actors up to 150 s to stop (a game that
+just ended may still be encoding as the run's best film). If a trainer is still running after `--timeout`
+(300 s), stop kills it, leaving the last periodic checkpoint. Then it takes the games down with their X servers
+and sound sinks, and closes the viewers, the supervision dashboard, and anything of ours still left, such as
+an actor orphaned by a crash. It never touches the site's reporter (`zombiesai-live.service`), a BC
+training, or the desktop's own Xwayland. `--keep-games` stops only the trainer.
+
+The learner saves on SIGTERM and SIGHUP too, not only Ctrl-C, so `kill` and a closed terminal also leave a
+checkpoint. A second signal before the save interrupts the update in progress; once the save has started, further
+signals are ignored. An actor whose learner died without telling it (SIGKILL) notices that its parent changed and
+stops by itself.
+
+To continue (which `./zai start` does by default), pass the last run's `checkpoint.pt` as the first argument with a new `--out`: the update count
 (so no second critic warm-up), the KL weight and the KL anchor carry over -- the anchor is always the BC
 policy the chain started from (`rl/parallel_ppo.py: root_prior`), never the checkpoint being continued.
 

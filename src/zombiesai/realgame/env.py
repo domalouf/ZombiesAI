@@ -126,6 +126,11 @@ class ResetFailed(RuntimeError):
     """No fresh game after every console try and a relaunch: the instance needs a human (or a supervisor)."""
 
 
+class Stopped(Exception):
+    """`should_stop()` said so while a reset waited: the run is ending, and a reset can wait minutes (a map
+    load, a relaunch) -- the actor's stop must not."""
+
+
 class RealGameEnv:
     """`capture` reads frames and HUD crops (`read()`, `last_hud`, `last_stale`; `Instance.capture()`),
     `dispatcher` is an `ActionDispatcher` on this game's own input (`Instance.sink()`), `reader` turns crops
@@ -168,6 +173,7 @@ class RealGameEnv:
         self.pitch = 0.0  # degrees from level, as sent
         self.config = config or EnvConfig()
         self.clock, self.sleep, self.say = clock, sleep, say
+        self.should_stop = lambda: False  # the actor's stop: every wait in a reset raises Stopped once it is true
         self.tracker = HudTracker()
         self._hud_view = None  # the last good HUD-corner view, repeated while the grab is stale
         self.signals = HudSignals(self.config.signals)
@@ -245,6 +251,8 @@ class RealGameEnv:
         tries = relaunches = 0
         quick = self.config.quick_start_command is not None and self._needs_restart
         while obs is None:
+            if self.should_stop():
+                raise Stopped
             if tries == self.config.reset_attempts:
                 if self.restart is None or relaunches == self.config.max_relaunches:
                     raise ResetFailed(f"no fresh game after {tries} tries and {relaunches} relaunches")
@@ -321,9 +329,11 @@ class RealGameEnv:
             return False
         return self.console(command) is not False
 
-    def _pump_for(self, seconds: float) -> None:
+    def _pump_for(self, seconds: float, *, stoppable: bool = True) -> None:
         end = self.clock() + seconds
         while self.clock() < end:
+            if stoppable and self.should_stop():
+                raise Stopped
             self.dispatcher.pump_until(min(end, self.clock() + 0.1))
 
     def _await_fresh_game(self, timeout_s: float, command: str | None = None):
@@ -341,6 +351,8 @@ class RealGameEnv:
         next_press = self.clock() + self.config.start_key_every_s
         reloaded = pending is None
         while self.clock() < end:
+            if self.should_stop():
+                raise Stopped
             now = self.clock()
             if self.focus():
                 if pending is not None and now >= next_type:
@@ -446,7 +458,9 @@ class RealGameEnv:
             if self.clock() - start >= self.config.end_screen_s:
                 read = None
                 break
-            self._pump_for(self.config.end_screen_every_s)
+            # Not stoppable: a game that just ended keeps its scoreboard (a few seconds at most) even as the
+            # run stops.
+            self._pump_for(self.config.end_screen_every_s, stoppable=False)
         self._end_screen_s = self.clock() - start
         return read
 

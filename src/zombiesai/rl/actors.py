@@ -158,13 +158,24 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     writer = None
     best = BestEpisodeRecorder(run_dir, index, say=lambda m: print(f"[actor {index}] {m}", flush=True),
                                sound=_sound_stream(env, index)) if config.record_best else None
+    # A learner killed outright (SIGKILL, a crash) never sets `stop`, and its actors are re-parented: an actor
+    # whose parent changed stops as if told to, rather than play on for nobody with keys held in a live game.
+    parent = os.getppid()
+
+    def stopping() -> bool:
+        return stop.is_set() or os.getppid() != parent
+
+    from zombiesai.realgame.env import Stopped
+
+    if hasattr(env, "should_stop"):  # a reset can wait minutes for a map load or a relaunch; a stop cannot
+        env.should_stop = stopping
     try:
         obs, _ = env.reset()
         history.reset(obs["pixels"])
         if best is not None:
             best.start(episode)
             best.add(*_video_frame(env, obs))
-        while not stop.is_set():
+        while not stopping():
             version = follower.poll(net)
             if version < 0:
                 time.sleep(0.1)  # the learner has not published yet
@@ -218,7 +229,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     _offer(out, ("episode", index, {**info.get("episode", {}), "actor": index, "episode": episode}))
                     ended = True
                     break
-                if stop.is_set():
+                if stopping():
                     break
             if not actions:
                 break
@@ -245,6 +256,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     best.add(*_video_frame(env, obs))
                 if config.record_every and episode % config.record_every == 0:
                     writer = _episode_writer(run_dir, index, episode, env)
+    except Stopped:
+        pass  # told to stop while a reset waited for a fresh game: an ordinary stop, not a failure
     finally:
         if writer is not None:
             writer.close(summary={"ended": "actor stopped"})

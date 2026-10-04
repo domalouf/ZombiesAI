@@ -7,7 +7,7 @@ import pytest
 
 from zombiesai import spec
 from zombiesai.hud.parse import ABSENT, OK, HudReading
-from zombiesai.realgame.env import EnvConfig, RealGameEnv, ResetFailed
+from zombiesai.realgame.env import EnvConfig, RealGameEnv, ResetFailed, Stopped
 
 IDLE = spec.make_action()
 
@@ -192,6 +192,18 @@ def test_a_game_over_screen_still_showing_500_is_not_a_fresh_game():
     t0 = game.reads
     env.reset()
     assert typed == [config.quick_start_command] and game.reads - t0 >= 25 and env.resets["quick"] == 1
+
+
+def test_a_stop_ends_a_reset_that_is_waiting_for_a_game():
+    """A game stuck on a menu keeps a reset waiting minutes (every try, then a relaunch); stopping the run must
+    not wait for that. Seen on the real fleet: one stuck instance held `./zai stop` for the actors' full 150 s."""
+    relaunched = []
+    env, game, _, _, clock = make_env([None], restart=lambda: relaunched.append(1))
+    start = clock.t
+    env.should_stop = lambda: clock.t - start > 3.0
+    with pytest.raises(Stopped):
+        env.reset()
+    assert clock.t - start < 4.0 and not relaunched
 
 
 def test_no_way_to_relaunch_means_the_reset_fails_loudly():
