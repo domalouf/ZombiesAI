@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import time
 
 import numpy as np
 import pytest
@@ -120,3 +121,109 @@ def test_an_actor_keeps_only_its_best_finished_game(tmp_path):
     assert sorted(p.name for p in (tmp_path / "best").iterdir()) == [".lock", "best.json", "best.mp4"]
     # games settle on threads of their own, so which of round 2 and 3 led for a moment is a race; round 4 wins
     assert any(m.startswith("new best game: round 4, 700 points, 3 kills") for m in said)
+
+
+@needs_ffmpeg
+def test_frames_go_in_the_slot_their_grab_time_falls_in(tmp_path):
+    recorder = VideoRecorder(tmp_path / "f.mp4", (72, 128, 3))
+    t0 = 1000.0
+    # slots 0, 1, (2 missed: repeated), 3, a second grab in 3 (dropped), 4 a little late, 5
+    for v, t in enumerate([0, 1, 3, 3.3, 4.2, 5]):
+        recorder.add(np.full((72, 128, 3), v * 8, np.uint8), t0 + t / 15)
+    assert recorder.close(), recorder.failed
+    assert (recorder.frames, recorder.repeated, recorder.dropped, recorder.slots) == (5, 1, 1, 6)
+    assert recorder.t0 == t0 and recorder.seconds == pytest.approx(6 / 15)
+    assert frames_in(tmp_path / "f.mp4")[0] == 6
+
+
+RATE, CHUNK = 48_000, 480
+
+
+class ClickStream:
+    """A sink monitor stand-in: stereo samples that really played from `t_start` on, silent but for a burst at
+    each of `clicks` (monotonic times), handed over in 10 ms chunks that arrive late by up to 8 ms of jitter --
+    every 10th on time, the way the promptest chunks pin the clock in a real capture."""
+
+    def __init__(self, t_start, seconds, clicks, seed=0):
+        n = int(seconds * RATE)
+        self.samples = np.zeros((n, 2), "<i2")
+        for t in clicks:
+            i = int(round((t - t_start) * RATE))
+            self.samples[i:i + 48] = 20_000
+        self.t_start, self.rng, self.k = t_start, np.random.default_rng(seed), 0
+        self.rate, self.channels = RATE, 2
+
+    def open(self):
+        pass
+
+    def read(self):
+        first = self.k * CHUNK
+        if first >= len(self.samples):
+            return b"", 0.0
+        self.k += 1
+        jitter = 0.0 if self.k % 10 == 0 else self.rng.uniform(0, 0.008)
+        chunk = self.samples[first:first + CHUNK]
+        return chunk.tobytes(), self.t_start + (first + len(chunk)) / RATE + jitter
+
+    def describe(self):
+        return {"latency_s": 0.0}
+
+    def close(self):
+        pass
+
+
+def onsets(path) -> np.ndarray:
+    """Film times (s) at which the decoded sound track goes loud."""
+    pcm = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "s16le", "-ac", "1", "-ar", str(RATE), "-"],
+                         capture_output=True, check=True).stdout
+    loud = np.abs(np.frombuffer(pcm, "<i2").astype(np.int32)) > 8_000
+    rising = np.flatnonzero(loud[1:] & ~loud[:-1]) + 1
+    keep = rising[np.concatenate([[True], np.diff(rising) > RATE // 10])] if len(rising) else rising
+    return keep / RATE
+
+
+@needs_ffmpeg
+def test_the_best_film_has_its_sound_lined_up_on_the_grab_clock(tmp_path):
+    from zombiesai.rl.best_episode import AV_DELAY_S
+
+    said = []
+    t0 = 1000.0
+    clicks = [1000.5, 1001.25, 1002.6]
+    # the capture starts a little before the first frame and the frames come unevenly, one tick slow
+    recorder = BestEpisodeRecorder(tmp_path, actor=1, say=said.append,
+                                   sound=lambda: ClickStream(t0 - 0.05, 3.5, clicks))
+    recorder.start(0)
+    grabs = t0 + np.arange(45) / 15 + np.random.default_rng(1).uniform(0, 0.01, 45)
+    grabs[0] = t0
+    for k, t in enumerate(np.delete(grabs, 20)):  # a frame the encoder never got
+        recorder.add(np.full((72, 128, 4), k, np.uint8), float(t))
+    time.sleep(0.2)  # let the capture thread drain the stream
+    recorder.finish(game(2, 900, 3))
+    recorder.close()
+
+    best = read_best(tmp_path / "best")
+    assert best["sound"] == "aac", best
+    assert best["repeated_frames"] == 1 and best["sound_heard"] > 0.99
+    film = tmp_path / "best" / "best.mp4"
+    assert frames_in(film)[0] == 45
+    expected = np.array(clicks) - t0 + AV_DELAY_S
+    assert np.allclose(onsets(film), expected, atol=0.002), (onsets(film), expected)
+    assert sorted(p.name for p in (tmp_path / "best").iterdir()) == [".lock", "best.json", "best.mp4"]
+    assert any(m.endswith("with sound") for m in said)
+
+
+@needs_ffmpeg
+def test_a_sound_that_cannot_be_captured_leaves_the_films_silent(tmp_path):
+    def broken():
+        raise RuntimeError("parec not found")
+
+    said = []
+    recorder = BestEpisodeRecorder(tmp_path, actor=0, say=said.append, sound=broken)
+    for episode in range(2):
+        recorder.start(episode)
+        for k in range(10):
+            recorder.add(np.zeros((72, 128, 4), np.uint8), 1000.0 + k / 15)
+        recorder.finish(game(episode + 1))
+    recorder.close()
+    assert "sound" not in read_best(tmp_path / "best") and read_best(tmp_path / "best")["round"] == 2
+    assert sum("films will be silent" in m for m in said) == 1  # said once, not every game
