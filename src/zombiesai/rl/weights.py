@@ -1,5 +1,6 @@
 """How a policy version gets from the learner to its actors: `weights.pt`, replaced atomically by the learner and
-reloaded by each actor between segments, never inside a tick."""
+reloaded by each actor between segments, never inside a tick. It carries the training clock (rl/clock.py) too,
+so an actor can say how far into training the game it plays is."""
 
 from pathlib import Path
 
@@ -7,10 +8,10 @@ import torch
 from torch import nn
 
 
-def publish(path: Path, net: nn.Module, version: int) -> None:
+def publish(path: Path, net: nn.Module, version: int, clock: dict | None = None) -> None:
     tmp = path.with_suffix(".tmp")
     state = {k: v.detach().cpu() for k, v in net.state_dict().items()}
-    torch.save({"version": version, "model": state}, tmp)
+    torch.save({"version": version, "model": state, "clock": clock or {}}, tmp)
     tmp.replace(path)
 
 
@@ -19,6 +20,7 @@ class WeightFollower:
 
     def __init__(self, path: Path):
         self.path, self.version, self._stamp = path, -1, None
+        self.clock: dict = {}  # the training clock these weights were published at (rl/clock.py)
 
     def poll(self, net: nn.Module) -> int:
         try:
@@ -32,4 +34,5 @@ class WeightFollower:
                 return self.version  # caught mid-replace; next poll
             net.load_state_dict(blob["model"])
             self.version, self._stamp = int(blob["version"]), stamp
+            self.clock = blob.get("clock") or {}
         return self.version

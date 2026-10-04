@@ -54,9 +54,10 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
                             audio_features).start()
     from zombiesai.rl.best_episode import VIDEO_HEIGHT, video_frame_rgb
 
-    capture = instance.capture(video_height=VIDEO_HEIGHT if config.record_best else None)
+    films = config.record_best or keeps_films(config)
+    capture = instance.capture(video_height=VIDEO_HEIGHT if films else None)
     # The game-over screen as the env looked at it for the scoreboard, and when: the end of the best game's film.
-    end_frames = [] if config.record_best else None
+    end_frames = [] if films else None
 
     def end_screen():
         frame = capture.grab()
@@ -140,6 +141,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     from zombiesai.demos import bc
     from zombiesai.demos.hearing import feature_config, silence
     from zombiesai.rl.best_episode import BestEpisodeRecorder
+    from zombiesai.rl.keepsakes import Keepsakes, default_dir
+    from zombiesai.rl.moments import MomentSpotter
 
     device = torch.device(config.actor_device)
     net, bc_config, meta = bc.load(config.init, device)
@@ -156,8 +159,16 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     env = make_actor_env(config, index, audio_features)
     episode = 0
     writer = None
+    keepsakes = None
+    if keeps_films(config):
+        keepsakes = Keepsakes(Path(config.video_dir) if config.video_dir
+                              else default_dir(run_dir, synthetic=config.env == "synthetic"),
+                              firsts=config.record_moments, progress_every_h=config.film_every_h,
+                              records=config.record_records)
+    spotter = MomentSpotter()  # also the game's longest stretch without a kill, for the records
     best = BestEpisodeRecorder(run_dir, index, say=lambda m: print(f"[actor {index}] {m}", flush=True),
-                               sound=_sound_stream(env, index)) if config.record_best else None
+                               sound=_sound_stream(env, index), keep_best=config.record_best,
+                               keepsakes=keepsakes) if config.record_best or keepsakes is not None else None
     # A learner killed outright (SIGKILL, a crash) never sets `stop`, and its actors are re-parented: an actor
     # whose parent changed stops as if told to, rather than play on for nobody with keys held in a live game.
     parent = os.getppid()
@@ -180,6 +191,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
             if version < 0:
                 time.sleep(0.1)  # the learner has not published yet
                 continue
+            if best is not None:
+                best.started_at(follower.clock)  # the first game began before there was a clock to read
             frames = history.context() + [history.frames[-1]]
             actions, logps, rewards, bad, heard, masks, views = [], [], [], [], [], [], []
             terminated = ended = False
@@ -203,7 +216,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                         mask = torch.tensor([masks[-1]], device=device)
                     if views:
                         hud = torch.from_numpy(views[-1][None]).to(device)
-                    logits, _, _ = net(pixels, None, audio, mask, hud)
+                    logits, value, _ = net(pixels, None, audio, mask, hud)
                     dist = FactoredCategorical(logits, spec.ACTION_NVEC)
                     u = torch.rand(dist.log_probs.shape, generator=rng).clamp_min(1e-12).to(device)
                     action = (dist.log_probs - torch.log(-torch.log(u))).argmax(-1)
@@ -218,14 +231,20 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     writer.add(obs["pixels"], action, flags=1 if bad[-1] else 0,
                                hud=getattr(getattr(env, "capture", None), "last_hud", None),
                                extras={"actor": np.uint8(1), "reward": np.float32(reward)})
+                moments = spotter.step(info, action)
                 if best is not None:
-                    best.add(*_video_frame(env, obs))
+                    frame, t = _video_frame(env, obs)
+                    best.add(frame, t)
+                    for moment in moments:
+                        best.mark(moment, t, policy_version=version, clock=follower.clock)
+                    best.note(brain_line(dist, value, action, reward, info), t)
                     for frame, t in _end_frames(env):
                         best.add(frame, t)
                 history.push(obs["pixels"])
                 frames.append(history.frames[-1])
                 hear(obs)
                 if terminated or truncated:
+                    info.setdefault("episode", {})["longest_without_kill_s"] = round(spotter.longest_without_kill_s(), 1)
                     _offer(out, ("episode", index, {**info.get("episode", {}), "actor": index, "episode": episode}))
                     ended = True
                     break
@@ -251,8 +270,9 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                 episode += 1
                 obs, _ = env.reset()
                 history.reset(obs["pixels"])
+                spotter.reset()
                 if best is not None:
-                    best.start(episode)
+                    best.start(episode, follower.clock)
                     best.add(*_video_frame(env, obs))
                 if config.record_every and episode % config.record_every == 0:
                     writer = _episode_writer(run_dir, index, episode, env)
@@ -264,6 +284,24 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
         if best is not None:
             best.close()
         env.close()
+
+
+def keeps_films(config: RLConfig) -> bool:
+    """Whether the actors keep any films for the video beside the best game (rl/keepsakes.py)."""
+    return config.record_moments or config.film_every_h > 0 or config.record_records
+
+
+def brain_line(dist, value, action, reward, info: dict) -> dict:
+    """What the policy thought on this step, for the film's sidecar (scripts/overlay.py draws it): its value
+    estimate, how sure it was of the whole action (exp(-entropy) of each head, averaged), how much it wanted the
+    trigger, what it chose, what it was paid, and the HUD's points, round and settled change."""
+    log_probs = dist.log_probs[0]
+    probs = log_probs.exp()
+    entropy = -(probs * log_probs).sum(-1)  # per head
+    return {"v": round(float(value[0]), 3), "sure": round(float(torch.exp(-entropy).mean()), 3),
+            "fire": round(float(probs[spec.FIRE, 1]), 3), "a": [int(x) for x in action],
+            "r": round(float(reward), 3), "pts": info.get("points"), "rnd": info.get("round"),
+            "ev": info.get("points_event") or None, "d": info.get("points_delta") or None}
 
 
 def _offer(out, item, timeout_s: float = 0.25) -> bool:

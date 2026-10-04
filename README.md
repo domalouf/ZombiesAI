@@ -124,6 +124,37 @@ uv run python scripts/supervise.py               # the supervision page: curves,
 
 The run's best game so far is kept as `runs/rl<N>/best/best.mp4`.
 
+### Filming for a video about training
+
+A run also keeps what a video about the agent's training needs, in `runs/video/`. Every run on this PC shares
+it, so a continued run adds to the same collection:
+
+- `firsts/`: the agent's firsts as clips with the game's sound. These are its first kill, repair, door, mystery
+  box, wall buy, headshot and knife kill, the first time it holds each gun, and the first game to reach rounds
+  2, 3, 5, 10 and so on (`src/zombiesai/rl/moments.py`).
+- `progress/`: one whole game every training hour (`--film-every-h`), for "after 6 hours..." check-ins.
+- `records/`: the shortest game, the most barricade repairs, the worst aim and the longest stretch without a
+  kill.
+
+Each film has a `.brain.jsonl` beside it with what the policy thought on every frame. `scripts/overlay.py` draws
+that over a copy of the film: the critic's expected reward as a curve, how sure it was, the keys it pressed and
+each points change. Every film is stamped with the training clock ("Hour 6 · game 812"), counted across
+continued runs (`src/zombiesai/rl/clock.py`). The learner also keeps a copy of the policy every training hour
+(`--snapshot-every-h`) in `runs/rl<N>/snapshots/`.
+
+```sh
+uv run python scripts/video_films.py                         # what has been kept, in training order
+uv run python scripts/overlay.py runs/video/firsts/box.mp4   # -> box.overlay.mp4
+uv run python scripts/record_grid.py --minutes 2             # every game at once, tiled -> runs/video/grid/
+uv run python scripts/eval_snapshots.py runs --every-h 4 --games 20 --human data/demos
+uv run python scripts/gather_video.py                        # bring the other PCs' films home
+```
+
+`eval_snapshots.py` plays each snapshot, frozen, on the games. It needs them free, so run `./zai stop
+--keep-games` first. It writes `runs/video/evals/evals.csv` (rounds by training hour) for the progress chart,
+with a row for your own play from the demos (run `scripts/parse_hud.py` over them first). Turn any of the
+collection off with `-- --no-record-moments`, `-- --film-every-h 0` or `-- --no-record-records`.
+
 ### Stopping a run
 
 `./zai stop` saves first, then closes everything a training session uses on this PC:

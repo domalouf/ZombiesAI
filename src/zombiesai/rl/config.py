@@ -37,6 +37,9 @@ class RLConfig:
     actor_device: str = "cpu"
     seed: int = 0
     checkpoint_every: int = 10
+    # Keep a copy of the policy every this many hours of training, counted across continued runs, in the run's
+    # snapshots/ (0: never) -- to film or evaluate the agent as it was at hour N (scripts/eval_snapshots.py)
+    snapshot_every_h: float = 1.0
     # real env
     fleet_root: str = "runs/instances"
     # Mouse counts per degree of turn. None: worked out from the sensitivity and m_yaw the games play with
@@ -50,6 +53,16 @@ class RLConfig:
     # Film every game and keep the run's best -- highest round, then most kills, then most points -- as
     # best/best.mp4 in the run's directory (rl/best_episode.py)
     record_best: bool = True
+    # Keep the agent's firsts -- first kill, door, mystery box, headshot, Ray Gun, round 5, ... -- as clips with
+    # the game's sound, in video_dir's firsts/ (rl/moments.py)
+    record_moments: bool = True
+    # Keep one whole game every this many hours of training, in video_dir's progress/ (0: never)
+    film_every_h: float = 1.0
+    # Keep the record games -- shortest, most repairs, worst aim, longest without a kill -- in video_dir's records/
+    record_records: bool = True
+    # Where the video's films are kept (rl/keepsakes.py); "" for runs/video beside the runs, shared by every run
+    # on this PC (a synthetic rehearsal keeps its own in the run's directory)
+    video_dir: str = ""
     hear: bool = True  # a checkpoint trained with audio hears its own instance's sink
     # synthetic env: SyntheticConfig overrides (zombiesai/synthetic.py)
     synthetic: dict = field(default_factory=dict)

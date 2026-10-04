@@ -194,6 +194,7 @@ class Learner:
         previous = self.meta.get("rl") or {}
         self.reference = previous.get("reference") or (root_prior(previous["init"]) if previous else config.init)
         self.updates = int(previous.get("updates", 0))
+        self.clock_start = previous.get("clock") or {}  # the training clock it stopped at (rl/clock.py)
         self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
         # A run without an anchor (kl_coef 0 from the start: nothing to stay close to) keeps no reference.
         self.ref = None

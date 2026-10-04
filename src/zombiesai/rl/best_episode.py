@@ -25,6 +25,11 @@ A game that ends in a death goes on being filmed while the env looks at its game
 `best.json` keeps them as `stats` (`final_stats`): the scoreboard's points, kills and headshots when it was
 read, else the HUD's points and kills, with `from` saying which.
 
+The same film is what the video's keepsakes are made from (rl/keepsakes.py): the agent's firsts are cut out
+of it (rl/moments.py; `mark` notes where in it a moment fell), and the whole of it can be kept as a progress
+check-in or a record, each with a sidecar of what the policy thought on every frame (`note`). With `keep_best`
+off the games are filmed for the keepsakes alone.
+
 Nothing here may cost the run a game: every failure -- no ffmpeg, an encoder that dies, a full disk -- is said
 and costs that game's film, never the actor.
 """
@@ -134,6 +139,8 @@ class VideoRecorder:
         self.frames = self.dropped = self.repeated = 0
         self.slots = 0  # frames in the film, repeats included
         self.t0: float | None = None  # the first frame's grab time: the film's time zero on the monotonic clock
+        self._first_t: float | None = None  # the same, as `add` saw it (t0 is the feeder thread's)
+        self._added = 0
         self.failed: str | None = None
         self._log = self.path.with_suffix(".log")
         with open(self._log, "wb") as log:
@@ -151,6 +158,9 @@ class VideoRecorder:
         if frame.shape != self.shape:  # the window came back at another size: not a frame of this film
             self.dropped += 1
             return
+        if self._first_t is None and t is not None and not self._added:
+            self._first_t = t
+        self._added += 1
         try:
             self._queue.put_nowait((frame, t))
         except queue_mod.Full:
@@ -186,6 +196,12 @@ class VideoRecorder:
     @property
     def seconds(self) -> float:
         return self.slots / self.fps
+
+    def position(self, t: float | None = None) -> float:
+        """Where in the film a moment at monotonic time `t` falls, in seconds (None: at the last frame added)."""
+        if t is not None and self._first_t is not None:
+            return max(0.0, t - self._first_t)
+        return max(0, self._added - 1) / self.fps
 
     def close(self) -> bool:
         """Finish the file. Whether it is a whole video of every frame the encoder was given."""
@@ -287,8 +303,9 @@ def could_be_best(best_dir: Path, summary: dict) -> bool:
     return current is None or stored_rank(current) < episode_rank(summary)
 
 
-def keep_if_best(best_dir: Path, video: Path, summary: dict, **about) -> bool:
-    """Make `video` the run's best game if it outranks the one kept so far, else delete it. Whether it was kept."""
+def keep_if_best(best_dir: Path, video: Path, summary: dict, brain: Path | None = None, **about) -> bool:
+    """Make `video` the run's best game if it outranks the one kept so far, else delete it. Whether it was kept.
+    `brain`, the film's sidecar (rl/keepsakes.py), goes with it as best.brain.jsonl."""
     best_dir = Path(best_dir)
     rank = episode_rank(summary)
     with open(best_dir / ".lock", "w") as lock:
@@ -298,6 +315,10 @@ def keep_if_best(best_dir: Path, video: Path, summary: dict, **about) -> bool:
             video.unlink(missing_ok=True)
             return False
         os.replace(video, best_dir / "best.mp4")
+        if brain is not None and Path(brain).exists():
+            os.replace(brain, best_dir / "best.brain.jsonl")
+        else:
+            (best_dir / "best.brain.jsonl").unlink(missing_ok=True)
         record = {"rank": list(rank), "round": rank[0], "kills": rank[1], "points": rank[2], "video": "best.mp4",
                   "host": socket.gethostname(), "recorded_unix": time.time(), "stats": final_stats(summary),
                   **about, "summary": summary}
@@ -311,26 +332,37 @@ class BestEpisodeRecorder:
     """One actor's films: `start` a game, `add` each step's frame, `finish` it with its summary, which hands it
     to a thread to encode the tail and offer it as the best -- so the next game's reset is not kept waiting.
 
+    With `keepsakes` (rl/keepsakes.py), a finished game is also offered to the video's shelves: its firsts
+    (`mark`ed as they happened) are cut out as clips, and the whole film may be kept as a progress check-in or a
+    record. `note` adds a line to the film's sidecar -- what the policy thought on that frame -- which goes with
+    every film kept. With `keep_best` off the games are filmed for the shelves alone.
+
     With `sound` -- a function returning a fresh capture stream (`demos.audio.PulseMonitorStream` on the
     instance's own sink) -- each game's sound is captured beside its film from `start`, and a finished game
-    that could be the best gets it lined up and added (`add_sound`) before it is offered. A sound that fails
-    costs the film its sound, never the film."""
+    that will be kept anywhere gets it lined up and added (`add_sound`) first. A sound that fails costs the
+    film its sound, never the film."""
 
-    def __init__(self, run_dir: Path, actor: int, say=print, sound=None):
+    def __init__(self, run_dir: Path, actor: int, say=print, sound=None, keep_best: bool = True, keepsakes=None):
         self.dir = Path(run_dir) / BEST_DIR
         self.actor, self.say, self.sound = actor, say, sound
+        self.keep_best, self.keepsakes = keep_best, keepsakes
+        self.run = Path(run_dir).name
         self._video: VideoRecorder | None = None
         self._sound = None  # (AudioRecorder, its directory) for the game being filmed
         self._episode = 0
         self._broken = False  # this game's film failed: the rest of it goes unfilmed
+        self._marks: list[dict] = []  # this game's moments, each with where it falls in the film
+        self._notes: list[dict] = []  # this game's sidecar lines, each with where it falls in the film
+        self._clock: dict = {}  # the training clock when this game started (rl/clock.py)
         self._pending: list[threading.Thread] = []
         self.enabled = shutil.which("ffmpeg") is not None
         if not self.enabled:
-            say("no ffmpeg on PATH: the run's best game will not be filmed")
+            say("no ffmpeg on PATH: the run's best game and the video's films will not be kept")
 
-    def start(self, episode: int) -> None:
+    def start(self, episode: int, clock: dict | None = None) -> None:
         self.abort()
         self._episode, self._broken = episode, False
+        self._marks, self._notes, self._clock = [], [], dict(clock or {})
         if self.enabled and self.sound is not None:
             self._start_sound(episode)
 
@@ -348,6 +380,11 @@ class BestEpisodeRecorder:
             self.sound = None  # it would fail the same way every game
             shutil.rmtree(where, ignore_errors=True)
 
+    def started_at(self, clock: dict | None) -> None:
+        """The training clock the game being filmed started at, if `start` was not given one."""
+        if not self._clock and clock:
+            self._clock = dict(clock)
+
     def add(self, frame: np.ndarray | None, t: float | None = None) -> None:
         """A step's frame, grabbed at monotonic time `t` (None: no time, so the film cannot be given sound)."""
         if not self.enabled or self._broken or frame is None:
@@ -362,26 +399,64 @@ class BestEpisodeRecorder:
             self._broken = True
             self.abort()
 
+    def mark(self, moment: dict, t: float | None = None, **about) -> None:
+        """A moment of the game being filmed (`MomentSpotter`), seen in the frame grabbed at `t`."""
+        if self.keepsakes is None or self.keepsakes.firsts is None or self._video is None:
+            return
+        self._marks.append({**moment, **about, "at_s": self._video.position(t)})
+
+    def note(self, line: dict, t: float | None = None) -> None:
+        """What the policy thought on the frame grabbed at `t`, for the film's sidecar."""
+        if self.keepsakes is None or self._video is None:
+            return
+        self._notes.append({"s": round(self._video.position(t), 3), **line})
+
     def finish(self, summary: dict) -> None:
         video, self._video = self._video, None
         sound, self._sound = self._sound, None
+        game = {"marks": self._marks, "notes": self._notes, "clock": self._clock}
+        self._marks, self._notes = [], []
         if video is None:
             _drop_sound(sound)
             return
         self._pending = [t for t in self._pending if t.is_alive()]
-        thread = threading.Thread(target=self._settle, args=(video, sound, summary, self._episode), daemon=True)
+        thread = threading.Thread(target=self._settle, args=(video, sound, summary, self._episode, game),
+                                  daemon=True)
         thread.start()
         self._pending.append(thread)
 
-    def _settle(self, video: VideoRecorder, sound, summary: dict, episode: int) -> None:
+    def _wanted(self, summary: dict, game: dict) -> dict:
+        """Where this finished game could be kept, as things stand (each shelf decides for real when offered)."""
+        k = self.keepsakes
+        want = {"best": self.keep_best and could_be_best(self.dir, summary), "firsts": [], "progress": None,
+                "records": []}
+        if k is None:
+            return want
+        if k.firsts is not None and game["marks"]:
+            want["firsts"] = k.firsts.wanted(game["marks"], summary)
+        if k.progress is not None:
+            key = k.progress.key(game["clock"])
+            if key is not None and k.progress.wants(key, {"start_clock": game["clock"]}):
+                want["progress"] = key
+        if k.records is not None:
+            want["records"] = k.records.candidates(summary)
+        return want
+
+    def _settle(self, video: VideoRecorder, sound, summary: dict, episode: int, game: dict | None = None) -> None:
+        game = game or {"marks": [], "notes": [], "clock": {}}
+        brain = None
         try:
             sound_meta = sound[0].stop() if sound is not None else None
             if not video.close():
-                self.say(f"game {episode}'s film is unusable ({video.failed}); it cannot be the best")
+                self.say(f"game {episode}'s film is unusable ({video.failed}); it cannot be kept")
+                video.path.unlink(missing_ok=True)
+                return
+            want = self._wanted(summary, game)
+            if not any(want.values()):
                 video.path.unlink(missing_ok=True)
                 return
             about = {}
-            if sound is not None and could_be_best(self.dir, summary):
+            if sound is not None:
                 if video.t0 is None:
                     about = {"sound": "none (the frames had no grab times to line it up with)"}
                 else:
@@ -390,17 +465,66 @@ class BestEpisodeRecorder:
                     except Exception as error:  # noqa: BLE001
                         self.say(f"game {episode}'s sound could not be added, it stays silent: {error}")
                         about = {"sound": f"failed: {str(error)[:200]}"}
-            if keep_if_best(self.dir, video.path, summary, actor=self.actor, episode=episode, frames=video.frames,
-                            dropped_frames=video.dropped, repeated_frames=video.repeated,
-                            encoder=video.encoder[1], **about):
+            film = {"run": self.run, "actor": self.actor, "episode": episode, "start_clock": game["clock"],
+                    "seconds": round(video.seconds, 2), "round_reached": summary.get("round_reached"),
+                    "ended_by": summary.get("reason"), "stats": final_stats(summary), **about}
+            if game["notes"]:
+                brain = video.path.with_suffix(".brain.jsonl")
+                write_brain(brain, game["notes"], {**film, "fps": video.fps})
+            files = {".mp4": video.path, **({".brain.jsonl": brain} if brain else {})}
+            for moment in want["firsts"]:
+                self._keep_moment(video, moment, summary, episode, game, film)
+            if want["progress"] is not None:
+                if self.keepsakes.progress.offer(want["progress"], {**film, "recorded_unix": time.time()}, files):
+                    hours = float(game["clock"].get("train_s") or 0) / 3600
+                    self.say(f"check-in film for hour {hours:.1f} kept: "
+                             f"{self.keepsakes.progress.dir / (want['progress'] + '.mp4')}")
+            for name, record in want["records"]:
+                if self.keepsakes.records.offer(name, {**record, **film, "recorded_unix": time.time()}, files):
+                    self.say(f"new record -- {record['title']}: {record['value']:g} {record['unit']}".rstrip())
+            if want["best"] and keep_if_best(
+                    self.dir, video.path, summary, brain=brain, actor=self.actor, episode=episode,
+                    frames=video.frames, dropped_frames=video.dropped, repeated_frames=video.repeated,
+                    encoder=video.encoder[1], start_clock=game["clock"], **about):
                 r, k, p = episode_rank(summary)
                 heard = " with sound" if about.get("sound") == "aac" else ""
                 self.say(f"new best game: round {r}, {p} points, {k} kills -> {self.dir / 'best.mp4'}{heard}")
+            video.path.unlink(missing_ok=True)
         except Exception as error:  # noqa: BLE001
             self.say(f"keeping game {episode}'s film failed: {error}")
             video.path.unlink(missing_ok=True)
         finally:
+            if brain is not None:
+                brain.unlink(missing_ok=True)
             _drop_sound(sound)
+
+    def _keep_moment(self, video: VideoRecorder, moment: dict, summary: dict, episode: int, game: dict,
+                     film: dict) -> None:
+        """Cut the moment's clip out of the game's film and offer it to the book as the agent's first."""
+        from zombiesai.rl.moments import cut_clip, kind
+
+        window = kind(moment["kind"])
+        start = max(0.0, moment["at_s"] - window.before_s)
+        end = min(video.seconds, moment["at_s"] + window.after_s)
+        clip = video.path.with_name(f".a{self.actor}_ep{episode:05d}_{moment['kind']}.mp4")
+        brain = clip.with_suffix(".brain.jsonl")
+        record = {**moment, "run": self.run, "actor": self.actor, "episode": episode, "clip_start_s": start,
+                  "start_clock": game["clock"], "game_round_reached": summary.get("round_reached"),
+                  "game_ended_by": summary.get("reason")}
+        try:
+            cut_clip(video.path, clip, start, max(end - start, 1.0 / video.fps), video.encoder)
+            files = {".mp4": clip}
+            notes = [{**n, "s": round(n["s"] - start, 3)} for n in game["notes"] if start <= n["s"] <= end]
+            if notes:
+                write_brain(brain, notes, {**film, "fps": video.fps, "moment": moment["kind"], "clip_start_s": start})
+                files[".brain.jsonl"] = brain
+            if self.keepsakes.firsts.offer_clip(record, files):
+                self.say(f"new first -- {moment['title']}: {self.keepsakes.firsts.dir / (moment['kind'] + '.mp4')}")
+        except Exception as error:  # noqa: BLE001
+            self.say(f"game {episode}'s moment {moment['kind']} could not be kept: {error}")
+        finally:
+            clip.unlink(missing_ok=True)
+            brain.unlink(missing_ok=True)
 
     def abort(self) -> None:
         """Throw away the game being filmed (it did not finish)."""
@@ -419,6 +543,15 @@ class BestEpisodeRecorder:
         deadline = time.monotonic() + timeout_s
         for thread in self._pending:
             thread.join(max(0.0, deadline - time.monotonic()))
+
+
+def write_brain(path: Path, notes: list[dict], header: dict) -> None:
+    """A film's sidecar: a header line, then one line per frame noted (`BestEpisodeRecorder.note`), `s` being
+    where in the film it falls (scripts/overlay.py reads it)."""
+    with open(path, "w") as out:
+        out.write(json.dumps({"header": header}, default=str) + "\n")
+        for line in notes:
+            out.write(json.dumps(line, separators=(",", ":"), default=str) + "\n")
 
 
 def _drop_sound(sound) -> None:
