@@ -66,7 +66,12 @@ def ink(band: np.ndarray, kind: str) -> np.ndarray:
     if kind == "white_on_red":
         v = (np.minimum(g, b) - 20) * (1 / 200)
     elif kind == "grey_or_red":
-        v = np.clip((r - 50) * (1 / 150) * (np.abs(g - b) <= 12), 0.0, 1.0).astype(np.float32)
+        # Grey, or the low-ammo red, ~(172, 55, 55): G == B either way. An empty grenade count is drawn in an
+        # orange red instead, ~(155, 35, 10), where G != B -- but it is far redder than any of Nacht's brown
+        # or orange scene (G and B both under 0.4 R).
+        neutral = np.abs(g - b) <= 12
+        hud_red = (r >= 90) & (5 * np.maximum(g, b) <= 2 * r)
+        v = np.clip((r - 50) * (1 / 150) * (neutral | hud_red), 0.0, 1.0).astype(np.float32)
         # Top-hat: keep only what is thinner than the opening. A stroke is 2-3 px wide; a pale wall behind
         # the counter is not, and without this it reads as ink and swallows the digits.
         size = (1,) * (v.ndim - 2) + (TOPHAT, TOPHAT)
@@ -107,14 +112,15 @@ def patch(inked: np.ndarray, start: int, end: int, width: int) -> np.ndarray:
 
 @dataclass
 class GlyphSet:
-    """Templates for one font: (N, h, w) float32 patches and the character each one is."""
+    """Templates for one font: (N, h, w) float32 patches and the character each one is (or, for the weapon
+    names in hud/weapons.py, the weapon each one is)."""
 
     templates: np.ndarray
-    labels: np.ndarray  # (N,) '<U1'
+    labels: np.ndarray  # (N,) str: '<U1' for digits
 
     def __post_init__(self):
         self.templates = np.asarray(self.templates, np.float32)
-        self.labels = np.asarray(self.labels, dtype="<U1")
+        self.labels = np.asarray(self.labels, dtype=str)
         self._flat = self.templates.reshape(len(self.templates), -1)
         self._sq = (self._flat**2).sum(1)
         self._chars = sorted(set(self.labels.tolist()))

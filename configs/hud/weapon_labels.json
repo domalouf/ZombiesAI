@@ -1,0 +1,4 @@
+{
+  "about": "One label per cluster of `scripts/build_hud_atlas.py harvest-weapons` (stride 1, seed 0, k 12) over 7,914 points_ammo crops sampled from the RL agents' six games on 2026-10-03 (scripts/sample_hud.py, ~25 minutes), labelled by eye from the contact sheet: a weapon key from hud/weapons.py WEAPONS, '?' for a reject template (scene showing through, no name), '-' to drop the cluster. The sample showed three guns: the Colt M1911, the Kar98k and the M1A1 Carbine (3 frames).",
+  "clusters": ["colt", "?", "kar98k", "colt", "colt", "colt", "colt", "?", "colt", "colt", "m1_carbine", "colt"]
+}

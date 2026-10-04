@@ -2,9 +2,11 @@
 
     hud.npz
       <field>, <field>_conf, <field>_status   the per-step reads (hud/parse.py): points, round, grenades,
-                                               reserve, mag; status 0 ok, 1 absent, 2 unreadable,
+                                               reserve, mag, weapon (an index into hud/weapons.py
+                                               WEAPONS); status 0 ok, 1 absent, 2 unreadable,
                                                3 transition (round only); value -1 when there is none
-      round_flags, reserve_low                 round 8 that may be 9; reserve drawn red
+      round_flags, reserve_low, mag_flags      round 8 that may be 9; reserve drawn red; magazine at
+                                               least this (its marks run off the crop)
       points_good, round_good                  (T,) bool: the read passed the temporal checks (hud/track.py)
       points_settled                           (T,) int32: the last settled points value (-1 before one)
       round_inferred                           (T,) int32: the round, from settled counts and round changes

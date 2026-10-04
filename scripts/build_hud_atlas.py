@@ -14,6 +14,15 @@ Harvest is deterministic for the same clips, stride, k and seed (all recorded in
 labels file), so the committed labels rebuild the committed atlas. After labelling new recordings, the
 existing atlas's guess for every cluster is written to <set>.txt beside the sheet: start from that.
 Pillow is only needed for the sheets.
+
+The weapon names (hud/weapons.py) have their own templates, src/zombiesai/hud/weapon_names.npz, and the same
+two steps. Sources are clips or sample_hud.py's .npz files:
+
+    uv run --with pillow python scripts/build_hud_atlas.py harvest-weapons data/hud_samples/live.npz --out /tmp/weapons
+    # /tmp/weapons/names.png: row k is cluster k (its centre, then members as the screen shows them).
+    # Write one weapon key per cluster (hud/weapons.py: WEAPONS) into configs/hud/weapon_labels.json --
+    # "?" for a cluster that is not a name (scene showing through), "-" to drop it -- then:
+    uv run python scripts/build_hud_atlas.py build-weapons /tmp/weapons configs/hud/weapon_labels.json
 """
 
 import argparse
@@ -27,6 +36,16 @@ from scipy.cluster.vq import kmeans2
 from zombiesai.demos.clips import load_clip
 from zombiesai.hud.glyphs import ATLAS_PATH, LINES, REJECT, GlyphSet, harvest, load_atlas, save_atlas
 from zombiesai.hud.parse import fit_crops
+from zombiesai.hud.weapons import (
+    NAME_MIN_INK,
+    NAMES_PATH,
+    WEAPONS,
+    load_names,
+    name_band,
+    name_ink,
+    save_names,
+    signature,
+)
 
 DEFAULT_K = {"points": 40, "ammo": 40}
 
@@ -195,6 +214,84 @@ def do_build(args) -> None:
     print(f"wrote {args.out}")
 
 
+def weapon_crops(paths: list[Path], stride: int):
+    """points_ammo crops at the reference size from clips and sample_hud.py files -> (stack, source names)."""
+    stacks, sources = [], []
+    for path in paths:
+        if path.suffix == ".npz":
+            with np.load(path) as z:
+                stacks.append(fit_crops(z["points_ammo"][::stride], "points_ammo"))
+            sources.append(str(path))
+            continue
+        for clip_dir in clip_dirs([path]):
+            crops = load_clip(clip_dir).hud("points_ammo")
+            if crops is not None:
+                stacks.append(fit_crops(np.asarray(crops[::stride]), "points_ammo"))
+                sources.append(str(clip_dir))
+    if not stacks:
+        sys.exit("no points_ammo crops in those paths")
+    return np.concatenate(stacks), sources
+
+
+def do_harvest_weapons(args) -> None:
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    crops, sources = weapon_crops(args.paths, args.stride)
+    inked = name_ink(name_band(crops))
+    keep = np.flatnonzero(inked.sum((1, 2)) >= NAME_MIN_INK)
+    sig = signature(inked[keep])
+    k = min(args.k, len(sig))
+    centres, assign = kmeans2(sig.reshape(len(sig), -1), k, seed=args.seed, minit="++", iter=30)
+    centres = centres.reshape(k, *sig.shape[1:])
+    counts = np.bincount(assign, minlength=k)
+    guess = []
+    try:
+        labels, _, _ = load_names(NAMES_PATH).classify(centres)
+        guess = labels.tolist()
+    except FileNotFoundError:
+        pass
+    (out / "names.txt").write_text(f"clusters: {k}\ncounts: {counts.tolist()}\nexisting templates say: {guess}\n")
+    _name_sheet(out / "names.png", name_band(crops[keep]), assign, centres)
+    np.savez_compressed(out / "names.npz", centres=centres.astype(np.float16), counts=counts,
+                        meta=np.array(json.dumps({"sources": sources, "stride": args.stride, "seed": args.seed})))
+    print(f"{len(crops)} crops, {len(sig)} with a name, in {k} clusters (sizes {counts.tolist()}) "
+          f"-> {out / 'names.png'}")
+    if guess:
+        print(f"existing templates say: {guess}")
+
+
+def _name_sheet(path: Path, bands, assign, centres, per_row: int = 6, scale: int = 2) -> None:
+    try:
+        from PIL import Image
+    except ImportError:
+        print("  (no pillow: skipping the contact sheet; run with `uv run --with pillow`)")
+        return
+    rows = []
+    for k in range(len(centres)):
+        idx = np.flatnonzero(assign == k)
+        rng = np.random.default_rng(k)
+        members = rng.choice(idx, min(per_row - 1, len(idx)), replace=False) if len(idx) else []
+        cells = [np.repeat((centres[k] * 255).clip(0, 255).astype(np.uint8)[..., None], 3, -1)]
+        cells += [bands[i] for i in members]
+        cells += [np.zeros_like(cells[0])] * (per_row - len(cells))
+        rows.append(np.concatenate([np.pad(c, ((2, 2), (2, 2), (0, 0)), constant_values=128) for c in cells], 1))
+    sheet = np.concatenate(rows)
+    Image.fromarray(sheet).resize((sheet.shape[1] * scale, sheet.shape[0] * scale), Image.NEAREST).save(path)
+
+
+def do_build_weapons(args) -> None:
+    clusters = np.load(Path(args.harvest) / "names.npz")
+    labels = json.loads(Path(args.labels).read_text())["clusters"]
+    centres = clusters["centres"].astype(np.float32)
+    if len(labels) != len(centres):
+        sys.exit(f"{len(labels)} labels for {len(centres)} clusters")
+    keep = [i for i, c in enumerate(labels) if c != "-"]
+    save_names(args.out, centres[keep], [labels[i] for i in keep], meta=str(clusters["meta"]))
+    order = [w.key for w in WEAPONS]
+    known = sorted({labels[i] for i in keep} - {REJECT}, key=order.index)
+    print(f"wrote {args.out}: {len(keep)} templates for {known}, {sum(labels[i] == REJECT for i in keep)} reject")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -208,8 +305,20 @@ def main() -> None:
     b.add_argument("harvest", help="the --out directory of a harvest")
     b.add_argument("labels", help="JSON: {'sets': {set: one char per cluster}}")
     b.add_argument("--out", default=str(ATLAS_PATH))
+    hw = sub.add_parser("harvest-weapons", help="cluster weapon-name bands, dump a contact sheet")
+    hw.add_argument("paths", type=Path, nargs="+",
+                    help="clip directories (or directories holding clips) and sample_hud.py .npz files")
+    hw.add_argument("--out", required=True)
+    hw.add_argument("--stride", type=int, default=1, help="use every n-th crop")
+    hw.add_argument("--k", type=int, default=12, help="clusters")
+    hw.add_argument("--seed", type=int, default=0)
+    bw = sub.add_parser("build-weapons", help="write the weapon-name templates from labelled clusters")
+    bw.add_argument("harvest", help="the --out directory of a harvest-weapons")
+    bw.add_argument("labels", help="JSON: {'clusters': [a weapon key, '?' or '-' per cluster]}")
+    bw.add_argument("--out", default=str(NAMES_PATH))
     args = parser.parse_args()
-    {"harvest": do_harvest, "build": do_build}[args.cmd](args)
+    {"harvest": do_harvest, "build": do_build, "harvest-weapons": do_harvest_weapons,
+     "build-weapons": do_build_weapons}[args.cmd](args)
 
 
 if __name__ == "__main__":
