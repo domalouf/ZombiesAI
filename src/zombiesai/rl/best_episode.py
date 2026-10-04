@@ -20,6 +20,11 @@ Actors on one machine share the run's directory, so `keep_if_best` decides under
 PCs keep the best of their own games, in their own copy of the run (`<out_root>/<run>/best/`, rl/fleet.py).
 A game cut short by the actor stopping is not a finished game, and is thrown away.
 
+A game that ends in a death goes on being filmed while the env looks at its game-over scoreboard (up to
+`after_death_s`, which the reset waits anyway), so the film ends on the game's own final numbers, and
+`best.json` keeps them as `stats` (`final_stats`): the scoreboard's points, kills and headshots when it was
+read, else the HUD's points and kills, with `from` saying which.
+
 Nothing here may cost the run a game: every failure -- no ffmpeg, an encoder that dies, a full disk -- is said
 and costs that game's film, never the actor.
 """
@@ -86,6 +91,17 @@ def video_frame(frame: np.ndarray, height: int = VIDEO_HEIGHT) -> np.ndarray:
     out = np.empty((h - h % 2, w - w % 2), np.uint32)
     np.copyto(out, pixels[: out.shape[0], : out.shape[1]])
     return out.view(np.uint8).reshape(*out.shape, 4)
+
+
+def video_frame_rgb(frame: np.ndarray, height: int = VIDEO_HEIGHT) -> np.ndarray:
+    """`video_frame` of a full-resolution RGB grab (`ScreenCapture.grab`): the same pixels, laid out BGRX, so
+    it goes in the same film as the BGRX grabs beside it."""
+    step = max(1, -(-frame.shape[0] // height))
+    pixels = frame[::step, ::step]
+    h, w = pixels.shape[0] - pixels.shape[0] % 2, pixels.shape[1] - pixels.shape[1] % 2
+    out = np.zeros((h, w, 4), np.uint8)
+    out[..., :3] = pixels[:h, :w, 2::-1]
+    return out
 
 
 @functools.lru_cache(maxsize=None)
@@ -246,6 +262,17 @@ def add_sound(video_path: Path, t0: float, seconds: float, sound_dir: Path, meta
     return {"sound": "aac", "sound_heard": round(heard / n, 4), "av_delay_s": delay_s}
 
 
+def final_stats(summary: dict) -> dict:
+    """What the game ended on: the scoreboard's points, kills and headshots when they were read, else the HUD's
+    points and kills (no headshots: the HUD never shows them); and how long it lasted and how it shot."""
+    round_reached, kills, points = episode_rank(summary)
+    scoreboard = summary.get("end_points") is not None and summary.get("end_kills") is not None
+    return {"round": round_reached, "points": points, "kills": kills,
+            "headshots": summary.get("end_headshots") if scoreboard else None,
+            "from": "scoreboard" if scoreboard else "hud", "seconds": summary.get("seconds"),
+            "shots": summary.get("shots"), "hits": summary.get("hits"), "ended_by": summary.get("reason")}
+
+
 def read_best(best_dir: Path) -> dict | None:
     try:
         return json.loads((Path(best_dir) / "best.json").read_text())
@@ -272,7 +299,8 @@ def keep_if_best(best_dir: Path, video: Path, summary: dict, **about) -> bool:
             return False
         os.replace(video, best_dir / "best.mp4")
         record = {"rank": list(rank), "round": rank[0], "kills": rank[1], "points": rank[2], "video": "best.mp4",
-                  "host": socket.gethostname(), "recorded_unix": time.time(), **about, "summary": summary}
+                  "host": socket.gethostname(), "recorded_unix": time.time(), "stats": final_stats(summary),
+                  **about, "summary": summary}
         tmp = best_dir / "best.json.tmp"
         tmp.write_text(json.dumps(record, indent=2, default=str))
         tmp.replace(best_dir / "best.json")

@@ -96,8 +96,10 @@ class EnvConfig:
     first_look_s: float = 3.0  # the first reset of a run: is a fresh game already on?
     after_death_s: float = 4.0  # let the game-over screen play before typing into the console
     # Of that, how long the game-over scoreboard is looked at for its numbers (`end_screen`), a look every
-    # `end_screen_every_s`.
-    end_screen_s: float = 1.5
+    # `end_screen_every_s`. All of it: a death seen on the HUD (the downed penalty settling) can come before
+    # the scoreboard is drawn, and 1.5 s missed it on most of them (rl4-rl7: none of the runs' best games had
+    # their scoreboard read). A look that reads early hands the rest back to the wait.
+    end_screen_s: float = 4.0
     end_screen_every_s: float = 0.1
     # A map loaded from the console stops at "Click to Start the Mission". Enter starts it too, without firing
     # a shot; it is tapped every `start_key_every_s` while a reset waits (it does nothing in a live game).

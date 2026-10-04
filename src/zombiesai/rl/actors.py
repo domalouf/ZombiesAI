@@ -52,9 +52,17 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
 
         hearing = LiveAudio(PulseMonitorStream(instance.spec.monitor, stream_name=f"actor {index}"),
                             audio_features).start()
-    from zombiesai.rl.best_episode import VIDEO_HEIGHT
+    from zombiesai.rl.best_episode import VIDEO_HEIGHT, video_frame_rgb
 
     capture = instance.capture(video_height=VIDEO_HEIGHT if config.record_best else None)
+    # The game-over screen as the env looked at it for the scoreboard, and when: the end of the best game's film.
+    end_frames = [] if config.record_best else None
+
+    def end_screen():
+        frame = capture.grab()
+        if end_frames is not None and frame is not None:
+            end_frames.append((video_frame_rgb(frame), time.monotonic()))
+        return read_end_screen(frame)
 
     def shows_console() -> bool:
         return console_open((capture.last_hud or {}).get("console"))
@@ -69,11 +77,12 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
                        restart=instance.restart_game, press=lambda key: tap_key(sink, key, hold_s=0.15),
                        console_open=shows_console,
                        downed=lambda: scoreboard_shown((capture.last_hud or {}).get("scores")),
-                       end_screen=lambda: read_end_screen(capture.grab()),
+                       end_screen=end_screen,
                        hearing=hearing, say=lambda m: print(f"[actor {index}] {m}", flush=True))
     # The sink this game alone plays into, for the best game's film to have its sound; a fleet started without
     # sinks of its own plays into the desktop's, mixed with every other game, so its films stay silent.
     env.sound_monitor = instance.spec.monitor if fleet.audio_sinks else None
+    env.end_frames = end_frames
     return env
 
 
@@ -200,6 +209,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                                extras={"actor": np.uint8(1), "reward": np.float32(reward)})
                 if best is not None:
                     best.add(*_video_frame(env, obs))
+                    for frame, t in _end_frames(env):
+                        best.add(frame, t)
                 history.push(obs["pixels"])
                 frames.append(history.frames[-1])
                 hear(obs)
@@ -260,6 +271,17 @@ def _video_frame(env, obs):
     if capture is None:
         return obs["pixels"], None
     return getattr(capture, "last_video", None), getattr(capture, "last_t", None)
+
+
+def _end_frames(env) -> list:
+    """The frames the env grabbed looking at the game-over scoreboard this step (none for a game without one),
+    taken from it so the next game starts with none."""
+    frames = getattr(env, "end_frames", None)
+    if not frames:
+        return []
+    taken = list(frames)
+    frames.clear()
+    return taken
 
 
 def _sound_stream(env, index: int):

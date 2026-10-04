@@ -10,9 +10,11 @@ from zombiesai.rl.best_episode import (
     BestEpisodeRecorder,
     VideoRecorder,
     episode_rank,
+    final_stats,
     keep_if_best,
     read_best,
     video_frame,
+    video_frame_rgb,
 )
 
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
@@ -67,6 +69,27 @@ def test_a_best_kept_with_the_old_rank_order_is_read_by_its_named_numbers(tmp_pa
     # by the stale list, (1, 510, 0) would outrank (1, 3, 400); by kills it does not
     assert keep_if_best(tmp_path, video(tmp_path / "a.mp4", b"a"), game(1, 400, 3), actor=0, episode=1)
     assert (tmp_path / "best.mp4").read_bytes() == b"a"
+
+
+def test_best_json_keeps_the_games_final_stats_and_says_where_they_came_from(tmp_path):
+    ended = {**game(2, 1210, 7), "end_headshots": 2, "seconds": 183.5, "shots": 90, "hits": 31,
+             "reason": "down"}
+    assert keep_if_best(tmp_path, video(tmp_path / "a.mp4"), ended, actor=0, episode=1)
+    assert read_best(tmp_path)["stats"] == {"round": 2, "points": 1210, "kills": 7, "headshots": 2,
+                                            "from": "scoreboard", "seconds": 183.5, "shots": 90, "hits": 31,
+                                            "ended_by": "down"}
+    # no scoreboard read: the HUD's numbers, and no headshots rather than a guess
+    unread = {**game(1, gained=390, hud_kills=3), "end_headshots": None, "reason": "death"}
+    assert final_stats(unread) == {"round": 1, "points": 890, "kills": 3, "headshots": None, "from": "hud",
+                                   "seconds": None, "shots": None, "hits": None, "ended_by": "death"}
+
+
+def test_an_rgb_grab_makes_the_same_film_frame_as_the_bgrx_grab_of_it():
+    rgb = np.random.default_rng(1).integers(0, 256, (1440, 2566, 3), dtype=np.uint8)
+    bgrx = np.zeros((1440, 2566, 4), np.uint8)
+    bgrx[..., :3] = rgb[..., ::-1]
+    assert np.array_equal(video_frame_rgb(rgb, 720), video_frame(bgrx, 720))
+    assert video_frame_rgb(rgb[:1080, :1920], 720).shape == (540, 960, 4)
 
 
 def test_the_film_frame_is_every_other_pixel_of_the_grab_with_even_sides():
@@ -227,3 +250,14 @@ def test_a_sound_that_cannot_be_captured_leaves_the_films_silent(tmp_path):
     recorder.close()
     assert "sound" not in read_best(tmp_path / "best") and read_best(tmp_path / "best")["round"] == 2
     assert sum("films will be silent" in m for m in said) == 1  # said once, not every game
+
+
+def test_the_game_over_frames_go_to_the_film_once():
+    from types import SimpleNamespace
+
+    from zombiesai.rl.actors import _end_frames
+
+    env = SimpleNamespace(end_frames=[("a", 1.0), ("b", 1.1)])
+    assert _end_frames(env) == [("a", 1.0), ("b", 1.1)]
+    assert _end_frames(env) == [] and env.end_frames == []  # the next game starts with none
+    assert _end_frames(SimpleNamespace()) == [] and _end_frames(SimpleNamespace(end_frames=None)) == []
