@@ -51,7 +51,9 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
 
         hearing = LiveAudio(PulseMonitorStream(instance.spec.monitor, stream_name=f"actor {index}"),
                             audio_features).start()
-    capture = instance.capture()
+    from zombiesai.rl.best_episode import VIDEO_HEIGHT
+
+    capture = instance.capture(video_height=VIDEO_HEIGHT if config.record_best else None)
 
     def shows_console() -> bool:
         return console_open((capture.last_hud or {}).get("console"))
@@ -123,6 +125,7 @@ def actor_main(index: int, config: RLConfig, run_dir: str, out: "mp.Queue", stop
 def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     from zombiesai.demos import bc
     from zombiesai.demos.hearing import feature_config, silence
+    from zombiesai.rl.best_episode import BestEpisodeRecorder
 
     device = torch.device(config.actor_device)
     net, bc_config, meta = bc.load(config.init, device)
@@ -139,9 +142,14 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     env = make_actor_env(config, index, audio_features)
     episode = 0
     writer = None
+    best = BestEpisodeRecorder(run_dir, index, say=lambda m: print(f"[actor {index}] {m}", flush=True)) \
+        if config.record_best else None
     try:
         obs, _ = env.reset()
         history.reset(obs["pixels"])
+        if best is not None:
+            best.start(episode)
+            best.add(_video_frame(env, obs))
         while not stop.is_set():
             version = follower.poll(net)
             if version < 0:
@@ -181,6 +189,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     writer.add(obs["pixels"], action, flags=1 if bad[-1] else 0,
                                hud=getattr(getattr(env, "capture", None), "last_hud", None),
                                extras={"actor": np.uint8(1), "reward": np.float32(reward)})
+                if best is not None:
+                    best.add(_video_frame(env, obs))
                 history.push(obs["pixels"])
                 frames.append(history.frames[-1])
                 hear(obs)
@@ -204,14 +214,21 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                 if writer is not None:
                     writer.close(summary=info.get("episode", {}))
                     writer = None
+                if best is not None:
+                    best.finish(info.get("episode", {}))
                 episode += 1
                 obs, _ = env.reset()
                 history.reset(obs["pixels"])
+                if best is not None:
+                    best.start(episode)
+                    best.add(_video_frame(env, obs))
                 if config.record_every and episode % config.record_every == 0:
                     writer = _episode_writer(run_dir, index, episode, env)
     finally:
         if writer is not None:
             writer.close(summary={"ended": "actor stopped"})
+        if best is not None:
+            best.close()
         env.close()
 
 
@@ -224,6 +241,13 @@ def _offer(out, item, timeout_s: float = 0.25) -> bool:
         return True
     except queue_mod.Full:
         return False
+
+
+def _video_frame(env, obs):
+    """What the best game's film shows of this step: the game's own picture, or, for a game with no screen
+    behind it (the synthetic stand-in), the observation."""
+    capture = getattr(env, "capture", None)
+    return obs["pixels"] if capture is None else getattr(capture, "last_video", None)
 
 
 def _episode_writer(run_dir: Path, index: int, episode: int, env):

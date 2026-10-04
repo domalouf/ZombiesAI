@@ -143,6 +143,28 @@ def test_screen_capture_picks_x11_and_produces_a_policy_frame(x_display, window,
         capture.close()
 
 
+def test_screen_capture_keeps_a_film_frame_of_each_grab_when_asked(x_display, window):
+    """The best game's film (rl/best_episode.py): every other pixel of the grab, still BGRX for ffmpeg."""
+    from zombiesai.demos.capture import ScreenCapture
+
+    capture = ScreenCapture(window=window, display=x_display, video_height=HEIGHT // 2)
+    try:
+        capture.read()
+        film = capture.last_video
+        assert film.shape == (HEIGHT // 2, WIDTH // 2, 4) and film.dtype == np.uint8
+        quarter_x, quarter_y = WIDTH // 8, HEIGHT // 8
+        assert tuple(film[quarter_y, quarter_x, :3]) == (0, 0, 255)  # red, as B, G, R
+        assert tuple(film[3 * quarter_y, quarter_x, :3]) == (255, 0, 0)  # blue
+    finally:
+        capture.close()
+    plain = ScreenCapture(window=window, display=x_display)
+    try:
+        plain.read()
+        assert plain.last_video is None
+    finally:
+        plain.close()
+
+
 def test_a_mapped_window_wholly_on_screen_is_capturable(x_display, window):
     capture = grabber(window, display=x_display)
     try:

@@ -222,6 +222,7 @@ class _Strokes:
     used: np.ndarray
     used_idx: tuple
     used_ring: tuple
+    rings: np.ndarray  # flat indices of every ring: the scene the tally is drawn over
 
 
 @lru_cache(maxsize=4)
@@ -237,13 +238,25 @@ def _strokes(path=ATLAS_PATH) -> _Strokes:
         ring.append(np.flatnonzero(around))
     used = np.unique(np.concatenate(idx + ring))
     return _Strokes(tuple(idx), tuple(ring), np.flatnonzero(allm), used,
-                    tuple(np.searchsorted(used, i) for i in idx), tuple(np.searchsorted(used, r) for r in ring))
+                    tuple(np.searchsorted(used, i) for i in idx), tuple(np.searchsorted(used, r) for r in ring),
+                    np.unique(np.concatenate(ring)))
 
 
 # Stroke judgement, per stroke. Red ink is the tally's own colour (~(108, 1, 0)); nothing in Nacht's scene
 # is that saturated. Contrast is mean brightness inside the stroke minus the scene around it.
 RED_PRESENT, RED_ABSENT = 0.5, 0.12
 CONTRAST_PRESENT, CONTRAST_ABSENT = 35.0, 14.0
+# ...until the player is hurt: WaW washes the screen dark red, the scene around the strokes turns tally red
+# too, and every stroke reads present -- a full-confidence round 10 in a game that never left round 1. The
+# rings (the scene) of a real read are 0% that red; a wash makes them ~100%.
+RED_WASH = 0.2
+
+
+def red_wash(crop: np.ndarray, strokes: _Strokes | None = None) -> float:
+    """Fraction of the scene around the tally that is tally red: above `RED_WASH`, red is no evidence."""
+    s = strokes or _strokes()
+    x = crop.reshape(-1, 3)[s.rings]
+    return float(np.count_nonzero((x[:, 0] > 60) & (x[:, 1] < 30) & (x[:, 2] < 30)) / len(x))
 
 
 def stroke_evidence(crop: np.ndarray, strokes: _Strokes | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -288,6 +301,8 @@ def _prefix(on: np.ndarray, known: np.ndarray) -> int:
 
 
 def read_round(crop: np.ndarray) -> RoundRead:
+    if red_wash(crop) > RED_WASH:
+        return RoundRead(status=UNREADABLE)
     reds, contrast = stroke_evidence(crop)
     known = ~np.isnan(reds)
     reds = np.where(known, reds, 0.0)

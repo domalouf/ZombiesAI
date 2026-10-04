@@ -52,7 +52,28 @@
     color: var(--chalk-dim);
   }
   .masthead { display: grid; gap: 10px; margin-bottom: 20px; }
-  .tagline { margin: 0; max-width: 72ch; color: var(--chalk-dim); font-size: 14.5px; }
+  .tagline { margin: 6px 0 0; max-width: 72ch; color: var(--chalk-dim); font-size: 14.5px; }
+  .about summary { width: fit-content; cursor: pointer; font-size: 13.5px; color: var(--chalk-dim); }
+  .about summary:hover { color: var(--chalk); }
+
+  /* A "?" beside a heading or chart title: hover or focus it for what that part means in plain words. Focus too,
+     so it works from the keyboard and on a tap. */
+  .explain { position: relative; display: inline-block; margin-left: 7px; vertical-align: 1px; }
+  .explain button {
+    width: 17px; height: 17px; padding: 0;
+    font: 700 11px/15px var(--ui); color: var(--chalk-dim); text-align: center;
+    background: none; border: 1px solid var(--line); border-radius: 50%; cursor: help;
+  }
+  .explain button:hover, .explain button:focus-visible { color: var(--chalk); border-color: var(--chalk-dim); }
+  .explain .bubble {
+    position: absolute; z-index: 6; left: -6px; top: calc(100% + 7px);
+    width: max-content; max-width: min(320px, 78vw);
+    padding: 8px 10px;
+    background: rgba(12, 16, 15, 0.96); border: 1px solid var(--line); border-radius: 3px;
+    font: 400 13px/1.4 var(--ui); letter-spacing: normal; text-transform: none; color: var(--chalk);
+    opacity: 0; visibility: hidden; transition: opacity 90ms linear;
+  }
+  .explain:hover .bubble, .explain:focus-within .bubble { opacity: 1; visibility: visible; }
   .meta { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 14px; color: var(--chalk-dim); }
   .meta b { color: var(--chalk); font-weight: 700; }
 
@@ -172,7 +193,11 @@
   <header class="masthead">
     <nav class="site-nav" id="nav" aria-label="Site" hidden></nav>
     <h1>Training Room</h1>
-    <p class="tagline" id="tagline"></p>
+    <!-- Folded by default: the numbers are what the reader came for, and the intro would push them below the fold. -->
+    <details class="about">
+      <summary>About this page</summary>
+      <p class="tagline" id="tagline"></p>
+    </details>
     <p class="meta" id="meta"></p>
   </header>
   <div id="body"></div>
@@ -233,6 +258,59 @@ function mount(node, children) {
   node.replaceChildren(...children.filter(Boolean));
   return node;
 }
+/* The "?" beside a heading or chart title, and what it says on hover or focus. */
+function explain(text) {
+  if (!text) return null;
+  return el("span", { class: "explain" }, [
+    el("button", { type: "button", "aria-label": "What this means: " + text, text: "?" }),
+    el("span", { class: "bubble", "aria-hidden": "true", text }),
+  ]);
+}
+
+/* What each part of the page means, for a reader who has never trained a model. The hints under each chart
+   say what is measured; these say why it matters and what a good one looks like. */
+const SECTION_EXPLAIN = {
+  learning: "The headline curves. If training is working, these climb over time; flat or falling means the AI " +
+    "isn't getting better at the game.",
+  gates: "Checks that the AI is winning the game, not gaming the scoring. Its reward comes from several sources; " +
+    "if one source starts to dominate, it may have found a loophole instead of learning to play. Each red dashed " +
+    "line is a limit the curve should stay under.",
+  hood: "Diagnostics for the training algorithm itself. They don't measure skill, but they warn early when " +
+    "something is off: learning stalled, updates too large, or the computer running slowly.",
+};
+const CHART_EXPLAIN = {
+  return_mean: "The total reward the AI earns per game: points for kills, surviving rounds and so on. Going up " +
+    "means it is learning to play better.",
+  round_reached_mean: "Which zombie round the AI survives to, on average. The goal the whole project is chasing.",
+  "val.accuracy.mean_balanced": "How often the copy-a-human model picks the same action a human did, on clips it " +
+    "never trained on. Higher is better; balanced so rare actions count as much as common ones.",
+  "val.mean_balanced": "How well the model guesses which buttons were pressed between two video frames, on clips " +
+    "it never trained on. Higher is better.",
+  max_term_share_mean: "The share of the AI's reward that comes from its single biggest source (points, rounds, " +
+    "purchases...). Should stay under 0.60: above it, the AI is likely farming one thing rather than playing well.",
+  repair_share_mean: "The share of points that come from rebuilding barricades. Repairs are easy points, so an AI " +
+    "can learn to farm them instead of fighting. Should stay under 0.25.",
+  entropy: "How random the AI's choices are. It starts high (exploring) and should drift down as it settles on " +
+    "what works. A crash to zero too early means it stopped trying new things.",
+  approx_kl: "KL is short for Kullback-Leibler divergence, a standard measure of how different two probability " +
+    "distributions are. Here it compares the AI's choices before and after one update: how much its behaviour " +
+    "changed. \"Approx.\" because it is estimated from a sample of moves. Small and steady is healthy; big spikes " +
+    "mean updates are too large and learning can become unstable.",
+  clipfrac: "How often an update hit PPO's safety limit on change size. A little is normal; a lot means the AI " +
+    "is trying to change faster than allowed.",
+  explained_variance: "How well the AI predicts the reward it's about to get. 1 is perfect, 0 is no better than " +
+    "guessing the average. Should rise toward 1.",
+  value_loss: "The error in the AI's reward predictions. Lower is better, though it can rise briefly when the AI " +
+    "reaches new situations.",
+  length_mean: "How many steps a game lasts before the AI dies or hits the time limit. Longer usually means it " +
+    "is surviving better.",
+  "loss.policy": "How far the model's chosen actions are from the human's in the training clips. Should fall.",
+  "loss.value": "The error in the model's reward predictions during training. Should fall.",
+  loss: "The model's overall training error. Should fall, then level off.",
+  sps: "How many game steps per second training processes. A speed gauge for the computer, not a measure of " +
+    "how well the AI plays.",
+};
+
 const SVGNS = "http://www.w3.org/2000/svg";
 function svg(tag, props = {}) {
   const node = document.createElementNS(SVGNS, tag);
@@ -271,7 +349,7 @@ function Chart(spec) {
   const tip = el("div", { class: "tip", role: "status", "aria-live": "polite" });
   const holder = el("div", { class: "chart" });
   const head = el("div", {}, [
-    el("div", { class: "title", text: spec.title }),
+    el("div", { class: "title" }, [document.createTextNode(spec.title), explain(spec.explain)]),
     spec.hint ? el("p", { class: "hint", text: spec.hint }) : null,
   ]);
   const plot = el("div", { style: "position: relative" }, [tip]);
@@ -432,6 +510,7 @@ function chartCard(key, opts = {}) {
   return Chart({
     title: opts.title || meta.label,
     hint: opts.hint ?? meta.hint,
+    explain: CHART_EXPLAIN[key],
     series: seriesFor(key),
     big: !!opts.big,
     zero: !!opts.zero,
@@ -504,10 +583,10 @@ function machinesSection() {
   ]);
 }
 
-function section(title, nodes) {
+function section(title, nodes, about) {
   const kept = nodes.filter(Boolean);
   if (!kept.length) return null;
-  return el("section", {}, [el("h2", { text: title }), el("div", { class: "grid" }, kept)]);
+  return el("section", {}, [el("h2", {}, [document.createTextNode(title), explain(about)]), el("div", { class: "grid" }, kept)]);
 }
 
 function heroCard() {
@@ -516,10 +595,14 @@ function heroCard() {
   if (rounds.length) {
     const best = rounds.reduce((a, b) => (a.series.round_reached_mean.best >= b.series.round_reached_mean.best ? a : b));
     const s = best.series.round_reached_mean;
+    // The furthest one game got, which only runs that log their games one by one can say (episodes.jsonl).
+    const games = runs.filter((r) => r.stats.best_round != null);
+    const far = games.length ? games.reduce((a, b) => (a.stats.best_round >= b.stats.best_round ? a : b)) : null;
     return el("div", { class: "card hero" }, [
-      el("div", { class: "label", text: "Best round reached, averaged over 100 episodes" }),
+      el("div", { class: "label", text: "Highest average round, over 100 games in a row" }),
       el("div", { class: "value", text: s.best.toFixed(2) }),
-      el("div", { class: "sub", text: `${best.name} — now ${s.last.toFixed(2)}` }),
+      el("div", { class: "sub", text: `${best.name} — its last 100 games average round ${s.last.toFixed(2)}` }),
+      far ? el("div", { class: "sub", text: `Furthest single game: round ${far.stats.best_round} (${far.name})` }) : null,
     ]);
   }
   const withReturn = runs.filter((r) => r.series.return_mean);
@@ -632,7 +715,8 @@ function table() {
     ["Progress", (r) => r.progress_text],
     ["Return", (r) => (r.series.return_mean ? fmtValue(r.series.return_mean.last) : "--")],
     ["Best return", (r) => (r.series.return_mean ? fmtValue(r.series.return_mean.best) : "--")],
-    ["Round", (r) => (r.series.round_reached_mean ? r.series.round_reached_mean.last.toFixed(2) : "--")],
+    ["Avg round (last 100)", (r) => (r.series.round_reached_mean ? r.series.round_reached_mean.last.toFixed(2) : "--")],
+    ["Best round", (r) => (r.stats.best_round != null ? String(r.stats.best_round) : "--")],
     ["Val bal. acc.", (r) => {
       const s = r.stats["val.accuracy.mean_balanced"] || r.stats["val.mean_balanced"];
       return s ? s.last.toFixed(3) : "--";
@@ -717,15 +801,15 @@ function renderScoped() {
     filterRow(),
     section("Is it learning?", [
       chartCard("return_mean", { big: true, title: "Return", hint: "mean over the trailing 100 episodes — the one curve that answers the question" }),
-      chartCard("round_reached_mean", { big: true, title: "Round reached", hint: "how far into Nacht der Untoten it survives, mean of the last 100 games" }),
+      chartCard("round_reached_mean", { big: true, title: "Average round reached", hint: "how far into Nacht der Untoten it survives, mean of the last 100 games" }),
       chartCard("val.accuracy.mean_balanced", { big: true, hint: "mean per-class recall across the action heads, on held-out clips" }),
       chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
-    ]),
+    ], SECTION_EXPLAIN.learning),
     machinesSection(),
     section("Reward hacking gates (PLAN.md, M7 T1)", [
       chartCard("max_term_share_mean", { gate: { value: DATA.gates.max_term_share.limit, label: "gate 0.60" }, zero: true }),
       chartCard("repair_share_mean", { gate: { value: DATA.gates.repair_share.limit, label: "gate 0.25" }, zero: true }),
-    ]),
+    ], SECTION_EXPLAIN.gates),
     section("Under the hood", [
       chartCard("entropy"),
       chartCard("approx_kl"),
@@ -737,7 +821,7 @@ function renderScoped() {
       chartCard("loss.value"),
       chartCard("loss"),
       chartCard("sps", { title: "Steps per second", hint: "how fast data arrives — not how well it learns" }),
-    ]),
+    ], SECTION_EXPLAIN.hood),
     notesPanel(),
   ].filter(Boolean));
   document.getElementById("scoped").replaceChildren(scoped);

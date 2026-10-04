@@ -153,6 +153,15 @@ BC-format checkpoint with an `rl` section, so `play_real.py`, `eval_bc.py` and `
 and it can be passed back to `train_rl.py` to continue. `--record-every 5` keeps every fifth episode of each
 actor as a clip (frames, actions, HUD crops, rewards) under `runs/<run>/episodes/`.
 
+**The run's best game, filmed.** Every actor films every game it plays and keeps it only if it is the run's
+best so far: `runs/<run>/best/best.mp4`, with its round, points, kills, actor, episode and full summary in
+`best.json`. Best is the highest round, then the most points, then the most kills -- the game-over
+scoreboard's numbers when they were read, else the HUD's -- and a tie keeps the earlier game. The film is the
+game's own picture at 720p and 15 fps (every other pixel of each 1440p grab, ~1 ms of the tick), encoded by
+ffmpeg on NVENC where there is one, else x264; about 18 MB a minute. A game cut short by stopping the run is
+not kept. A fleet's other PCs keep the best of their own games in their own copy of the run. `--no-record-best`
+turns it off (`rl/best_episode.py`).
+
 ## What the first real runs taught (2026-09-27)
 
 Four Plutonium games, `bc_real3` (all five demos, 61k decisions) as the starting policy. Each of these was
@@ -319,7 +328,7 @@ Traffic is ~415 KB/s per game before compression (128x72 frames at 15 Hz): nothi
 worth checking on Wi-Fi.
 
 **On the site.** Each worker PC can report itself to lts the way the training PC does (`publish_live.py
---worker <id>`; README.md, "Live on the site"): the Training Room shows a card per machine, with what its worker
+--worker <id>`; README.md, "Live on the site"): the Training Room shows a collapsible panel per machine, with what its worker
 is doing, read from the `runs/fleet/status.json` the worker rewrites every few seconds.
 
 ## Rehearse without the game first
