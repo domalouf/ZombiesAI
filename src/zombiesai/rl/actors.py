@@ -152,6 +152,10 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     def stopping() -> bool:
         return stop.is_set() or os.getppid() != parent
 
+    from zombiesai.realgame.env import Stopped
+
+    if hasattr(env, "should_stop"):  # a reset can wait minutes for a map load or a relaunch; a stop cannot
+        env.should_stop = stopping
     try:
         obs, _ = env.reset()
         history.reset(obs["pixels"])
@@ -237,6 +241,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     best.add(_video_frame(env, obs))
                 if config.record_every and episode % config.record_every == 0:
                     writer = _episode_writer(run_dir, index, episode, env)
+    except Stopped:
+        pass  # told to stop while a reset waited for a fresh game: an ordinary stop, not a failure
     finally:
         if writer is not None:
             writer.close(summary={"ended": "actor stopped"})

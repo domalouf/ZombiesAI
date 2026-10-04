@@ -160,16 +160,24 @@ def default_init(tree: Path) -> str:
     return next((c["path"] for c in found if c["kind"] == "BC"), "fresh")
 
 
-def default_games(root: str = FLEET_ROOT) -> int:
-    """The fleet's size, or as many games as this PC carries beside the learner when it has no fleet yet."""
+def capacity(root: str = FLEET_ROOT, say=print) -> int:
+    """As many games as this PC carries beside the learner (rl/capacity.py: CPUs, free RAM and VRAM, after the
+    desktop's and the learner's share), as `train_rl.py --actors auto` sizes them."""
+    from zombiesai.rl.capacity import games_for, probe
+
+    verdict = games_for(probe(root), learner=True)
+    say(f"this PC carries {verdict}")
+    return verdict.games
+
+
+def default_games(root: str = FLEET_ROOT, say=print) -> int:
+    """The fleet's size (what was chosen last time), or this PC's capacity when it has no fleet yet."""
     from zombiesai.realgame.instances import load_fleet
 
     try:
         return load_fleet(root).n
     except FileNotFoundError:
-        from zombiesai.rl.capacity import games_for, probe
-
-        return games_for(probe(root), learner=True).games
+        return capacity(root, say)
 
 
 def last_line(path: Path) -> dict | None:
@@ -209,7 +217,7 @@ def saved(run: Path, *, now: float | None = None) -> str:
 # ------------------------------------------------------------------------------------------------ start
 
 
-def start(repo: Path, *, init: str | None = None, games: int | None = None, name: str | None = None,
+def start(repo: Path, *, init: str | None = None, games: int | str | None = None, name: str | None = None,
           extra: str = "", watch: bool = False, say=print) -> int:
     """Games up, then a trainer on them. Returns a process exit code."""
     from dataclasses import replace
@@ -225,7 +233,10 @@ def start(repo: Path, *, init: str | None = None, games: int | None = None, name
         say(f"already training: {run.name if run else 'a run'} (pid {busy[0].pid}). `./zai stop` first.")
         return 1
     init = init or default_init(repo)
-    games = games or default_games()
+    games = capacity(say=say) if games == "auto" else int(games) if games else default_games(say=say)
+    if games < 1:
+        say("no games to play: this PC has no room for one beside the learner (--games N to insist)")
+        return 1
     name = name or next_run_name(repo)
     if re.search(r"--env[= ]synthetic\b", extra):  # a rehearsal of the plumbing: no games to bring up
         say(f"starting runs/{name}: a rehearsal with {games} synthetic games, from {init}")
@@ -376,7 +387,7 @@ def status(repo: Path, *, say=print) -> int:
     counts: dict[str, int] = {}
     for _, k in found.values():
         counts[k] = counts.get(k, 0) + 1
-    other = {k: v for k, v in counts.items() if k in ("viewer", "dashboard", "actor", "game", "game display")}
+    other = {k: v for k, v in counts.items() if k in ("viewer", "dashboard", "actor")}  # games: the line above
     if other:
         say("processes: " + ", ".join(f"{v} {k}" for k, v in sorted(other.items())))
     return 0

@@ -3,6 +3,7 @@
 
     ./zai start                      # games up, then continue the newest real-game run as runs/rl<next>
     ./zai start --games 6 --watch    # six games, and open the viewers on workspace 9
+    ./zai start --games auto         # as many games as this PC's CPUs, RAM and VRAM carry (rl/capacity.py)
     ./zai start --from runs/bc1/bc.pt --name rl-bc1
     ./zai start --from fresh         # a new pixel+audio policy, no BC prior
     ./zai start -- --lr 1e-4         # anything after -- goes to scripts/train_rl.py as it is
@@ -33,8 +34,9 @@ def main() -> int:
     up.add_argument("--from", dest="init", default=None,
                     help="checkpoint to start from (default: the newest real-game run's checkpoint.pt, else the "
                          "newest bc.pt, else fresh), or 'fresh'")
-    up.add_argument("--games", type=int, default=None,
-                    help="games to play (default: the fleet's size, or what this PC can carry)")
+    up.add_argument("--games", type=lambda v: v if v == "auto" else int(v), default=None,
+                    help="games to play, or 'auto': as many as this PC's CPUs, RAM and VRAM carry beside the "
+                         "learner (default: the fleet's size, i.e. last time's; auto when there is no fleet)")
     up.add_argument("--name", default=None, help="the run's name under runs/ (default: rl<next number>)")
     up.add_argument("--watch", action="store_true", help="open the game viewers once training starts")
     up.add_argument("train_args", nargs=argparse.REMAINDER, help="after --: more scripts/train_rl.py flags")
