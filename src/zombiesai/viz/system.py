@@ -326,7 +326,8 @@ class SystemSampler:
 
     def _loop(self) -> None:
         while True:
-            self._awake.wait()
+            if self.paused:
+                self._rest()
             try:
                 self.sample()
             except Exception:  # one bad read (a sensor that vanished) must not end the sampling for good
@@ -338,15 +339,17 @@ class SystemSampler:
         return not self._awake.is_set()
 
     def pause(self) -> None:
-        if self.paused:
-            return
         self._awake.clear()
-        self.gpu.close()
-        with self._lock:
-            self._prev = None  # a rate over the whole pause would be an average, not what it is doing now
 
     def resume(self) -> None:
         self._awake.set()
+
+    def _rest(self) -> None:
+        """Paused: stop nvidia-smi and wait. On the sampling thread, between samples, so none in flight starts it again."""
+        self.gpu.close()
+        self._awake.wait()
+        with self._lock:
+            self._prev = None  # a rate over the whole pause would be an average, not what it is doing now
 
     def specs(self) -> dict:
         if self._specs is None or (not self._specs["gpus"] and self.latest and self.latest["gpus"]):

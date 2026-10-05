@@ -1,6 +1,7 @@
 import json
 import os
 import threading
+import time
 import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
@@ -94,10 +95,16 @@ def test_a_paused_sampler_stops_nvidia_smi_and_takes_no_rate_across_the_pause(tm
     machine(tmp_path, idle=1000, busy=1000, core_busy=500, read_sectors=0, rx=0, ticks=0)
     sampler.sample(now=100.0)
     sampler.pause()
-    sampler.pause()
-    assert sampler.paused and gpu.closed == 1
+    assert sampler.paused
+    threading.Thread(target=sampler._rest, daemon=True).start()  # what the sampling thread does when paused
+    deadline = time.monotonic() + 5
+    while not gpu.closed and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert gpu.closed == 1
     sampler.resume()
     assert not sampler.paused
+    while sampler._prev is not None and time.monotonic() < deadline:
+        time.sleep(0.01)
     machine(tmp_path, idle=1100, busy=1300, core_busy=750, read_sectors=0, rx=0, ticks=0)
     assert sampler.sample(now=400.0)["cpu"]["pct"] is None and sampler.history() == []
     machine(tmp_path, idle=1200, busy=1400, core_busy=800, read_sectors=0, rx=0, ticks=0)
