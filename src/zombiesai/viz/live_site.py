@@ -40,6 +40,7 @@ from pathlib import Path
 from zombiesai import reward
 from zombiesai.realgame.hud_reward import UNDETECTED_TERMS
 from zombiesai.viz.dashboard import public_payload, write_dashboard_site
+from zombiesai.viz.saved_games import saved_games, ship
 from zombiesai.viz.stream import StreamFeed
 from zombiesai.viz.supervise import build_payload, live_trainers, run_roots
 from zombiesai.viz.system import SystemSampler
@@ -174,8 +175,10 @@ def public_runs(payload: dict, trainers: list[dict]) -> dict:
 def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[str] = ()) -> Path:
     """The training page, live: the runs as they stand now baked in (what a visitor sees if the PC is off), and
     the machines and Training now filled from live/*.json. out_dir is the site's zombies/training/. `machines`
-    are the worker PCs' ids, whose live/machine-<id>.json the page also reads (a static site has no listing)."""
-    payload = build_payload(run_roots(repo))
+    are the worker PCs' ids, whose live/machine-<id>.json the page also reads (a static site has no listing).
+    The games saved for good (viz/saved_games.py) go in beside it, as saved/<name>.mp4."""
+    roots = run_roots(repo)
+    payload = build_payload(roots)
     here = Path(__file__).parent
     ids = [machine_id(m) for m in machines]
     runs = live_runs(payload, live_trainers(payload["run_paths"]))
@@ -187,6 +190,7 @@ def write_live_page(repo: Path, out_dir: Path, description: str, machines: list[
         script_after=f"<script>window.LIVE_MACHINES = {json.dumps(ids)}; window.LIVE_SINCE = {PUBLISHED_SINCE};</script>\n"
                      + (here / "system_view.html").read_text() + (here / "live_public.html").read_text(),
         reward=reward.describe(undetected=UNDETECTED_TERMS),
+        saved=ship(saved_games([root for _, root in roots]), out_dir),
     )
 
 

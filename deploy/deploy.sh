@@ -50,8 +50,10 @@ log "building the stream page (channel=${TWITCH_CHANNEL:-none yet})"
 uv run python scripts/build_stream.py --out site/zombies/live
 
 log "publishing site/zombies/ -> $dest"
-# --delete so a rebuilt page doesn't leave stale files behind; trailing slashes matter. The filter protects
-# training/live/ from it: those files are the training PC's, pushed there and not built here.
-rsync -av --delete --filter='P training/live/' site/zombies/ "$dest"
+# --delete so a rebuilt page doesn't leave stale files behind; trailing slashes matter. The filters protect two
+# directories from it: training/live/ is the training PC's, pushed there and not built here; training/saved/ holds
+# the saved games, which the site keeps once they are up, even when deployed from a checkout without their films
+# (runs/saved/ is only on the training PC). Taking one down is done on the server.
+rsync -av --delete --filter='P training/live/' --filter='P training/saved/' site/zombies/ "$dest"
 
 log "done — https://domalouf.com/zombies/training/ and /zombies/live/"

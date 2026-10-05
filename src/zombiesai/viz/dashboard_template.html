@@ -148,6 +148,7 @@
   .film figcaption .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
   .film figcaption b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
   /* The film at the top of the page: big, but short enough that the page below still shows it goes on. */
+  .film figcaption .caption { flex-basis: 100%; margin: 0; font-size: 14.5px; color: var(--chalk); }
   .featured { margin-bottom: 8px; }
   .featured h2 { margin-top: 0; }
   .featured .film { max-width: 1040px; }
@@ -304,6 +305,8 @@ const SECTION_EXPLAIN = {
   films: "A recording of the single best game the AI has played in each run: the highest round it reached, with " +
     "the most kills and then the most points breaking a tie. It is replaced whenever the AI beats it, so this is " +
     "the best it has done so far, as it saw it.",
+  saved: "Games kept for good. A run's best game is replaced as soon as the AI beats it, so a game worth " +
+    "keeping for itself, whatever comes next, is saved here.",
   hood: "Diagnostics for the training algorithm itself. They don't measure skill, but they warn early when " +
     "something is off: learning stalled, updates too large, or the computer running slowly.",
 };
@@ -434,6 +437,41 @@ function bestGames() {
   return el("section", {}, [
     el("h2", {}, [document.createTextNode("Best games"), explain(SECTION_EXPLAIN.films)]),
     el("div", { class: "grid films" }, games.map((r) => filmFigure(r))),
+  ]);
+}
+
+/* -- saved games ------------------------------------------------------------
+   Games kept for good (viz/saved_games.py), their films beside the page. They come with the page, not with the
+   live numbers, so a refresh (which replaces DATA) never takes them away. */
+const SAVED = (DATA && DATA.saved) || [];
+
+function savedFigure(game) {
+  const key = "saved:" + game.name;
+  let video = films.get(key);
+  if (!video) {
+    video = el("video", { src: game.video, controls: "", preload: "metadata", playsinline: "",
+                          "aria-label": `${game.title}: a saved game from ${game.run}` });
+    films.set(key, video);
+  }
+  const bits = [["Round", game.round], ["Points", game.points], ["Kills", game.kills]]
+    .filter(([, v]) => v != null).map(([label, v]) => [label, fmtInt(v)]);
+  if (game.seconds != null) bits.push(["Lasted", fmtDuration(game.seconds)]);
+  return el("figure", { class: "card film" }, [
+    video,
+    el("figcaption", {}, [
+      el("span", { class: "who", text: game.title }),
+      ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
+      game.run ? el("span", { text: game.run }) : null,
+      game.caption ? el("p", { class: "caption", text: game.caption }) : null,
+    ]),
+  ]);
+}
+
+function savedGames() {
+  if (!SAVED.length) return null;
+  return el("section", {}, [
+    el("h2", {}, [document.createTextNode("Saved games"), explain(SECTION_EXPLAIN.saved)]),
+    el("div", { class: "grid films" }, SAVED.map(savedFigure)),
   ]);
 }
 
@@ -932,6 +970,7 @@ function renderScoped() {
       chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
     ], SECTION_EXPLAIN.learning),
     bestGames(),
+    savedGames(),
     machinesSection(),
     rewardSection(),
     section("Reward hacking gates (PLAN.md, M7 T1)", [
