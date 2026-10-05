@@ -147,6 +147,10 @@
   .film figcaption .who { display: inline-flex; align-items: center; gap: 7px; font: 700 15px/1.2 var(--ui); color: var(--chalk); }
   .film figcaption .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
   .film figcaption b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* The film at the top of the page: big, but short enough that the page below still shows it goes on. */
+  .featured { margin-bottom: 8px; }
+  .featured h2 { margin-top: 0; }
+  .featured .film { max-width: 1040px; }
   .section-note { margin: -4px 0 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 72ch; }
 
   .tip {
@@ -216,6 +220,8 @@
     </details>
     <p class="meta" id="meta"></p>
   </header>
+  <!-- The best game any run has played, first: the reader sees the AI play before reading how it learns. -->
+  <div id="featured"></div>
   <div id="body"></div>
   <footer id="footer"></footer>
 </main>
@@ -293,6 +299,8 @@ const SECTION_EXPLAIN = {
   gates: "Checks that the AI is winning the game, not gaming the scoring. Its reward comes from several sources; " +
     "if one source starts to dominate, it may have found a loophole instead of learning to play. Each red dashed " +
     "line is a limit the curve should stay under.",
+  featured: "The best game the AI has played in any run, as it saw it: the furthest round it reached, with the " +
+    "most kills and then the most points breaking a tie. It is replaced whenever the AI does better.",
   films: "A recording of the single best game the AI has played in each run: the highest round it reached, with " +
     "the most kills and then the most points breaking a tie. It is replaced whenever the AI beats it, so this is " +
     "the best it has done so far, as it saw it.",
@@ -371,35 +379,61 @@ function refreshData(next) {
    <video> is kept and moved into the new page rather than made again: a refresh never stops one playing, and a
    better game's film takes over only once the old one is not being watched. */
 const films = new Map();
-function film(run) {
+// `key`: which <video> this is. The film at the top of the page is a second player of the best run's film, so it
+// has a key of its own rather than taking that run's out of the Best games section.
+function film(run, key = run.name) {
   const game = run.best_game;
-  let video = films.get(run.name);
+  let video = films.get(key);
   if (!video || (video.dataset.src !== game.video && (video.paused || video.ended))) {
     video = el("video", { src: game.video, "data-src": game.video, controls: "", preload: "metadata", playsinline: "",
                           "aria-label": `${run.name}: its best game, round ${game.round}` });
-    films.set(run.name, video);
+    films.set(key, video);
   }
   return video;
 }
 
+function filmFigure(run, key) {
+  const g = run.best_game;
+  const bits = [["Round", fmtInt(g.round)], ["Points", fmtInt(g.points)], ["Kills", fmtInt(g.kills)]];
+  if (g.seconds != null) bits.push(["Lasted", fmtDuration(g.seconds)]);
+  return el("figure", { class: "card film" }, [
+    film(run, key),
+    el("figcaption", {}, [
+      el("span", { class: "who" }, [el("span", { class: "key", style: `background:${run.color}` }), el("span", { text: run.name })]),
+      ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
+      g.recorded ? el("span", { text: "played " + fmtAgo(Math.max(0, Date.now() / 1000 - g.recorded)) }) : null,
+    ]),
+  ]);
+}
+
+/* The best of every run's best game, ranked as each run ranks its own: the highest round, then the most kills,
+   then the most points. Every run, not the selected environment's: it heads the page, above the selector. */
+function bestFilmed() {
+  const rank = (g) => [g.round || 0, g.kills || 0, g.points || 0];
+  const beats = (a, b) => {
+    const x = rank(a.best_game), y = rank(b.best_game);
+    const i = x.findIndex((v, j) => v !== y[j]);
+    return i >= 0 && x[i] > y[i];
+  };
+  return runs.filter((r) => r.best_game && r.best_game.video).reduce((a, b) => (!a || beats(b, a) ? b : a), null);
+}
+
+function featuredFilm() {
+  const best = bestFilmed();
+  if (!best) return null;
+  return el("section", { class: "featured" }, [
+    el("h2", {}, [document.createTextNode("Best game so far"), explain(SECTION_EXPLAIN.featured)]),
+    filmFigure(best, "featured"),
+  ]);
+}
+
 function bestGames() {
   const games = inGroup().filter((r) => r.best_game && r.best_game.video);
-  if (!games.length) return null;
+  // One film, and it is already at the top of the page: once is enough.
+  if (!games.length || (games.length === 1 && games[0] === bestFilmed())) return null;
   return el("section", {}, [
     el("h2", {}, [document.createTextNode("Best games"), explain(SECTION_EXPLAIN.films)]),
-    el("div", { class: "grid films" }, games.map((r) => {
-      const g = r.best_game;
-      const bits = [["Round", fmtInt(g.round)], ["Points", fmtInt(g.points)], ["Kills", fmtInt(g.kills)]];
-      if (g.seconds != null) bits.push(["Lasted", fmtDuration(g.seconds)]);
-      return el("figure", { class: "card film" }, [
-        film(r),
-        el("figcaption", {}, [
-          el("span", { class: "who" }, [el("span", { class: "key", style: `background:${r.color}` }), el("span", { text: r.name })]),
-          ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
-          g.recorded ? el("span", { text: "played " + fmtAgo(Math.max(0, Date.now() / 1000 - g.recorded)) }) : null,
-        ]),
-      ]);
-    })),
+    el("div", { class: "grid films" }, games.map((r) => filmFigure(r))),
   ]);
 }
 
@@ -873,6 +907,7 @@ function render() {
       document.createTextNode(DATA.intro && !DATA.live ? " running when this was built" : " running now")]) : null,
   ]);
 
+  mount(document.getElementById("featured"), [featuredFilm()]);
   const body = document.getElementById("body");
   if (!runs.length) { mount(body, [blankSlate()]); return; }
   mount(body, [
