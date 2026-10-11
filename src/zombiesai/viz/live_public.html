@@ -19,28 +19,35 @@ async function liveJSON(name) {
   return response.json();
 }
 
+// In the top bar: a word and the short of it, the whole sentence on hover.
 function liveStatus() {
   const node = document.getElementById("live-status");
   const age = pub.at == null ? null : Math.max(0, Date.now() / 1000 - pub.at);
-  let verdict, text;
+  let verdict, short, text;
   if (age == null) {
     verdict = { level: "warning", text: "! offline" };
+    short = "the runs are as published";
     text = "The PC is not reporting. The runs below are as they stood when this page was published.";
   } else if (age > liveOfflineAfter(pub.every)) {
     verdict = { level: "warning", text: "! offline" };
+    short = `last report ${fmtDuration(age)} ago`;
     text = `The PC last reported ${fmtDuration(age)} ago; these are its last numbers.`;
   } else if (pub.idle) {
     verdict = { level: "good", text: "OK online" };
+    short = `nothing training · last check-in ${fmtDuration(age)} ago`;
     text = `Nothing is training, so the PC checks in every ${fmtDuration(pub.every)}; last ${fmtDuration(age)} ago.`;
   } else {
     verdict = { level: "good", text: "OK live" };
+    short = `updated ${Math.round(age)}s ago`;
     text = `Updated ${Math.round(age)}s ago, straight from the PC it trains on.`;
   }
   if (FLEET) {
     const reporting = MACHINES.filter((m) => liveMachineUp(m)).length;
+    short += ` · ${reporting} of ${MACHINES.length} machines`;
     text += ` ${reporting} of ${MACHINES.length} machines reporting.`;
   }
-  mount(node, [flag(verdict), document.createTextNode(text)]);
+  node.title = text;
+  mount(node, [flag(verdict), document.createTextNode(short)]);
 }
 
 /* -- the machines ------------------------------------------------------------
@@ -100,20 +107,24 @@ function liveMachineCard(m) {
       cpu ? meterRow("CPU", cpu.pct, fmtPct(cpu.pct), fmtC(cpu.temp)) : null,
       gpu ? meterRow("GPU", gpu.util, fmtPct(gpu.util), fmtC(gpu.temp)) : null,
       mem ? meterRow("RAM", mem.pct, fmtPct(mem.pct)) : null,
+      gpu && gpu.vram_total ? meterRow("VRAM", 100 * gpu.vram_used / gpu.vram_total,
+                                       fmtPct(100 * gpu.vram_used / gpu.vram_total), fmtBytes(gpu.vram_used)) : null,
     ]) : null,
     m.data && !live && now ? null : el("div", { class: "facts", text: liveMachineDoing(m) }),  // the note says it
+    now ? el("div", { class: "open-hint", text: "Open for its charts, cores, GPU, temperatures, disks and processes ▾" }) : null,
   ];
 }
 
-// Which panels a reader opened or closed, kept in their browser; the training PC starts open, the others closed.
-const LIVE_OPEN_KEY = "zombies-live-open";
+// Which panels a reader opened, kept in their browser; every one starts closed, a summary card. (A new key: the old
+// one remembered the training PC open for everyone, since it was open by default.)
+const LIVE_OPEN_KEY = "zombies-live-open-2";
 function liveOpenState() {
   try { return JSON.parse(localStorage.getItem(LIVE_OPEN_KEY)) || {}; } catch (e) { return {}; }
 }
 function liveRememberOpen(m) {
   try {
     const state = liveOpenState();
-    state[m.id || ""] = m.ui.details.open;
+    if (m.ui.details.open) state[m.id || ""] = true; else delete state[m.id || ""];
     localStorage.setItem(LIVE_OPEN_KEY, JSON.stringify(state));
   } catch (e) { /* private window: it just starts as the default next time */ }
 }
@@ -123,7 +134,7 @@ function liveMachinePanel(m) {
   const ui = { summary: el("summary"), specs: el("p", { class: "specs" }), system: el("div"), view: null };
   ui.details = el("details", { class: "card machine-panel" }, [
     ui.summary, el("div", { class: "body" }, [ui.specs, ui.system])]);
-  ui.details.open = remembered ?? !m.id;
+  ui.details.open = !!remembered;
   ui.details.addEventListener("toggle", () => { liveRememberOpen(m); liveRenderBody(m); });
   m.ui = ui;
   return ui.details;
@@ -215,7 +226,11 @@ async function pollLive() {
   liveStatus();
 }
 
-if (FLEET) document.getElementById("system-title").textContent = "The machines";
+if (FLEET) {
+  document.getElementById("system-title").textContent = "The machines";
+  document.getElementById("system-sub").textContent = "The PC that trains the model and the ones that play games for " +
+    "it, live. Open one for its charts, cores, GPU, temperatures, disks and processes.";
+}
 document.getElementById("footer").textContent =
   (FLEET ? "Live from the gaming PCs it trains and plays on: each pushes its numbers"
          : "Live from the gaming PC it trains on: it pushes these numbers") +

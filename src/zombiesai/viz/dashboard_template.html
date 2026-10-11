@@ -38,12 +38,6 @@
     padding-block: 22px 56px;
   }
   main { max-width: 1360px; margin-inline: auto; }
-  h1 {
-    margin: 0;
-    font: 800 clamp(30px, 4vw, 44px)/0.95 var(--display);
-    letter-spacing: 0.01em;
-    text-transform: uppercase;
-  }
   h2 {
     margin: 30px 0 12px;
     font: 700 13px/1.2 var(--ui);
@@ -51,10 +45,136 @@
     text-transform: uppercase;
     color: var(--chalk-dim);
   }
-  .masthead { display: grid; gap: 10px; margin-bottom: 20px; }
+  .eyebrow { margin: 0; font: 700 12px/1.2 var(--ui); letter-spacing: 0.13em; text-transform: uppercase; color: var(--chalk-dim); }
+
+  /* The bar along the top: the page's name, a way to every section, whether it is live, and the site's links. It
+     stays in view on a wide screen; on a phone it scrolls away, where it would take a third of the screen. */
+  .topbar {
+    margin: -22px calc(-1 * clamp(16px, 3vw, 36px)) 16px;
+    padding-inline: clamp(16px, 3vw, 36px);
+    background: #1d2522; border-bottom: 1px solid var(--line);
+  }
+  @media (min-width: 761px) {
+    .topbar { position: sticky; top: 0; z-index: 10; }
+    section[id], #checks { scroll-margin-top: 76px; }
+  }
+  .topbar-in { max-width: 1360px; margin-inline: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding-block: 10px; }
+  .brand { margin: 0; font: 800 26px/1 var(--display); letter-spacing: 0.02em; text-transform: uppercase; }
+  .brand a { color: inherit; text-decoration: none; }
+  .sections { display: flex; gap: 2px; overflow-x: auto; scrollbar-width: none; }
+  .sections a { padding: 8px 11px; border-radius: 4px; color: var(--chalk-dim); text-decoration: none; font: 600 14px/1 var(--ui); white-space: nowrap; }
+  .sections a:hover { color: var(--chalk); }
+  .sections a[aria-current="true"] { background: var(--floor); color: var(--chalk); }
+  .topbar-end { margin-left: auto; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; }
+  @media (max-width: 760px) {
+    .sections { order: 3; flex-basis: 100%; margin-inline: -11px; }
+    .topbar-end { margin-left: 0; }
+  }
+  .pagebar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 22px; margin-bottom: 14px; }
   .tagline { margin: 6px 0 0; max-width: 72ch; color: var(--chalk-dim); font-size: 14.5px; }
   .about summary { width: fit-content; cursor: pointer; font-size: 13.5px; color: var(--chalk-dim); }
   .about summary:hover { color: var(--chalk); }
+
+  /* A section: a stencil title, a line on what it is for, and on the right whatever it is filtered by. */
+  .sec { margin-top: 48px; display: grid; gap: 16px; }
+  .sec-head { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 10px 24px; }
+  .sec-head h2 { margin: 0; font: 800 30px/1 var(--display); letter-spacing: 0.02em; text-transform: uppercase; color: var(--chalk); }
+  .sec-head .sub { margin: 5px 0 0; font-size: 14px; color: var(--chalk-dim); max-width: 72ch; }
+  .sec-head .tools { display: grid; gap: 8px; justify-items: end; }
+  .sec-head .tools .filters { margin: 0; justify-content: flex-end; }
+  @media (max-width: 760px) { .sec-head .tools { justify-items: start; } .sec-head .tools .filters { justify-content: flex-start; } }
+  .sub-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+
+  /* The overview: the best game beside what is training, the number the project chases, and anything wrong. */
+  .overview { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr); gap: 16px; align-items: start; }
+  .overview.no-film { grid-template-columns: minmax(0, 1fr); }
+  .overview .side { display: grid; gap: 16px; align-content: start; }
+  .overview.no-film .side { grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); }
+  .overview .side h2 { margin: 0 0 8px; font-size: 12px; }
+  .overview .side .now-runs { grid-template-columns: minmax(0, 1fr); }
+  @media (max-width: 900px) { .overview { grid-template-columns: minmax(0, 1fr); } }
+  #overview { display: grid; gap: 16px; }
+  .film-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+  .film-head .hint { font-size: 13px; color: var(--chalk-faint); }
+  .film figcaption .more-link { margin-left: auto; color: var(--chalk); font-weight: 600; text-decoration: none; }
+  .film figcaption .more-link:hover { text-decoration: underline; }
+
+  .health { display: grid; gap: 10px; align-content: start; }
+  .health .top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+  .health .top a { font-size: 13.5px; font-weight: 600; color: var(--chalk); text-decoration: none; }
+  .health .top a:hover { text-decoration: underline; }
+  .counts { display: flex; flex-wrap: wrap; gap: 6px; }
+  .count { padding: 4px 9px; border-radius: 3px; font: 700 13.5px/1.2 var(--ui); }
+  .count.critical { background: color-mix(in srgb, var(--critical) 18%, transparent); color: #f0716a; }
+  .count.warning { background: color-mix(in srgb, var(--warning) 14%, transparent); color: var(--warning); }
+  .count.good { background: color-mix(in srgb, var(--good) 16%, transparent); color: #2fbf4a; }
+  .count.info { background: var(--floor); color: var(--chalk-dim); }
+
+  /* A verdict on a run: an icon, a word for it on hover, and the sentence. Colour never carries it alone. */
+  .checks { display: grid; }
+  .check { display: grid; grid-template-columns: 1.9em minmax(0, 1fr); gap: 8px; align-items: baseline; padding: 8px 0; border-top: 1px solid var(--line); font-size: 14px; line-height: 1.35; }
+  .check .icon { font: 700 13px var(--mono); text-align: center; }
+  .check .who { font: 500 12.5px var(--mono); color: var(--chalk-dim); margin-right: 6px; }
+  .check.good .icon { color: var(--good); }
+  .check.warning .icon { color: var(--warning); }
+  .check.serious .icon { color: var(--serious); }
+  .check.critical .icon { color: #f0716a; }
+  .check.info .icon { color: var(--chalk-dim); }
+  .runcards { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr)); gap: 14px; }
+  .runcard .head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .runcard .head .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  .runcard .head .state { margin-left: auto; font: 500 11.5px var(--mono); color: var(--chalk-dim); }
+
+  /* Under the hood: a strip of the latest values and their trend, opening onto the full charts. */
+  .hood > summary { list-style: none; cursor: pointer; display: grid; gap: 12px; }
+  .hood > summary::-webkit-details-marker { display: none; }
+  .hood .bar { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .hood .bar .title { font: 700 17px/1.2 var(--ui); }
+  .hood .bar .hint { font-size: 13.5px; color: var(--chalk-dim); }
+  .hood .bar .toggle { margin-left: auto; font-size: 13.5px; color: var(--chalk-dim); }
+  .hood:not([open]) .bar .opened, .hood[open] .bar .closed, .hood[open] .sparks { display: none; }
+  .hood[open] > summary { margin-bottom: 14px; }
+  .sparks { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .spark { padding: 10px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--ground); display: grid; gap: 2px; }
+  .spark .label { font-size: 13px; color: var(--chalk-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .spark .value { font: 700 20px/1.2 var(--ui); font-variant-numeric: tabular-nums; }
+  .spark svg { display: block; width: 100%; height: 28px; }
+
+  /* Games: one player and a list to pick from, so only one film is ever on screen to play. */
+  .theater { display: grid; grid-template-columns: minmax(0, 1.75fr) minmax(300px, 1fr); padding: 0; overflow: hidden; }
+  .theater .stage { padding: 14px; border-right: 1px solid var(--line); min-width: 0; }
+  @media (max-width: 900px) {
+    .theater { grid-template-columns: minmax(0, 1fr); }
+    .theater .stage { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+  .playlist { display: flex; flex-direction: column; min-width: 0; }
+  .tabs { display: flex; border-bottom: 1px solid var(--line); }
+  .tabs button { flex: 1; padding: 13px 10px; border: 0; border-bottom: 2px solid transparent; background: none; color: var(--chalk-dim); font: 700 14px/1 var(--ui); cursor: pointer; }
+  .tabs button:hover { color: var(--chalk); }
+  .tabs button[aria-selected="true"] { color: var(--chalk); border-bottom-color: var(--chalk); }
+  .picks { list-style: none; margin: 0; padding: 8px; display: grid; gap: 4px; max-height: 560px; overflow-y: auto; }
+  .pick { width: 100%; display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 12px; align-items: center; padding: 8px; border: 0; border-radius: 4px; background: none; color: var(--chalk); text-align: left; font: inherit; cursor: pointer; }
+  .pick:hover { background: color-mix(in srgb, var(--chalk) 5%, transparent); }
+  .pick[aria-current="true"] { background: var(--floor); }
+  .pick video { display: block; width: 120px; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 3px; background: #000; pointer-events: none; }
+  .pick .name { display: flex; align-items: center; gap: 7px; font-weight: 700; }
+  .pick .name .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
+  .pick .tag { margin-left: auto; font: 500 11px var(--mono); color: var(--amber); white-space: nowrap; }
+  .pick .stats { display: block; font-size: 13px; color: var(--chalk-dim); font-variant-numeric: tabular-nums; }
+  .playlist .foot { margin: auto 0 0; padding: 12px 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--chalk-faint); }
+
+  /* Scoring: the rule book beside the gates that check it. */
+  .scoring { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 1000px) { .scoring { grid-template-columns: minmax(0, 1fr); } }
+  .gates { display: grid; gap: 16px; }
+  .chart .title.with-badge { display: flex; align-items: baseline; gap: 0 10px; }
+  .badge { margin-left: auto; padding: 3px 8px; border-radius: 3px; font: 700 12.5px/1.2 var(--ui); white-space: nowrap; }
+  .badge.critical { background: color-mix(in srgb, var(--critical) 18%, transparent); color: #f0716a; }
+  .badge.good { background: color-mix(in srgb, var(--good) 16%, transparent); color: #2fbf4a; }
+  .run-checks { display: inline-flex; gap: 8px; font: 700 12.5px var(--mono); }
+  .run-checks .critical { color: #f0716a; }
+  .run-checks .warning { color: var(--warning); }
+  .run-checks .good { color: var(--good); }
 
   /* A "?" beside a heading or chart title: hover or focus it for what that part means in plain words. Focus too,
      so it works from the keyboard and on a tap. */
@@ -71,19 +191,17 @@
     padding: 8px 10px;
     background: rgba(12, 16, 15, 0.96); border: 1px solid var(--line); border-radius: 3px;
     font: 400 13px/1.4 var(--ui); letter-spacing: normal; text-transform: none; color: var(--chalk);
-    opacity: 0; visibility: hidden; transition: opacity 90ms linear;
+    display: none;  /* not merely invisible: a hidden bubble past the right edge would still widen the page */
   }
-  .explain:hover .bubble, .explain:focus-within .bubble { opacity: 1; visibility: visible; }
+  .explain:hover .bubble, .explain:focus-within .bubble { display: block; }
+  /* On a phone the "?" is often near the right edge, where a bubble hung off it would run off the screen: there
+     it is a strip along the bottom instead. */
+  @media (max-width: 760px) {
+    .explain .bubble { position: fixed; left: 16px; right: 16px; bottom: 16px; top: auto; width: auto; max-width: none; z-index: 20; }
+  }
   .meta { margin: 0; display: flex; flex-wrap: wrap; gap: 4px 20px; font-size: 14px; color: var(--chalk-dim); }
   .meta b { color: var(--chalk); font-weight: 700; }
 
-  .headline {
-    display: grid;
-    grid-template-columns: minmax(230px, 300px) minmax(0, 1fr);
-    gap: 14px;
-    align-items: stretch;
-  }
-  @media (max-width: 760px) { .headline { grid-template-columns: minmax(0, 1fr); } }
   .card {
     background: var(--panel);
     border: 1px solid var(--line);
@@ -95,7 +213,10 @@
   /* Proportional figures: tabular-nums makes a display-size number look loose. */
   .hero .value { font: 700 clamp(46px, 6vw, 62px)/1 var(--ui); letter-spacing: -0.01em; }
   .hero .sub { font-size: 13.5px; color: var(--chalk-dim); }
-  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 1px; background: var(--line); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 1px; background: var(--line);
+           border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  /* Two to a row on a phone: an odd last tile takes the whole row rather than leave a hole beside it. */
+  @media (max-width: 430px) { .tiles > :last-child:nth-child(odd) { grid-column: 1 / -1; } }
   .tiles .card { border: 0; border-radius: 0; display: grid; align-content: center; gap: 1px; }
   .tiles .label { font-size: 13px; color: var(--chalk-dim); }
   .tiles .value { font: 600 26px/1.1 var(--ui); }
@@ -152,18 +273,11 @@
     font: 700 13px/1.3 var(--ui); pointer-events: none; opacity: 0; transition: opacity 0.12s;
   }
   .film video[data-fast] + .fast { opacity: 1; }
-  .more summary { width: fit-content; cursor: pointer; font-size: 13.5px; color: var(--chalk-dim); }
-  .more summary:hover { color: var(--chalk); }
-  .more[open] summary { margin-bottom: 12px; }
   .film figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 13.5px; color: var(--chalk-dim); }
   .film figcaption .who { display: inline-flex; align-items: center; gap: 7px; font: 700 15px/1.2 var(--ui); color: var(--chalk); }
   .film figcaption .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
   .film figcaption b { color: var(--chalk); font-weight: 600; font-variant-numeric: tabular-nums; }
-  /* The film at the top of the page: big, but short enough that the page below still shows it goes on. */
   .film figcaption .caption { flex-basis: 100%; margin: 0; font-size: 14.5px; color: var(--chalk); }
-  .featured { margin-bottom: 8px; }
-  .featured h2 { margin-top: 0; }
-  .featured .film { max-width: 1040px; }
   .section-note { margin: -4px 0 0; font-size: 13.5px; color: var(--chalk-dim); max-width: 72ch; }
 
   .tip {
@@ -186,16 +300,6 @@
   .tip .row b { font: 600 13.5px var(--ui); font-variant-numeric: tabular-nums; margin-left: auto; }
   .tip .row span { color: var(--chalk-dim); font-size: 12.5px; }
 
-  .notes { display: grid; gap: 1px; background: var(--line); }
-  .note { background: var(--panel); padding: 11px 14px; display: flex; gap: 10px; align-items: baseline; font-size: 14px; }
-  .note .icon { font: 700 13px var(--mono); flex: none; width: 1.4em; text-align: center; }
-  .note .who { font: 500 12.5px var(--mono); color: var(--chalk-dim); flex: none; }
-  .note.good .icon { color: var(--good); }
-  .note.warning .icon { color: var(--warning); }
-  .note.serious .icon { color: var(--serious); }
-  .note.critical .icon { color: var(--critical); }
-  .note.info .icon { color: var(--chalk-dim); }
-
   .scroll { overflow-x: auto; border: 1px solid var(--line); border-radius: 4px; }
   table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
   th, td { text-align: right; padding: 8px 12px; white-space: nowrap; border-bottom: 1px solid var(--line); }
@@ -211,8 +315,10 @@
   code { font: 500 12.5px var(--mono); color: var(--amber); }
   .blank { display: grid; gap: 12px; max-width: 74ch; }
   .blank pre { margin: 0; padding: 14px 16px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; overflow-x: auto; font: 500 12.5px/1.7 var(--mono); color: var(--chalk); }
-  .reward { display: grid; gap: 10px; max-width: 860px; }
-  .reward .formula { margin: 0; font: 500 13px/1.6 var(--mono); color: var(--chalk); }
+  .reward { display: grid; padding: 0; overflow: hidden; }
+  .reward .formula { margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--line); font: 500 13px/1.6 var(--mono); color: var(--chalk); }
+  .reward .scroll { border: 0; border-radius: 0; }
+  .reward .section-note { margin: 0; padding: 12px 16px; border-top: 1px solid var(--line); }
   .reward td:nth-child(2) { font-weight: 600; padding-right: 4px; }
   .reward td:nth-child(3) { text-align: left; padding-left: 4px; color: var(--chalk-dim); }
   .reward td.plus { color: var(--good); }
@@ -222,18 +328,26 @@
   footer { margin-top: 34px; font-size: 13px; color: var(--chalk-faint); }
 </style>
 
-<main>
-  <header class="masthead">
-    <nav class="site-nav" id="nav" aria-label="Site" hidden></nav>
-    <h1>Training Room</h1>
+<header class="topbar">
+  <div class="topbar-in">
+    <h1 class="brand"><a href="#top">Training Room</a></h1>
+    <nav class="sections" id="sections" aria-label="Sections"></nav>
+    <div class="topbar-end">
+      <div id="status"></div>
+      <nav class="site-nav" id="nav" aria-label="Site" hidden></nav>
+    </div>
+  </div>
+</header>
+<main id="top">
+  <div class="pagebar">
+    <p class="meta" id="meta"></p>
     <!-- Folded by default: the numbers are what the reader came for, and the intro would push them below the fold. -->
     <details class="about">
       <summary>About this page</summary>
       <p class="tagline" id="tagline"></p>
     </details>
-    <p class="meta" id="meta"></p>
-  </header>
-  <!-- The best game any run has played, first: the reader sees the AI play before reading how it learns. -->
+  </div>
+  <!-- The overview, first: the AI playing its best game beside what is training and whether anything is wrong. -->
   <div id="featured"></div>
   <div id="body"></div>
   <footer id="footer"></footer>
@@ -297,7 +411,8 @@ function mount(node, children) {
 function explain(text) {
   if (!text) return null;
   return el("span", { class: "explain" }, [
-    el("button", { type: "button", "aria-label": "What this means: " + text, text: "?" }),
+    // Inside a <summary> a click would also open or fold its section: the "?" only explains.
+    el("button", { type: "button", "aria-label": "What this means: " + text, text: "?", onclick: (e) => e.preventDefault() }),
     el("span", { class: "bubble", "aria-hidden": "true", text }),
   ]);
 }
@@ -372,9 +487,16 @@ const REWARD = DATA.reward;
 const groups = [];
 for (const r of runs) if (!groups.some((g) => g.key === r.group)) groups.push({ key: r.group, label: r.group_label });
 const state = { group: groups.length ? groups[0].key : null, visible: new Set(runs.map((r) => r.name)),
-                fleetRun: null, hiddenMachines: new Set(), filmsOpen: false };
+                fleetRun: null, hiddenMachines: new Set(), hoodOpen: false, gameTab: null, gamePick: null };
 let charts = [];
 const inGroup = () => runs.filter((r) => r.group === state.group);
+
+/* The live and supervise pages bring panels of their own (body_before). One marked data-slot="<name>" is moved
+   into that place in the page each time the page is rebuilt -- moved, not copied, so it keeps what its own script
+   has put in it: "status" in the top bar, "now" beside the best game, "machines" in The machines. */
+const SLOTTED = {};
+for (const node of document.querySelectorAll("[data-slot]")) (SLOTTED[node.dataset.slot] ||= []).push(node);
+const slotted = (name) => SLOTTED[name] || [];
 
 /* New numbers from a live server (scripts/supervise.py). What the reader chose stays chosen: the group, and
    which runs are hidden. A run that appears is shown. */
@@ -458,7 +580,7 @@ function screen(video) {
 }
 
 // `key`: which <video> this is. The film at the top of the page is a second player of the best run's film, so it
-// has a key of its own rather than taking that run's out of the Best games section.
+// has a key of its own rather than taking that run's out of the Games section.
 function film(run, key = run.name) {
   const game = run.best_game;
   let video = films.get(key);
@@ -470,17 +592,46 @@ function film(run, key = run.name) {
   return video;
 }
 
-function filmFigure(run, key) {
-  const g = run.best_game;
-  const bits = [["Round", fmtInt(g.round)], ["Points", fmtInt(g.points)], ["Kills", fmtInt(g.kills)]];
+/* -- saved games ------------------------------------------------------------
+   Games kept for good (viz/saved_games.py), their films beside the page. They come with the page, not with the
+   live numbers, so a refresh (which replaces DATA) never takes them away. */
+const SAVED = (DATA && DATA.saved) || [];
+
+function savedFilm(game) {
+  const key = "saved:" + game.name;
+  let video = films.get(key);
+  if (!video) {
+    video = holdForSpeed(el("video", { src: game.video, controls: "", preload: "metadata", playsinline: "",
+                                       "aria-label": `${game.title}: a saved game from ${game.run}` }));
+    films.set(key, video);
+  }
+  return video;
+}
+
+const statBits = (g) => {
+  const bits = [["Round", g.round], ["Points", g.points], ["Kills", g.kills]]
+    .filter(([, v]) => v != null).map(([label, v]) => [label, fmtInt(v)]);
   if (g.seconds != null) bits.push(["Lasted", fmtDuration(g.seconds)]);
-  return el("figure", { class: "card film" }, [
-    screen(film(run, key)),
-    el("figcaption", {}, [
-      el("span", { class: "who" }, [el("span", { class: "key", style: `background:${run.color}` }), el("span", { text: run.name })]),
-      ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
-      g.recorded ? el("span", { text: "played " + fmtAgo(Math.max(0, Date.now() / 1000 - g.recorded)) }) : null,
-    ]),
+  return bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })]));
+};
+const playedAgo = (g) => g.recorded ? el("span", { text: "played " + fmtAgo(Math.max(0, Date.now() / 1000 - g.recorded)) }) : null;
+const runKey = (run) => el("span", { class: "key", style: `background:${run.color}` });
+
+// A run's best game, with its numbers under it.
+function filmCaption(run, extra) {
+  const g = run.best_game;
+  return el("figcaption", {}, [
+    el("span", { class: "who" }, [runKey(run), el("span", { text: run.name })]),
+    ...statBits(g), playedAgo(g), extra,
+  ]);
+}
+
+function savedCaption(game) {
+  return el("figcaption", {}, [
+    el("span", { class: "who", text: game.title }),
+    ...statBits(game),
+    game.run ? el("span", { text: game.run }) : null,
+    game.caption ? el("p", { class: "caption", text: game.caption }) : null,
   ]);
 }
 
@@ -496,67 +647,89 @@ function bestFilmed() {
   return runs.filter((r) => r.best_game && r.best_game.video).reduce((a, b) => (!a || beats(b, a) ? b : a), null);
 }
 
-function featuredFilm() {
-  const best = bestFilmed();
-  if (!best) return null;
-  return el("section", { class: "featured" }, [
-    el("h2", {}, [document.createTextNode("Best game so far"), explain(SECTION_EXPLAIN.featured)]),
-    filmFigure(best, "featured"),
-  ]);
-}
-
-function bestGames() {
-  const games = inGroup().filter((r) => r.best_game && r.best_game.video);
-  // One film, and it is already at the top of the page: once is enough.
-  if (!games.length || (games.length === 1 && games[0] === bestFilmed())) return null;
-  // Folded away until asked for, and it stays as the reader left it when new numbers rebuild the page. Folding it
-  // stops whatever was playing in it.
-  const more = el("details", { class: "more", ontoggle: () => {
-    state.filmsOpen = more.open;
-    if (!more.open) for (const v of more.querySelectorAll("video")) v.pause();
-  } }, [
-    el("summary", { text: `Each run's best game (${games.length})` }),
-    el("div", { class: "grid films" }, games.map((r) => filmFigure(r))),
-  ]);
-  more.open = state.filmsOpen;
-  return el("section", {}, [
-    el("h2", {}, [document.createTextNode("Best games"), explain(SECTION_EXPLAIN.films)]),
-    more,
-  ]);
-}
-
-/* -- saved games ------------------------------------------------------------
-   Games kept for good (viz/saved_games.py), their films beside the page. They come with the page, not with the
-   live numbers, so a refresh (which replaces DATA) never takes them away. */
-const SAVED = (DATA && DATA.saved) || [];
-
-function savedFigure(game) {
-  const key = "saved:" + game.name;
-  let video = films.get(key);
-  if (!video) {
-    video = holdForSpeed(el("video", { src: game.video, controls: "", preload: "metadata", playsinline: "",
-                                       "aria-label": `${game.title}: a saved game from ${game.run}` }));
-    films.set(key, video);
-  }
-  const bits = [["Round", game.round], ["Points", game.points], ["Kills", game.kills]]
-    .filter(([, v]) => v != null).map(([label, v]) => [label, fmtInt(v)]);
-  if (game.seconds != null) bits.push(["Lasted", fmtDuration(game.seconds)]);
+function featuredFilm(best) {
   return el("figure", { class: "card film" }, [
-    screen(video),
-    el("figcaption", {}, [
-      el("span", { class: "who", text: game.title }),
-      ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
-      game.run ? el("span", { text: game.run }) : null,
-      game.caption ? el("p", { class: "caption", text: game.caption }) : null,
+    el("div", { class: "film-head" }, [
+      el("p", { class: "eyebrow" }, [document.createTextNode("Best game so far"), explain(SECTION_EXPLAIN.featured)]),
+      el("span", { class: "hint", text: "Hold the film for 2× speed" }),
     ]),
+    screen(film(best, "featured")),
+    filmCaption(best, el("a", { class: "more-link", href: "#games", text: "All games →" })),
   ]);
 }
 
-function savedGames() {
-  if (!SAVED.length) return null;
-  return el("section", {}, [
-    el("h2", {}, [document.createTextNode("Saved games"), explain(SECTION_EXPLAIN.saved)]),
-    el("div", { class: "grid films" }, SAVED.map(savedFigure)),
+/* -- games ------------------------------------------------------------------
+   One player and a list beside it: each run's best game in one tab, the saved games in the other. Only the film
+   picked is on screen, so there is only ever one to play. */
+const thumbs = new Map();
+// The list's picture of a film: the film itself a few seconds in, loading no more than it takes to show that frame.
+function thumb(src) {
+  let video = thumbs.get(src);
+  if (!video) {
+    video = el("video", { src: src + "#t=6", preload: "metadata", muted: "", playsinline: "", tabindex: "-1",
+                          "aria-hidden": "true", disablepictureinpicture: "" });
+    thumbs.set(src, video);
+  }
+  return video;
+}
+
+function gameLists() {
+  const best = inGroup().filter((r) => r.best_game && r.best_game.video);
+  const top = bestFilmed();
+  return {
+    best: best.map((r) => ({
+      key: r.name, video: () => film(r), caption: () => filmCaption(r), src: r.best_game.video,
+      name: [runKey(r), el("span", { text: r.name })], tag: r === top ? "best overall" : null,
+      stats: [`Round ${fmtInt(r.best_game.round)}`, `${fmtInt(r.best_game.points)} pts`, `${fmtInt(r.best_game.kills)} kills`,
+              r.best_game.seconds != null ? fmtDuration(r.best_game.seconds) : null],
+    })),
+    saved: SAVED.map((g) => ({
+      key: "saved:" + g.name, video: () => savedFilm(g), caption: () => savedCaption(g), src: g.video,
+      name: [el("span", { text: g.title })], tag: g.run || null,
+      stats: [g.round != null ? `Round ${fmtInt(g.round)}` : null, g.points != null ? `${fmtInt(g.points)} pts` : null,
+              g.kills != null ? `${fmtInt(g.kills)} kills` : null, g.seconds != null ? fmtDuration(g.seconds) : null],
+    })),
+  };
+}
+
+function gamesSection() {
+  const lists = gameLists();
+  const tabs = [["best", `Best of each run (${lists.best.length})`], ["saved", `Saved (${lists.saved.length})`]]
+    .filter(([k]) => lists[k].length);
+  if (!tabs.length) return null;
+  if (!tabs.some(([k]) => k === state.gameTab)) state.gameTab = tabs[0][0];
+  const items = lists[state.gameTab];
+  const pick = items.find((i) => i.key === state.gamePick) || items[0];
+  const video = pick.video();
+  const node = el("section", { id: "games", class: "sec", "data-nav": "Games" });
+  // Only this section changes: the charts keep their place, and a film left on screen keeps playing.
+  const redo = () => {
+    if (!video.paused) video.pause();  // taken off the page, it would go on playing unseen
+    node.replaceWith(gamesSection());
+  };
+  return mount(node, [
+    secHead("Games", SECTION_EXPLAIN.films, "Each run's best game, replaced whenever the AI beats it, and the games kept for good."),
+    el("div", { class: "card theater" }, [
+      el("figure", { class: "stage film" }, [screen(video), pick.caption()]),
+      el("div", { class: "playlist" }, [
+        el("div", { class: "tabs", role: "tablist" }, tabs.map(([k, label]) => el("button", {
+          type: "button", role: "tab", "aria-selected": String(k === state.gameTab), text: label,
+          onclick: () => { if (k !== state.gameTab) { state.gameTab = k; state.gamePick = null; redo(); } },
+        }))),
+        el("ul", { class: "picks" }, items.map((item) => el("li", {}, el("button", {
+          class: "pick", type: "button", "aria-current": String(item === pick),
+          onclick: () => { if (item !== pick) { state.gamePick = item.key; redo(); } },
+        }, [
+          thumb(item.src),
+          el("span", {}, [
+            el("span", { class: "name" }, [...item.name, item.tag ? el("span", { class: "tag", text: item.tag }) : null]),
+            el("span", { class: "stats", text: item.stats.filter(Boolean).join(" · ") }),
+          ]),
+        ])))),
+        el("p", { class: "foot" }, [document.createTextNode("One film plays at a time. Hold a film for 2× speed. "),
+          state.gameTab === "saved" ? explain(SECTION_EXPLAIN.saved) : null]),
+      ]),
+    ]),
   ]);
 }
 
@@ -565,9 +738,10 @@ function savedGames() {
    at its true size instead of being scaled by a viewBox. */
 function Chart(spec) {
   const tip = el("div", { class: "tip", role: "status", "aria-live": "polite" });
-  const holder = el("div", { class: "chart" });
+  const holder = el("div", { class: "card chart" });
   const head = el("div", {}, [
-    el("div", { class: "title" }, [document.createTextNode(spec.title), explain(spec.explain)]),
+    el("div", { class: spec.badge ? "title with-badge" : "title" }, [document.createTextNode(spec.title), explain(spec.explain),
+      spec.badge ? el("span", { class: "badge " + spec.badge.level, text: spec.badge.text }) : null]),
     spec.hint ? el("p", { class: "hint", text: spec.hint }) : null,
   ]);
   const plot = el("div", { style: "position: relative" }, [tip]);
@@ -733,6 +907,7 @@ function chartCard(key, opts = {}) {
     big: !!opts.big,
     zero: !!opts.zero,
     gate: opts.gate,
+    badge: opts.badge,
     xLabel: byEpoch ? "epoch" : "step",
     xFormat: byEpoch ? epochFormat : stepFormat,
   }).node;
@@ -758,7 +933,7 @@ function machineCard(run, key, opts = {}) {
   }).node;
 }
 
-function machinesSection() {
+function fleetCharts() {
   const fleetRuns = inGroup().filter((r) => r.machines);
   if (!fleetRuns.length) return null;
   if (!fleetRuns.some((r) => r.name === state.fleetRun)) state.fleetRun = fleetRuns[0].name;  // newest first
@@ -793,22 +968,25 @@ function machinesSection() {
     machineCard(run, "share_pct"),
     machineCard(run, "stale_pct"),
   ].filter(Boolean);
-  return el("section", {}, [
-    el("h2", { text: "Each machine" }),
-    el("p", { class: "section-note", text: `${run.name} trained on games from ${run.machines.ids.length} ` +
+  return el("div", { style: "display:grid;gap:10px" }, [
+    el("p", { class: "eyebrow", text: "Each machine's share of training" }),
+    el("p", { class: "section-note", style: "margin:0", text: `${run.name} trained on games from ${run.machines.ids.length} ` +
       `machine${run.machines.ids.length === 1 ? "" : "s"}. Each line is one machine's own share of every update.` }),
     picker, legend, el("div", { class: "grid" }, cards),
   ]);
 }
 
-function section(title, nodes, about) {
-  const kept = nodes.filter(Boolean);
-  if (!kept.length) return null;
-  return el("section", {}, [el("h2", {}, [document.createTextNode(title), explain(about)]), el("div", { class: "grid" }, kept)]);
+// A section's head: its title and "?", a line on what it is for, and on the right what it is filtered by.
+function secHead(title, about, sub, tools = []) {
+  const kept = tools.filter(Boolean);
+  return el("div", { class: "sec-head" }, [
+    el("div", {}, [el("h2", {}, [document.createTextNode(title), explain(about)]), sub ? el("p", { class: "sub", text: sub }) : null]),
+    kept.length ? el("div", { class: "tools" }, kept) : null,
+  ]);
 }
 
 /* The reward function, as reward.describe() wrote it into the page: what each event pays, from the code itself. */
-function rewardSection() {
+function rewardCard() {
   if (!REWARD || !inGroup().some((r) => r.kind === "ppo")) return null;
   const signed = (v) => (v > 0 ? "+" : v < 0 ? "\u2212" : "") + Math.abs(v).toFixed(1);
   const rows = REWARD.terms.map((t) => el("tr", { class: t.detected ? null : "off" }, [
@@ -818,17 +996,44 @@ function rewardSection() {
     el("td", { text: [t.cap, t.detected ? null : "not read from the screen yet, so always 0"].filter(Boolean).join("; ") || "" }),
   ]));
   const [lo, hi] = REWARD.clip;
-  return el("section", {}, [
-    el("h2", {}, [document.createTextNode("How it\u2019s scored"), explain(SECTION_EXPLAIN.reward)]),
-    el("div", { class: "reward" }, [
-      el("p", { class: "formula", text: `reward per step = clip(sum of the terms below, ${signed(lo)}, ${signed(hi)})` }),
-      el("div", { class: "scroll" }, el("table", {}, [
-        el("thead", {}, el("tr", {}, ["Event", "Reward", "", "Limit"].map((h) => el("th", { text: h })))),
-        el("tbody", {}, rows),
-      ])),
-      el("p", { class: "section-note", text: `Rewards are in units of ${fmtInt(REWARD.points_scale)} game points. ` +
-        "Repairs pay a fifth of their points and doors and wall weapons pay once each, so the AI can't farm them; " +
-        "the gates below watch for it anyway." }),
+  return el("div", { class: "card reward" }, [
+    el("p", { class: "formula", text: `reward per step = clip(sum of the terms below, ${signed(lo)}, ${signed(hi)})` }),
+    el("div", { class: "scroll" }, el("table", {}, [
+      el("thead", {}, el("tr", {}, ["Event", "Reward", "", "Limit"].map((h) => el("th", { text: h })))),
+      el("tbody", {}, rows),
+    ])),
+    el("p", { class: "section-note", text: `Rewards are in units of ${fmtInt(REWARD.points_scale)} game points. ` +
+      "Repairs pay a fifth of their points and doors and wall weapons pay once each, so the AI can't farm them; " +
+      "the gates beside this watch for it anyway." }),
+  ]);
+}
+
+// How many of the runs shown are past a gate now, for the badge on its chart.
+function gateBadge(key, limit) {
+  const over = inGroup().filter((r) => r.series[key] && r.series[key].last > limit).length;
+  return over ? { level: "critical", text: `${over} run${over === 1 ? "" : "s"} over` } : { level: "good", text: "all under" };
+}
+
+// The rule book and the gates that check it, side by side: a gate means something only next to what it guards.
+function scoringSection() {
+  const g = DATA.gates;
+  const gates = [
+    chartCard("bonus_share_mean", { gate: { value: g.bonus_share.limit, label: `gate ${g.bonus_share.limit.toFixed(2)}` }, zero: true,
+                                    badge: gateBadge("bonus_share_mean", g.bonus_share.limit) }),
+    chartCard("repair_share_mean", { gate: { value: g.repair_share.limit, label: `gate ${g.repair_share.limit.toFixed(2)}` }, zero: true,
+                                     badge: gateBadge("repair_share_mean", g.repair_share.limit) }),
+  ].filter(Boolean);
+  const rules = rewardCard();
+  if (!rules && !gates.length) return null;
+  return el("section", { id: "scoring", class: "sec", "data-nav": "Scoring" }, [
+    secHead("How it\u2019s scored", SECTION_EXPLAIN.reward,
+            "What the AI is paid for, and the gates that check it is winning the game rather than gaming the score."),
+    el("div", { class: rules && gates.length ? "scoring" : "" }, [
+      rules,
+      gates.length ? el("div", { class: "gates" }, [
+        el("p", { class: "eyebrow" }, [document.createTextNode("Reward hacking gates (PLAN.md, M7 T1)"), explain(SECTION_EXPLAIN.gates)]),
+        ...gates,
+      ]) : null,
     ]),
   ]);
 }
@@ -897,25 +1102,88 @@ function tiles() {
   ]);
 }
 
-function notesPanel() {
-  const rows = [];
-  for (const r of inGroup()) for (const n of r.notes) rows.push({ run: r, note: n });
-  if (!rows.length) return null;
-  const order = { critical: 0, serious: 1, warning: 2, good: 3, info: 4 };
-  rows.sort((a, b) => order[a.note.level] - order[b.note.level]);
-  return el("section", {}, [
-    el("h2", { text: "What the numbers say" }),
-    el("div", { class: "notes" },
-      rows.map(({ run, note }) =>
-        el("div", { class: "note " + note.level }, [
-          // Status colour never carries meaning alone: icon, word and text all say it.
-          el("span", { class: "icon", text: STATUS_ICON[note.level], title: STATUS_WORD[note.level] }),
-          el("span", { class: "who", text: run.name }),
-          el("span", { text: note.text }),
-        ])
-      )
-    ),
+/* -- what the numbers say ----------------------------------------------------
+   Each run's verdicts (dashboard._notes): all of them at the top of the page as counts and the failures, and run by
+   run under the curves they are about. */
+const LEVEL_ORDER = { critical: 0, serious: 1, warning: 2, good: 3, info: 4 };
+const byLevel = (a, b) => LEVEL_ORDER[a.note.level] - LEVEL_ORDER[b.note.level];
+
+function checkRow({ run, note }, who = true) {
+  // Status colour never carries meaning alone: icon, word and text all say it.
+  return el("div", { class: "check " + note.level }, [
+    el("span", { class: "icon", text: STATUS_ICON[note.level], title: STATUS_WORD[note.level] }),
+    el("span", {}, [who ? el("span", { class: "who", text: run.name }) : null, document.createTextNode(note.text)]),
   ]);
+}
+
+function healthCard() {
+  const rows = runs.flatMap((r) => r.notes.map((note) => ({ run: r, note }))).sort(byLevel);
+  if (!rows.length) return null;
+  const count = (...levels) => rows.filter((x) => levels.includes(x.note.level)).length;
+  const counts = [
+    ["critical", count("critical"), "failing"], ["warning", count("serious", "warning"), "to watch"],
+    ["good", count("good"), "passing"], ["info", count("info"), "notes"],
+  ].filter(([, n]) => n);
+  const worst = rows.filter((x) => x.note.level === "critical" || x.note.level === "serious").slice(0, 3);
+  return el("div", { class: "card health" }, [
+    el("div", { class: "top" }, [el("p", { class: "eyebrow", text: "Health checks" }),
+                                 el("a", { href: "#checks", text: `All ${rows.length} →` })]),
+    el("div", { class: "counts" }, counts.map(([level, n, word]) => el("span", { class: "count " + level, text: `${n} ${word}` }))),
+    worst.length ? el("div", { class: "checks" }, worst.map((x) => checkRow(x))) : null,
+  ]);
+}
+
+function runChecks() {
+  const shown = inGroup().filter((r) => r.notes.length);
+  if (!shown.length) return null;
+  return el("div", { id: "checks", style: "display:grid;gap:10px" }, [
+    el("p", { class: "eyebrow", text: "What the numbers say, run by run" }),
+    el("div", { class: "runcards" }, shown.map((r) => el("div", { class: "card runcard" }, [
+      el("div", { class: "head" }, [runKey(r), el("b", { text: r.name }), el("span", { class: "state",
+        text: [r.status, r.progress != null ? `${Math.round(100 * r.progress)}%` : null].filter(Boolean).join(" · ") })]),
+      el("div", { class: "checks" }, r.notes.map((note) => ({ run: r, note })).sort(byLevel).map((x) => checkRow(x, false))),
+    ]))),
+  ]);
+}
+
+/* -- under the hood ---------------------------------------------------------- */
+const HOOD = [
+  ["entropy"], ["approx_kl"], ["clipfrac"], ["explained_variance"], ["value_loss"], ["length_mean"],
+  ["loss.policy"], ["loss.value"], ["loss"],
+  ["sps", { title: "Steps per second", hint: "how fast data arrives — not how well it learns" }],
+];
+
+// One measure's latest value and the shape of its curve, for the newest run that has it.
+function sparkTile(label, s, color) {
+  const lo = Math.min(...s.y), hi = Math.max(...s.y), x0 = s.x[0], x1 = s.x[s.x.length - 1];
+  const pts = s.x.map((x, i) => `${(100 * (x - x0) / ((x1 - x0) || 1)).toFixed(1)},${(26 - 24 * (s.y[i] - lo) / ((hi - lo) || 1)).toFixed(1)}`);
+  const line = svg("svg", { viewBox: "0 0 100 28", preserveAspectRatio: "none", "aria-hidden": "true" });
+  line.append(svg("polyline", { points: pts.join(" "), fill: "none", stroke: color, "stroke-width": 1.5, "vector-effect": "non-scaling-stroke" }));
+  return el("div", { class: "spark" }, [el("span", { class: "label", text: label }), el("span", { class: "value", text: fmtValue(s.last) }), line]);
+}
+
+function hood() {
+  const cards = HOOD.map(([key, opts]) => chartCard(key, opts)).filter(Boolean);
+  if (!cards.length) return null;
+  const lead = inGroup().find((r) => HOOD.some(([key]) => r.series[key]));
+  const sparks = HOOD.filter(([key]) => lead.series[key] && lead.series[key].y.length)
+    .map(([key, opts]) => sparkTile((opts && opts.title) || (DATA.series_meta[key] || { label: key }).label, lead.series[key], lead.color));
+  const box = el("details", { class: "card hood" }, [
+    el("summary", {}, [
+      el("div", { class: "bar" }, [
+        el("span", { class: "title" }, [document.createTextNode("Under the hood"), explain(SECTION_EXPLAIN.hood)]),
+        el("span", { class: "hint", text: `diagnostics for the algorithm, not skill · the latest for ${lead.name}` }),
+        el("span", { class: "toggle" }, [el("span", { class: "closed", text: `Show all ${cards.length} charts ▾` }),
+                                         el("span", { class: "opened", text: "Hide the charts ▴" })]),
+      ]),
+      el("div", { class: "sparks" }, sparks),
+    ]),
+    el("div", { class: "grid" }, cards),
+  ]);
+  box.open = state.hoodOpen;
+  // Drawn while folded, the charts had no width to draw at: draw them again now there is one.
+  box.addEventListener("toggle", () => { state.hoodOpen = box.open; if (box.open) for (const draw of charts) draw(); });
+  return box;
 }
 
 function groupRow() {
@@ -956,6 +1224,7 @@ function table() {
     ["Run", (r) => null],
     ["Kind", (r) => KIND_LABEL[r.kind] || r.kind],
     ["Status", (r) => null],
+    ["Checks", (r) => null],
     ["Progress", (r) => r.progress_text],
     ["Return", (r) => (r.series.return_mean ? fmtValue(r.series.return_mean.last) : "--")],
     ["Best return", (r) => (r.series.return_mean ? fmtValue(r.series.return_mean.best) : "--")],
@@ -972,9 +1241,14 @@ function table() {
     ["Left", (r) => (r.eta_s ? fmtDuration(r.eta_s) : "--")],
     ["Updated", (r) => fmtAgo(r.age_s)],
   ];
-  return el("section", {}, [
-    el("h2", { text: "Every run" }),
-    el("p", { class: "hint", text: "All runs, including those outside the environment selected above." }),
+  // A run's verdicts, counted: failing, to watch, passing.
+  const tally = (r) => [["critical", ["critical"]], ["warning", ["serious", "warning"]], ["good", ["good"]]]
+    .map(([cls, levels]) => [cls, r.notes.filter((n) => levels.includes(n.level)).length]).filter(([, n]) => n)
+    .map(([cls, n]) => el("span", { class: cls, title: `${n} ${{ critical: "failing", warning: "to watch", good: "passing" }[cls]}`,
+                                    text: `${STATUS_ICON[cls]}${n}` }));
+  return el("section", { id: "runs", class: "sec", "data-nav": "Runs" }, [
+    secHead("Every run", null, groups.length > 1 ? "All runs, including those outside the environment selected above."
+                                                 : "All runs, every number."),
     el("div", { class: "scroll" }, [
       el("table", {}, [
         el("thead", {}, [el("tr", {}, cols.map(([name]) => el("th", { text: name, scope: "col" })))]),
@@ -984,6 +1258,7 @@ function table() {
               return el("td", {}, [el("span", { class: "key", style: `background:${r.color}` }), el("span", { text: r.name })]);
             }
             if (name === "Status") return el("td", {}, [el("span", { class: "pill " + r.status, text: r.status })]);
+            if (name === "Checks") return el("td", {}, [el("span", { class: "run-checks" }, tally(r))]);
             return el("td", { text: get(r) ?? "--" });
           }))
         )),
@@ -1012,6 +1287,40 @@ function blankSlate() {
   ]);
 }
 
+/* The top of the page: the best game any run has played beside what is training now, the number the project
+   chases and whether anything is wrong, then the totals. */
+function overview() {
+  const best = bestFilmed();
+  const now = slotted("now");
+  if (!runs.length && !now.length) return null;
+  return el("section", { id: "overview", "data-nav": "Overview" }, [
+    el("div", { class: "overview" + (best ? "" : " no-film") }, [
+      best ? featuredFilm(best) : null,
+      el("div", { class: "side" }, [...now, runs.length ? heroCard() : null, healthCard()]),
+    ]),
+    runs.length ? tiles() : null,
+  ]);
+}
+
+// The PCs, as the live page reports them (its "machines" slot), and each one's share of a run trained on several.
+function machinesSection() {
+  return el("section", { id: "the-machines", class: "sec", "data-nav": "Machines" }, [...slotted("machines"), el("div", { id: "fleet" })]);
+}
+
+/* The section links in the top bar: the sections the page has now, the one being read marked. */
+const navSections = () => [...document.querySelectorAll("main [data-nav]")].filter((s) => !s.hidden);
+function sectionNav() {
+  mount(document.getElementById("sections"), navSections().map((s) =>
+    el("a", { href: "#" + s.id, text: s.dataset.nav, "data-for": s.id })));
+  markSection();
+}
+function markSection() {
+  const all = navSections();
+  let current = all.length ? all[0].id : null;
+  for (const s of all) if (s.getBoundingClientRect().top <= 110) current = s.id;
+  for (const a of document.querySelectorAll("#sections a")) a.setAttribute("aria-current", String(a.dataset.for === current));
+}
+
 function render() {
   const live = runs.filter((r) => r.status === "running");
   if (DATA.links && DATA.links.length) {
@@ -1030,15 +1339,16 @@ function render() {
       document.createTextNode(DATA.intro && !DATA.live ? " running when this was built" : " running now")]) : null,
   ]);
 
-  mount(document.getElementById("featured"), [featuredFilm()]);
+  mount(document.getElementById("featured"), [overview()]);
   const body = document.getElementById("body");
-  if (!runs.length) { mount(body, [blankSlate()]); return; }
-  mount(body, [
-    el("div", { class: "headline" }, [heroCard(), tiles()]),
-    groupRow(),
-    el("div", { id: "scoped" }),
-    table(),
-  ]);
+  if (!runs.length) {
+    const machines = machinesSection();
+    machines.hidden = !slotted("machines").length;
+    mount(body, [blankSlate(), machines]);
+    sectionNav();
+    return;
+  }
+  mount(body, [el("div", { id: "scoped" }), machinesSection(), table()]);
   renderScoped();
 }
 
@@ -1046,50 +1356,42 @@ function render() {
    rebuilds rather than redraws. */
 function renderScoped() {
   charts = [];
-  const scoped = el("div", {}, [
-    filterRow(),
-    section("Is it learning?", [
-      chartCard("return_mean", { big: true, title: "Return", hint: "mean over the trailing 100 episodes — the one curve that answers the question" }),
-      chartCard("round_reached_mean", { big: true, title: "Average round reached", hint: "how far into Nacht der Untoten it survives, mean of the last 100 games" }),
-      chartCard("val.accuracy.mean_balanced", { big: true, hint: "mean per-class recall across the action heads, on held-out clips" }),
-      chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
-    ], SECTION_EXPLAIN.learning),
-    bestGames(),
-    savedGames(),
-    machinesSection(),
-    rewardSection(),
-    section("Reward hacking gates (PLAN.md, M7 T1)", [
-      chartCard("bonus_share_mean", { gate: { value: DATA.gates.bonus_share.limit, label: "gate 0.40" }, zero: true }),
-      chartCard("repair_share_mean", { gate: { value: DATA.gates.repair_share.limit, label: "gate 0.25" }, zero: true }),
-    ], SECTION_EXPLAIN.gates),
-    section("Under the hood", [
-      chartCard("entropy"),
-      chartCard("approx_kl"),
-      chartCard("clipfrac"),
-      chartCard("explained_variance"),
-      chartCard("value_loss"),
-      chartCard("length_mean"),
-      chartCard("loss.policy"),
-      chartCard("loss.value"),
-      chartCard("loss"),
-      chartCard("sps", { title: "Steps per second", hint: "how fast data arrives — not how well it learns" }),
-    ], SECTION_EXPLAIN.hood),
-    notesPanel(),
-  ].filter(Boolean));
-  document.getElementById("scoped").replaceChildren(scoped);
+  const curves = [
+    chartCard("return_mean", { big: true, title: "Return", hint: "mean over the trailing 100 episodes — the one curve that answers the question" }),
+    chartCard("round_reached_mean", { big: true, title: "Average round reached", hint: "how far into Nacht der Untoten it survives, mean of the last 100 games" }),
+    chartCard("val.accuracy.mean_balanced", { big: true, hint: "mean per-class recall across the action heads, on held-out clips" }),
+    chartCard("val.mean_balanced", { big: true, hint: "how well it recovers the actions taken between two frames, on held-out clips" }),
+  ].filter(Boolean);
+  const learning = el("section", { id: "learning", class: "sec", "data-nav": "Learning" }, [
+    secHead("Is it learning?", SECTION_EXPLAIN.learning, "The headline curves: if training is working, they climb.",
+            [groupRow(), filterRow()]),
+    curves.length ? el("div", { class: "grid" }, curves) : null,
+    runChecks(),
+    hood(),
+  ]);
+  mount(document.getElementById("scoped"), [learning, gamesSection(), scoringSection()]);
+  const fleet = document.getElementById("fleet");
+  mount(fleet, [fleetCharts()]);
+  fleet.closest("section").hidden = !slotted("machines").length && !fleet.childNodes.length;
   for (const btn of document.querySelectorAll(".seg[data-group]")) {
     btn.setAttribute("aria-pressed", String(btn.dataset.group === state.group));
   }
+  sectionNav();
   for (const draw of charts) draw();
 }
 
 document.getElementById("footer").textContent = DATA.intro
   ? "A snapshot, not a live view: these are the numbers as they stood when the page was built."
   : "ZombiesAI — reads runs/*/metrics.jsonl, makes no request to anywhere. Rebuild with scripts/dashboard.py.";
+mount(document.getElementById("status"), slotted("status"));
 render();
 let resizeTimer = null;
 addEventListener("resize", () => {
   clearTimeout(resizeTimer);
   resizeTimer = setTimeout(() => { for (const draw of charts) draw(); }, 120);
 });
+let navFrame = null;
+addEventListener("scroll", () => {
+  if (navFrame == null) navFrame = requestAnimationFrame(() => { navFrame = null; markSection(); });
+}, { passive: true });
 </script>
