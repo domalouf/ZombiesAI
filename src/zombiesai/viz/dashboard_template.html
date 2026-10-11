@@ -142,7 +142,19 @@
   /* auto-fill: one run's film keeps a column's width rather than stretching across the page */
   .films { grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr)); }
   .film { display: grid; gap: 10px; }
-  .film video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 3px; }
+  .film video { display: block; width: 100%; aspect-ratio: 16 / 9; background: #000; border-radius: 3px;
+                -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  /* Holding a finger or the mouse on a film plays it at double speed (holdForSpeed): the badge says so. */
+  .film .screen { position: relative; }
+  .film .fast {
+    position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+    padding: 3px 10px; border-radius: 3px; background: rgba(0, 0, 0, 0.7); color: #fff;
+    font: 700 13px/1.3 var(--ui); pointer-events: none; opacity: 0; transition: opacity 0.12s;
+  }
+  .film video[data-fast] + .fast { opacity: 1; }
+  .more summary { width: fit-content; cursor: pointer; font-size: 13.5px; color: var(--chalk-dim); }
+  .more summary:hover { color: var(--chalk); }
+  .more[open] summary { margin-bottom: 12px; }
   .film figcaption { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 14px; font-size: 13.5px; color: var(--chalk-dim); }
   .film figcaption .who { display: inline-flex; align-items: center; gap: 7px; font: 700 15px/1.2 var(--ui); color: var(--chalk); }
   .film figcaption .key { width: 14px; height: 3px; border-radius: 2px; flex: none; }
@@ -360,7 +372,7 @@ const REWARD = DATA.reward;
 const groups = [];
 for (const r of runs) if (!groups.some((g) => g.key === r.group)) groups.push({ key: r.group, label: r.group_label });
 const state = { group: groups.length ? groups[0].key : null, visible: new Set(runs.map((r) => r.name)),
-                fleetRun: null, hiddenMachines: new Set() };
+                fleetRun: null, hiddenMachines: new Set(), filmsOpen: false };
 let charts = [];
 const inGroup = () => runs.filter((r) => r.group === state.group);
 
@@ -383,14 +395,76 @@ function refreshData(next) {
    <video> is kept and moved into the new page rather than made again: a refresh never stops one playing, and a
    better game's film takes over only once the old one is not being watched. */
 const films = new Map();
+
+// One film at a time: starting one pauses whichever else was playing. `play` does not bubble, so catch it on the
+// way down.
+document.addEventListener("play", (e) => {
+  for (const v of films.values()) if (v !== e.target && !v.paused) v.pause();
+}, true);
+
+/* Hold on a film to watch it at double speed, and let go to go back: a hold that starts on a paused film plays
+   it only while held. The bottom strip is the player's own controls, so a drag along the timeline is left alone,
+   and a finger that moves before the hold takes is a scroll, not a hold. */
+const HOLD_MS = 300, CONTROLS_PX = 48;
+function holdForSpeed(video) {
+  let timer = null, held = false, wasPaused = false, from = null;
+  const end = () => {
+    clearTimeout(timer);
+    timer = null;
+    if (!held) return;
+    held = false;
+    video.playbackRate = 1;
+    delete video.dataset.fast;
+    if (wasPaused) video.pause();
+  };
+  video.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || e.clientY > video.getBoundingClientRect().bottom - CONTROLS_PX) return;
+    from = [e.clientX, e.clientY];
+    timer = setTimeout(() => {
+      timer = null;
+      held = true;
+      wasPaused = video.paused;
+      video.playbackRate = 2;
+      video.dataset.fast = "";
+      if (video.paused) video.play().catch(() => {});
+    }, HOLD_MS);
+  });
+  video.addEventListener("pointermove", (e) => {
+    if (timer && from && Math.hypot(e.clientX - from[0], e.clientY - from[1]) > 10) end();
+  });
+  for (const type of ["pointercancel", "pointerleave"]) video.addEventListener(type, end);
+  // The click that follows letting go of a hold would pause or play the film: let it do nothing. It comes in the
+  // same task as the pointerup, so the guard goes once that task is over; and should a browser toggle the film
+  // anyway, it is put back as the hold left it.
+  const swallow = (e) => { e.preventDefault(); e.stopImmediatePropagation(); };
+  video.addEventListener("pointerup", () => {
+    if (!held) return end();
+    const paused = wasPaused;
+    video.addEventListener("click", swallow, true);
+    end();
+    setTimeout(() => {
+      video.removeEventListener("click", swallow, true);
+      if (video.paused !== paused) paused ? video.pause() : video.play().catch(() => {});
+    }, 0);
+  });
+  // A long press would otherwise open the browser's menu (save video, and so on) on top of the film.
+  video.addEventListener("contextmenu", (e) => { if (held || timer) e.preventDefault(); });
+  return video;
+}
+
+// A film with its "2×" badge. The <video> outlives the page it is in (see above); the frame round it does not.
+function screen(video) {
+  return el("div", { class: "screen" }, [video, el("span", { class: "fast", text: "2× speed", "aria-hidden": "true" })]);
+}
+
 // `key`: which <video> this is. The film at the top of the page is a second player of the best run's film, so it
 // has a key of its own rather than taking that run's out of the Best games section.
 function film(run, key = run.name) {
   const game = run.best_game;
   let video = films.get(key);
   if (!video || (video.dataset.src !== game.video && (video.paused || video.ended))) {
-    video = el("video", { src: game.video, "data-src": game.video, controls: "", preload: "metadata", playsinline: "",
-                          "aria-label": `${run.name}: its best game, round ${game.round}` });
+    video = holdForSpeed(el("video", { src: game.video, "data-src": game.video, controls: "", preload: "metadata",
+                                       playsinline: "", "aria-label": `${run.name}: its best game, round ${game.round}` }));
     films.set(key, video);
   }
   return video;
@@ -401,7 +475,7 @@ function filmFigure(run, key) {
   const bits = [["Round", fmtInt(g.round)], ["Points", fmtInt(g.points)], ["Kills", fmtInt(g.kills)]];
   if (g.seconds != null) bits.push(["Lasted", fmtDuration(g.seconds)]);
   return el("figure", { class: "card film" }, [
-    film(run, key),
+    screen(film(run, key)),
     el("figcaption", {}, [
       el("span", { class: "who" }, [el("span", { class: "key", style: `background:${run.color}` }), el("span", { text: run.name })]),
       ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
@@ -435,9 +509,19 @@ function bestGames() {
   const games = inGroup().filter((r) => r.best_game && r.best_game.video);
   // One film, and it is already at the top of the page: once is enough.
   if (!games.length || (games.length === 1 && games[0] === bestFilmed())) return null;
+  // Folded away until asked for, and it stays as the reader left it when new numbers rebuild the page. Folding it
+  // stops whatever was playing in it.
+  const more = el("details", { class: "more", ontoggle: () => {
+    state.filmsOpen = more.open;
+    if (!more.open) for (const v of more.querySelectorAll("video")) v.pause();
+  } }, [
+    el("summary", { text: `Each run's best game (${games.length})` }),
+    el("div", { class: "grid films" }, games.map((r) => filmFigure(r))),
+  ]);
+  more.open = state.filmsOpen;
   return el("section", {}, [
     el("h2", {}, [document.createTextNode("Best games"), explain(SECTION_EXPLAIN.films)]),
-    el("div", { class: "grid films" }, games.map((r) => filmFigure(r))),
+    more,
   ]);
 }
 
@@ -450,15 +534,15 @@ function savedFigure(game) {
   const key = "saved:" + game.name;
   let video = films.get(key);
   if (!video) {
-    video = el("video", { src: game.video, controls: "", preload: "metadata", playsinline: "",
-                          "aria-label": `${game.title}: a saved game from ${game.run}` });
+    video = holdForSpeed(el("video", { src: game.video, controls: "", preload: "metadata", playsinline: "",
+                                       "aria-label": `${game.title}: a saved game from ${game.run}` }));
     films.set(key, video);
   }
   const bits = [["Round", game.round], ["Points", game.points], ["Kills", game.kills]]
     .filter(([, v]) => v != null).map(([label, v]) => [label, fmtInt(v)]);
   if (game.seconds != null) bits.push(["Lasted", fmtDuration(game.seconds)]);
   return el("figure", { class: "card film" }, [
-    video,
+    screen(video),
     el("figcaption", {}, [
       el("span", { class: "who", text: game.title }),
       ...bits.map(([label, value]) => el("span", {}, [document.createTextNode(label + " "), el("b", { text: value })])),
