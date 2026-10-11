@@ -1,6 +1,7 @@
 <style>
-  /* The site's live additions (viz/live_site.py): is the PC reporting, and what is it training. */
-  .live-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 4px; font-size: 14px; color: var(--chalk-dim); }
+  /* The site's live additions (viz/live_site.py): is the PC reporting, and what is it training. Each piece is moved
+     to its place in the page by its data-slot (the dashboard's slotted()). */
+  .live-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; margin: 0; font-size: 13.5px; color: var(--chalk-dim); }
   .live-status b { color: var(--chalk); font-weight: 600; }
   .now-runs { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 14px; }
   .now-run { display: grid; gap: 8px; align-content: start; }
@@ -13,22 +14,24 @@
   .now-run .head { display: flex; align-items: baseline; gap: 10px; }
   .now-run .head .value { font: 600 30px/1 var(--ui); }
   .now-run .head .label { font-size: 13px; color: var(--chalk-dim); }
-  /* The machines (with worker PCs, rl/fleet.py): one panel each, its headline numbers in a summary that opens
-     onto the machine in full. */
-  .machines { display: grid; gap: 14px; }
+  /* The machines: a summary card each, side by side, that opens onto the machine in full across the page. */
+  .machines { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap: 14px; align-items: start; }
   .machine-panel { padding: 0; background: transparent; }
-  .machine-panel > summary { display: grid; gap: 8px; padding: 14px 16px; cursor: pointer; list-style: none; border-radius: inherit; background: var(--panel); }
+  .machine-panel[open] { grid-column: 1 / -1; }
+  .machine-panel > summary { display: grid; gap: 10px; padding: 14px 16px; cursor: pointer; list-style: none; border-radius: inherit; background: var(--panel); }
   .machine-panel > summary::-webkit-details-marker { display: none; }
   .machine-panel > summary:hover { background: color-mix(in srgb, var(--chalk) 4%, transparent); }
   .machine-panel[open] > summary { border-bottom: 1px solid var(--line); }
   .machine-panel .top { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
   .machine-panel .top::before { content: "▸"; color: var(--chalk-faint); transition: transform 0.15s; display: inline-block; }
   .machine-panel[open] .top::before { transform: rotate(90deg); }
-  .machine-panel .name { font: 700 16px/1.2 var(--ui); }
-  .machine-panel .role { font-size: 12.5px; color: var(--chalk-dim); }
+  .machine-panel .name { font: 700 17px/1.2 var(--ui); }
+  .machine-panel .role { font-size: 13px; color: var(--chalk-dim); }
   .machine-panel .top .flag { margin-left: auto; font: 700 12px var(--mono); }
-  .machine-panel .meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr)); gap: 6px 18px; }
+  .machine-panel .meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 6px 18px; }
   .machine-panel .facts { font-size: 13px; color: var(--chalk-dim); }
+  .machine-panel .open-hint { font-size: 13px; font-weight: 600; color: var(--chalk-dim); }
+  .machine-panel[open] .open-hint { display: none; }
   .machine-panel .body { padding: 14px 16px 16px; }
   /* An offline machine keeps its last numbers, faded, and says when they are from. */
   .machine-panel.stale .meters, .machine-panel.stale .body { opacity: 0.45; }
@@ -36,16 +39,19 @@
   @media (prefers-reduced-motion: reduce) { .machine-panel .top::before { transition: none; } }
 </style>
 
-<p class="live-status" id="live-status" role="status">Connecting to the PC…</p>
+<p class="live-status" id="live-status" role="status" data-slot="status">Connecting to the PC…</p>
 
-<section aria-labelledby="now-title">
+<section aria-labelledby="now-title" data-slot="now">
   <h2 id="now-title">Training now</h2>
   <div class="now-runs" id="training-now"><p class="empty-note">Waiting for the PC to report…</p></div>
 </section>
 
-<section aria-labelledby="system-title">
-  <h2 id="system-title">The machine</h2>
+<div data-slot="machines" style="display: grid; gap: 16px">
+  <div class="sec-head">
+    <div>
+      <h2 id="system-title">The machine</h2>
+      <p class="sub" id="system-sub">The PC it trains on, live. Open it for its charts, cores, GPU, temperatures, disks and processes.</p>
+    </div>
+  </div>
   <div class="machines" id="machines"><p class="empty-note">Waiting for the PC to report…</p></div>
-</section>
-
-<h2>Every run</h2>
+</div>
