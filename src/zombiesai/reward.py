@@ -5,6 +5,10 @@ from dataclasses import dataclass, field
 import numpy as np
 
 REWARD_TERMS = ("gain", "repair", "round", "door", "wall_weapon", "ammo", "damage", "death")
+# The side bonuses: paid for something other than fighting and surviving, so they are what a loophole would pay.
+# Kill points and rounds are left out on purpose -- a good game is mostly kill points, and a round only ends
+# when its zombies are dead -- and so are the penalties, which cannot be farmed.
+BONUS_TERMS = ("repair", "door", "wall_weapon", "ammo")
 
 
 @dataclass(frozen=True)
@@ -62,10 +66,15 @@ class EpisodeRewardStats:
         """Board-farming alarm input: fraction of all points gained that came from barrier repairs."""
         return self.repair_points / self.points_gained if self.points_gained > 0 else 0.0
 
-    def max_term_share(self) -> float:
-        """Anti-hacking gate input: the largest single term's share of total absolute return."""
-        total = np.abs(self.term_sums).sum()
-        return float(np.abs(self.term_sums).max() / total) if total > 0 else 0.0
+    def bonus_share(self) -> float:
+        """Anti-hacking gate input: the side bonuses' share of the positive return.
+
+        Not the largest term's share: kill points dominate an honest game from about round 5, and death
+        dominates one that ends in round 1, so that gate read red both before and after the agent could play."""
+        positive = np.clip(self.term_sums, 0.0, None)
+        total = positive.sum()
+        bonus = sum(positive[REWARD_TERMS.index(t)] for t in BONUS_TERMS)
+        return float(bonus / total) if total > 0 else 0.0
 
 
 class RewardShaper:

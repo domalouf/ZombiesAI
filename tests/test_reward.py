@@ -63,6 +63,24 @@ def test_round_damage_and_death():
     assert s(StepSignals(death=True, damage_event=True)).reward == pytest.approx(-16.0)
 
 
+def test_bonus_share_ignores_kill_points_rounds_and_penalties():
+    s = RewardShaper()
+    s(StepSignals(death=True))
+    assert s.stats.bonus_share() == 0.0  # dying in round 1 is not a loophole
+    for _ in range(50):
+        s(StepSignals(delta_points=100))
+    s(StepSignals(rounds_completed=3))
+    assert s.stats.bonus_share() == 0.0  # nor is a game that is all kills
+    s(StepSignals(doors_opened=("help_door",)))
+    assert s.stats.bonus_share() == pytest.approx(3.0 / (50 + 15 + 3))
+
+    farmer = RewardShaper()
+    farmer(StepSignals(delta_points=100))
+    for _ in range(10):
+        farmer(StepSignals(ammo_rebuy_reserve_fractions=(0.1,)))
+    assert farmer.stats.bonus_share() == pytest.approx(5.0 / 6.0)
+
+
 def test_final_clip():
     s = RewardShaper(RewardConfig(death=-5000.0))
     r = s(StepSignals(death=True))

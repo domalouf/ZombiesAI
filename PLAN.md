@@ -42,8 +42,9 @@ video ── IDM labels ┴─► BC (pixels + audio) ─► PPO fine-tune, KL-a
   zombies are heard before they are seen, and most deaths come from behind.
 - **Action:** factored — strafe, forward, yaw bin, pitch bin, fire, ADS, sprint, one button.
 - **Reward:** settled point gains, rounds, purchases (novelty-gated), damage and death, with repairs capped so
-  board farming cannot dominate (`reward.py`, `realgame/hud_reward.py`). Dashboard gates: no term above 60% of
-  the return, repairs under 25% of points.
+  board farming cannot dominate (`reward.py`, `realgame/hud_reward.py`). Dashboard gates: side bonuses (repairs,
+  doors, wall weapons, ammo) under 40% of the positive return, repairs under 25% of points. Kill points are
+  left out of the first on purpose: an honest game is mostly kill points.
 - **RL:** PPO with a critic warm-up and a decaying KL penalty to the BC prior (VPT's recipe); bad steps stay in
   GAE but out of the losses; segments more than `max_policy_lag` versions stale are dropped.
 

@@ -21,7 +21,8 @@ FONTS = Path(__file__).with_name("fonts")
 # The gates training is judged against, quoted from PLAN.md so the dashboard argues from the plan and
 # not from taste: M7's anti-hacking gate for T1.
 GATES = {
-    "max_term_share": {"limit": 0.60, "short": "largest term", "label": "no single reward term above 60% of return"},
+    "bonus_share": {"limit": 0.40, "short": "side bonuses",
+                    "label": "repairs, doors, wall weapons and ammo below 40% of positive return"},
     "repair_share": {"limit": 0.25, "short": "repairs", "label": "repairs below 25% of points earned"},
 }
 
@@ -40,7 +41,7 @@ PPO_SERIES = (
     ("explained_variance", "Explained variance", "1 is a perfect critic, 0 is predicting the mean"),
     ("value_loss", "Value loss", ""),
     ("policy_loss", "Policy loss", ""),
-    ("max_term_share_mean", "Largest reward term", "share of return from one term; the gate is 0.60"),
+    ("bonus_share_mean", "Side bonus share", "share of positive return from repairs and purchases; the gate is 0.40"),
     ("repair_share_mean", "Repair share", "share of points from barrier repairs; the gate is 0.25"),
     ("sps", "Steps/s", "throughput, not learning"),
 )
@@ -454,7 +455,7 @@ def _notes(run: dict) -> list[dict]:
                 f"{_span_text(t['span'], run['x_key'])}, against a spread of {_fmt(t['spread'])}",
             }
         )
-    pairs = (("max_term_share_mean", "max_term_share"), ("repair_share_mean", "repair_share"))
+    pairs = (("bonus_share_mean", "bonus_share"), ("repair_share_mean", "repair_share"))
     gates = [(key, gate) for key, gate in pairs if key in series]
     broken = [(k, g) for k, g in gates if series[k]["last"] >= GATES[g]["limit"]]
     for key, gate in broken:
@@ -471,6 +472,17 @@ def _notes(run: dict) -> list[dict]:
             f"{GATES[g]['short']} {series[k]['last']:.2f} against {GATES[g]['limit']:.2f}" for k, g in gates
         )
         notes.append({"level": "good", "text": f"anti-hacking gates hold — {held}"})
+    # The round counter can't be hacked and the return can: a return that climbs on its own is being earned
+    # somewhere other than the game.
+    ret, rounds = (series.get(k, {}).get("trend") for k in ("return_mean", "round_reached_mean"))
+    if ret and rounds and ret["verdict"] == "climbing" and rounds["verdict"] != "climbing":
+        notes.append(
+            {
+                "level": "serious",
+                "text": f"return is climbing but round reached is {rounds['verdict']} — the reward is being earned "
+                "without getting further into the game; read the reward terms",
+            }
+        )
     ev = series.get("explained_variance")
     if ev is not None and ev["last"] < 0:
         notes.append(

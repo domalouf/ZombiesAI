@@ -47,7 +47,7 @@ def ppo_rows(n, env_metrics=False, per=2048):
             "length_mean": 100.0 + u,
         }
         if env_metrics:
-            row |= {"round_reached_mean": 1.0 + u * 0.05, "max_term_share_mean": 0.4, "repair_share_mean": 0.1}
+            row |= {"round_reached_mean": 1.0 + u * 0.05, "bonus_share_mean": 0.2, "repair_share_mean": 0.1}
         rows.append(row)
     return rows
 
@@ -164,6 +164,18 @@ def test_gate_breach_is_reported_as_critical(tmp_path):
     assert any("anti-hacking gates hold" in n["text"] for n in clean["notes"])
 
 
+def test_return_climbing_without_rounds_is_flagged(tmp_path):
+    rows = ppo_rows(30, env_metrics=True)
+    for row in rows:
+        row["round_reached_mean"] = 1.0
+    notes = read_run(write_run(tmp_path, "hacking", rows, {"env": "real-waw"}))["notes"]
+    flagged = [n for n in notes if "round reached is flat" in n["text"]]
+    assert len(flagged) == 1 and flagged[0]["level"] == "serious"
+
+    honest = read_run(write_run(tmp_path, "honest", ppo_rows(30, env_metrics=True), {"env": "real-waw"}))
+    assert not [n for n in honest["notes"] if "round reached is" in n["text"]]
+
+
 def test_trend_calls_noise_flat_and_a_climb_climbing():
     xs = list(range(60))
     assert trend(xs, [1.0] * 60)["verdict"] == "flat"
@@ -199,7 +211,7 @@ def test_page_is_standalone_and_embeds_the_data(tmp_path):
     assert not re.search(r"(src|href)=\"(?!#)(https?:)?//", html)
     embedded = json.loads(re.search(r"(?:const|let) DATA = (\{.*?\});\n", html, re.S).group(1))
     assert embedded["runs"][0]["name"] == "rl1"
-    assert embedded["gates"]["max_term_share"]["limit"] == 0.60
+    assert embedded["gates"]["bonus_share"]["limit"] == 0.40
 
 
 def test_watch_mode_asks_the_page_to_reload(tmp_path):

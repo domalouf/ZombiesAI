@@ -239,8 +239,9 @@ loss and throughput — each curve a bucket mean over the spread it was averaged
 out of, so nothing is smoothed away silently. Charts are scoped to one
 environment at a time, because a rehearsal's return and the real game's are not
 the same number. It also grades each run against the gates in `PLAN.md`: the
-M7 anti-hacking pair (no reward term above 60% of return, repairs below 25% of
-points), and says which way the headline metric is
+M7 anti-hacking pair (side bonuses below 40% of positive return, repairs below
+25% of points), flags a return that climbs while round reached doesn't, and says
+which way the headline metric is
 actually moving and whether that beats its own noise. It needs nothing but the
 standard library, so it also runs on a `runs/` directory copied off the
 training box.

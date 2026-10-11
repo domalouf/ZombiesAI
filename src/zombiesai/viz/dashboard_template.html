@@ -297,8 +297,8 @@ const SECTION_EXPLAIN = {
   reward: "What the AI is paid for while it plays: the only signal it learns from. Every step it adds up these " +
     "terms, read off the game's on-screen HUD, and training pushes it toward whatever earns more of them.",
   gates: "Checks that the AI is winning the game, not gaming the scoring. Its reward comes from several sources; " +
-    "if one source starts to dominate, it may have found a loophole instead of learning to play. Each red dashed " +
-    "line is a limit the curve should stay under.",
+    "if the side ones start to outweigh fighting and surviving, it may have found a loophole instead of learning " +
+    "to play. Each red dashed line is a limit the curve should stay under.",
   featured: "The best game the AI has played in any run, as it saw it: the furthest round it reached, with the " +
     "most kills and then the most points breaking a tie. It is replaced whenever the AI does better.",
   films: "A recording of the single best game the AI has played in each run: the highest round it reached, with " +
@@ -315,8 +315,9 @@ const CHART_EXPLAIN = {
     "never trained on. Higher is better; balanced so rare actions count as much as common ones.",
   "val.mean_balanced": "How well the model guesses which buttons were pressed between two video frames, on clips " +
     "it never trained on. Higher is better.",
-  max_term_share_mean: "The share of the AI's reward that comes from its single biggest source (points, rounds, " +
-    "purchases...). Should stay under 0.60: above it, the AI is likely farming one thing rather than playing well.",
+  bonus_share_mean: "The share of the AI's reward that comes from side bonuses: rebuilding barricades, opening " +
+    "doors, buying wall weapons and ammo. Kill points and rounds are what playing well earns, so they should make " +
+    "up most of it. Should stay under 0.40: above it, the AI is likely farming a bonus rather than fighting.",
   repair_share_mean: "The share of points that come from rebuilding barricades. Repairs are easy points, so an AI " +
     "can learn to farm them instead of fighting. Should stay under 0.25.",
   entropy: "How random the AI's choices are. It starts high (exploring) and should drift down as it settles on " +
@@ -935,7 +936,7 @@ function renderScoped() {
     machinesSection(),
     rewardSection(),
     section("Reward hacking gates (PLAN.md, M7 T1)", [
-      chartCard("max_term_share_mean", { gate: { value: DATA.gates.max_term_share.limit, label: "gate 0.60" }, zero: true }),
+      chartCard("bonus_share_mean", { gate: { value: DATA.gates.bonus_share.limit, label: "gate 0.40" }, zero: true }),
       chartCard("repair_share_mean", { gate: { value: DATA.gates.repair_share.limit, label: "gate 0.25" }, zero: true }),
     ], SECTION_EXPLAIN.gates),
     section("Under the hood", [

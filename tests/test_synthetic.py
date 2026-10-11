@@ -53,7 +53,7 @@ def test_the_scripted_player_plays_a_whole_game_and_the_summary_has_what_the_lea
     assert summary["reason"] == "death" and summary["round_reached"] >= 3
     assert 0 < summary["hits"] <= summary["shots"]
     assert set(summary["reward_term_sums"]) == set(REWARD_TERMS)
-    assert {"return", "length", "seconds", "repair_share", "max_term_share", "points_gained"} <= set(summary)
+    assert {"return", "length", "seconds", "repair_share", "bonus_share", "points_gained"} <= set(summary)
 
 
 def test_the_same_seed_is_the_same_game():
