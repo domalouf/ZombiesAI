@@ -380,8 +380,9 @@ roughly 1-1.5 GB of RAM, the GPU has 12 GB, and the machine has 12 threads. Star
 
 The number that matters is `round_reached_mean`, not the return: the game's own round counter can't be
 reward-hacked, the shaped return can. If return climbs and rounds don't, read the reward terms before
-anything else. The dashboard grades the two anti-hacking gates on every run (largest term under 60% of the
-return, repairs under 25% of points).
+anything else; the dashboard flags exactly that. It also grades the two anti-hacking gates on every run (side
+bonuses -- repairs, doors, wall weapons, ammo -- under 40% of the positive return, repairs under 25% of
+points).
 
 ## When the spike fails
 

@@ -485,7 +485,7 @@ class RealGameEnv:
             "end_headshots": end.headshots if end else None,
             "bad_steps": self.bad_steps,
             "repair_share": stats.repair_share(),
-            "max_term_share": stats.max_term_share(),
+            "bonus_share": stats.bonus_share(),
             "gain_clips": stats.gain_clips,
             "events": dict(self.signals.events),
             "reward_term_sums": dict(zip(REWARD_TERMS, stats.term_sums.tolist())),

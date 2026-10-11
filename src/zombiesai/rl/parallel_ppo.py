@@ -82,7 +82,7 @@ from zombiesai.rl.weights import WeightFollower, publish  # noqa: F401
 # What episodes.jsonl keeps of an actor's episode summary: the numbers, not the per-term breakdowns.
 EPISODE_FIELDS = ("actor", "episode", "reason", "return", "length", "seconds", "round_reached", "shots", "hits",
                   "points_gained", "kills", "end_points", "end_kills", "end_headshots", "bad_steps", "repair_share",
-                  "max_term_share", "longest_without_kill_s")
+                  "bonus_share", "longest_without_kill_s")
 
 
 class MachineStats:
@@ -364,7 +364,7 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
                     row["machines"] = (1 if config.n_actors else 0) + len(fleet.alive())
                     row["per_machine"] = per_machine
                 if recent:
-                    for key in ("return", "length", "round_reached", "repair_share", "max_term_share", "seconds"):
+                    for key in ("return", "length", "round_reached", "repair_share", "bonus_share", "seconds"):
                         vals = [e[key] for e in recent if isinstance(e.get(key), (int, float))]
                         if vals:
                             row[f"{key}_mean"] = float(np.mean(vals))

@@ -389,7 +389,7 @@ class SyntheticWorld:
             "hits": self.hits,
             "bad_steps": 0,
             "repair_share": stats.repair_share(),
-            "max_term_share": stats.max_term_share(),
+            "bonus_share": stats.bonus_share(),
             "reward_term_sums": dict(zip(REWARD_TERMS, stats.term_sums.tolist())),
         }
 
