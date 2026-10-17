@@ -138,7 +138,7 @@ def test_a_gain_pays_once_it_settles_and_a_death_terminates():
     assert done is not None and done[0] and not done[1]
     assert done[2]["episode"]["reason"] == "death"
     assert rewards[2] == pytest.approx(0.5)  # +50 points, settled on the third read
-    assert rewards[-1] == pytest.approx(-15.0)  # the death term
+    assert rewards[-1] == pytest.approx(-5.0)  # the death term
     assert dispatcher.releases >= 2  # released at reset and again at the end
     assert done[2]["episode"]["points_gained"] == 50
 

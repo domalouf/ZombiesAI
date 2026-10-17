@@ -20,12 +20,18 @@ class RewardConfig:
     repair_points_cap_per_round: float = 200.0
     round_complete: float = 500.0
     door_opened: float = 300.0
-    wall_weapon: float = 200.0
+    # Under one kill: at 200 the round-1 Kar98k (+2.0, two or three kills' worth) was most games' largest
+    # positive term, and the policy learned to walk to the wall rather than fight (side bonuses ~80% of the
+    # positive return through rl14-rl16).
+    wall_weapon: float = 50.0
     ammo_rebuy: float = 50.0
     # Rebuys only pay when the reserve was actually low; otherwise spending points on ammo is a free reward loop.
     ammo_need_fraction: float = 0.5
     damage_event: float = -100.0
-    death: float = -1500.0
+    # One round's worth: dying still costs the round it would have finished. At -1500 it was paid in every game,
+    # fifteen kills' worth, and the spread of the return was mostly when that came -- a kill moved the critic's
+    # target by a few percent of it, and 5,000 games left the mean round at 1.05.
+    death: float = -500.0
     clip_low: float = -20.0
     clip_high: float = 8.0
 

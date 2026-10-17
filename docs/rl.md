@@ -235,7 +235,10 @@ stops by itself.
 
 To continue (which `./zai start` does by default), pass the last run's `checkpoint.pt` as the first argument with a new `--out`: the update count
 (so no second critic warm-up), the KL weight and the KL anchor carry over -- the anchor is always the BC
-policy the chain started from (`rl/parallel_ppo.py: root_prior`), never the checkpoint being continued.
+policy the chain started from (`rl/parallel_ppo.py: root_prior`), never the checkpoint being continued. The
+exception is a changed reward: the checkpoint records the `RewardConfig` its critic was fitted to, and a run
+continuing under a different one (or from a checkpoint that predates the record) warms the critic up again for
+`critic_warmup_updates` before the policy moves.
 
 ## Several PCs
 
