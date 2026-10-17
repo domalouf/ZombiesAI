@@ -103,6 +103,7 @@
 
   .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 22px 0 6px; }
   .filters .caption { font-size: 13.5px; color: var(--chalk-dim); margin-right: 6px; }
+  .filters .x-mode { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-left: auto; }
   .chip {
     display: inline-flex;
     align-items: center;
@@ -360,9 +361,19 @@ const REWARD = DATA.reward;
 const groups = [];
 for (const r of runs) if (!groups.some((g) => g.key === r.group)) groups.push({ key: r.group, label: r.group_label });
 const state = { group: groups.length ? groups[0].key : null, visible: new Set(runs.map((r) => r.name)),
-                fleetRun: null, hiddenMachines: new Set() };
+                fleetRun: null, hiddenMachines: new Set(), chained: readChained() };
 let charts = [];
 const inGroup = () => runs.filter((r) => r.group === state.group);
+
+/* Whether the charts lay the runs end to end, each starting where the one before it stopped, rather than each
+   from step 0. Kept per reader in this browser; a browser that keeps nothing just starts from 0. */
+const CHAINED_KEY = "zombiesai.training.chained";
+function readChained() {
+  try { return localStorage.getItem(CHAINED_KEY) === "1"; } catch (e) { return false; }
+}
+function writeChained(on) {
+  try { localStorage.setItem(CHAINED_KEY, on ? "1" : "0"); } catch (e) { /* not kept: fine */ }
+}
 
 /* New numbers from a live server (scripts/supervise.py). What the reader chose stays chosen: the group, and
    which runs are hidden. A run that appears is shown. */
@@ -631,7 +642,34 @@ function ticks(lo, hi, count) {
 
 /* -- assembling the page ---------------------------------------------------- */
 function seriesFor(key) {
-  return () => inGroup().filter((r) => r.series[key]).map((r) => ({ run: r.name, name: r.name, color: r.color, ...r.series[key] }));
+  return () => {
+    const offsets = state.chained ? chainOffsets() : null;
+    return inGroup().filter((r) => r.series[key]).map((r) => {
+      const s = { run: r.name, name: r.name, color: r.color, ...r.series[key] };
+      const shift = offsets?.get(r.name);
+      return shift ? { ...s, x: s.x.map((v) => v + shift) } : s;
+    });
+  };
+}
+
+/* How far along the x-axis each shown run starts when they are laid end to end: the sum of the lengths of the
+   shown runs before it, oldest first. A hidden run takes no room, so the shown ones still meet. */
+function chainOffsets() {
+  const offsets = new Map();
+  let at = 0;
+  for (const r of inGroup().slice().reverse()) {  // runs are newest-first
+    if (!state.visible.has(r.name)) continue;
+    offsets.set(r.name, at);
+    at += runLength(r);
+  }
+  return offsets;
+}
+
+// A run's length in its own x units: where its last row was logged, or where its longest curve ends.
+function runLength(r) {
+  let end = r.stats[r.x_key === "epoch" ? "epoch" : "steps"] || 0;
+  for (const s of Object.values(r.series)) if (s.x.length) end = Math.max(end, s.x[s.x.length - 1]);
+  return end;
 }
 const stepFormat = (v) => fmtCompact(v);
 const epochFormat = (v) => fmtInt(v);
@@ -864,7 +902,20 @@ function filterRow() {
     });
     return chip;
   });
-  return el("div", { class: "filters" }, [el("span", { class: "caption", text: "Runs:" }), ...chips]);
+  if (chips.length < 2) return el("div", { class: "filters" }, [el("span", { class: "caption", text: "Runs:" }), ...chips]);
+  // Runs are trained one after another, each from step 0: laid end to end they read as one long line.
+  const modes = [[false, "Each from 0"], [true, "Back to back"]].map(([on, label]) => {
+    const button = el("button", { class: "chip seg", type: "button", "aria-pressed": String(state.chained === on), text: label });
+    button.addEventListener("click", () => {
+      state.chained = on;
+      writeChained(on);
+      for (const b of modes) b.setAttribute("aria-pressed", String(b === button));
+      for (const draw of charts) draw();
+    });
+    return button;
+  });
+  return el("div", { class: "filters" }, [el("span", { class: "caption", text: "Runs:" }), ...chips,
+    el("span", { class: "x-mode" }, [el("span", { class: "caption", text: "Steps:" }), ...modes])]);
 }
 
 function table() {
