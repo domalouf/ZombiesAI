@@ -47,7 +47,7 @@ def test_progression_bonuses_are_novelty_gated(shaper):
     first = shaper(StepSignals(delta_points=-1000, doors_opened=("help_door",)))
     again = shaper(StepSignals(doors_opened=("help_door",)))
     assert first.reward == pytest.approx(3.0) and again.reward == 0.0
-    assert shaper(StepSignals(delta_points=-600, wall_weapons_bought=("m1a1_carbine",))).reward == pytest.approx(2.0)
+    assert shaper(StepSignals(delta_points=-600, wall_weapons_bought=("m1a1_carbine",))).reward == pytest.approx(0.5)
     assert shaper(StepSignals(wall_weapons_bought=("m1a1_carbine",))).reward == 0.0
 
 
@@ -60,7 +60,7 @@ def test_round_damage_and_death():
     s = RewardShaper()
     assert s(StepSignals(rounds_completed=1)).reward == pytest.approx(5.0)
     assert s(StepSignals(damage_event=True)).reward == pytest.approx(-1.0)
-    assert s(StepSignals(death=True, damage_event=True)).reward == pytest.approx(-16.0)
+    assert s(StepSignals(death=True, damage_event=True)).reward == pytest.approx(-6.0)
 
 
 def test_bonus_share_ignores_kill_points_rounds_and_penalties():

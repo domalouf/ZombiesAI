@@ -103,7 +103,7 @@ def reference_update(learner: Learner, segments: list[Segment], scaler: LoopStd)
     old_logp = np.concatenate([s.logp for s in segments])
     actions = np.concatenate([s.actions for s in segments])
     usable = np.flatnonzero(np.concatenate(valid))
-    warmup = learner.updates < c.critic_warmup_updates
+    warmup = learner.updates < learner.warmup_until
     prior = np.zeros((len(rows), sum(spec.ACTION_NVEC)), np.float32)
     if not warmup and len(usable):
         px, au, mk, hd = learner._gather(segments, rows[usable], which[usable])

@@ -26,6 +26,7 @@ from torch import nn
 
 from zombiesai import spec
 from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE, hud_view
+from zombiesai.reward import RewardConfig
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.encoders import precision
@@ -196,6 +197,13 @@ class Learner:
         self.updates = int(previous.get("updates", 0))
         self.clock_start = previous.get("clock") or {}  # the training clock it stopped at (rl/clock.py)
         self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
+        # The reward the critic is fitted to. One that changed since the checkpoint (or a checkpoint from before
+        # this was recorded) leaves a critic predicting the old reward, and its advantages would move the policy
+        # on that: warm the critic up again from here before the policy trains.
+        self.reward = asdict(RewardConfig())
+        self.warmup_until = config.critic_warmup_updates
+        if previous and previous.get("reward") != self.reward:
+            self.warmup_until = self.updates + config.critic_warmup_updates
         # A run without an anchor (kl_coef 0 from the start: nothing to stay close to) keeps no reference.
         self.ref = None
         if self.kl_coef > 0:
@@ -328,7 +336,7 @@ class Learner:
         usable = np.flatnonzero(valid)
         to_device = lambda a: torch.from_numpy(np.ascontiguousarray(a)).to(self.device)  # noqa: E731
         adv_t, ret_t, old_logp_t, actions_t = map(to_device, (adv, ret, old_logp, actions.astype(np.int64)))
-        warmup = self.updates < c.critic_warmup_updates
+        warmup = self.updates < self.warmup_until
         # The frozen prior's logits of every step that can be trained on, once: they are the same every epoch.
         ref_logits = None
         if self.ref is not None and not warmup and len(usable):
@@ -412,7 +420,7 @@ class Learner:
             "kind": "bc",
             "model": {k: v.detach().cpu() for k, v in self.net.state_dict().items()},
             "rl": {"init": self.config.init, "reference": self.reference, "kl_coef": self.kl_coef,
-                   "updates": self.updates, "step": step, "env": self.config.env_name,
+                   "updates": self.updates, "step": step, "env": self.config.env_name, "reward": self.reward,
                    "config": asdict(self.config), **(extra or {})},
         })
         torch.save(blob, tmp)
