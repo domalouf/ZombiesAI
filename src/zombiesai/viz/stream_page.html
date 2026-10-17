@@ -120,6 +120,12 @@
   td.num, th.num { text-align: right; }
   td.dim { color: var(--chalk-dim); }
   tr:last-child td { border-bottom: 0; }
+  /* The games table is ~30px wider than a 360px phone's card: tighter cells make it fit. */
+  @media (max-width: 400px) {
+    table { font-size: 13px; }
+    th { letter-spacing: 0.02em; padding-right: 7px; }
+    td { padding-right: 7px; }
+  }
   footer { margin-top: 40px; font-size: 13px; color: var(--chalk-faint); max-width: 90ch; }
 </style>
 </head>
