@@ -22,8 +22,9 @@ rules allow. This is the last step: which of those changes pay, and as what.
   a lower bound -- two kills settling in one roll of the counter count once -- and double points' 20-point hits
   can sum past it. The HUD has no kill counter to do better with.
 
-Not here yet: `damage_event` (no damage detector reads the real screen) and ammo rebuys (a rebuy costs half
-the gun, which collides with other prices). Both stay zero rather than guessed.
+Not here: `damage_event`, which the HUD does not show -- the env reads it off the frame (realgame/damage.py) --
+and ammo rebuys (a rebuy costs half the gun, which collides with other prices), which stay zero rather than
+guessed.
 """
 
 from collections import deque
@@ -39,7 +40,7 @@ KILL_MIN_POINTS = 50
 DOOR_PRICES = (1000,)
 WALL_WEAPON_PRICES = (200, 600, 1200)
 # The shaper's terms the HUD cannot see yet (see above): they stay zero on the real game.
-UNDETECTED_TERMS = ("ammo", "damage")
+UNDETECTED_TERMS = ("ammo",)
 USE = spec.BUTTONS.index("use")
 
 

@@ -30,12 +30,15 @@ class FakeGame:
         self.last_hud = None
         self.last_stale = False
         self.reads = 0
+        self.frame = None  # a picture to show instead of the plain grey one
 
     def read(self):
         self.reads += 1
         value = self.points.pop(0) if len(self.points) > 1 else (self.points[0] if self.points else None)
         self.last_hud = {"points": value}
         self.last_stale = self.stale
+        if self.frame is not None:
+            return self.frame
         frame = np.full(spec.PIXELS_SHAPE, self.reads % 255, dtype=np.uint8)
         return frame
 
@@ -141,6 +144,23 @@ def test_a_gain_pays_once_it_settles_and_a_death_terminates():
     assert rewards[-1] == pytest.approx(-5.0)  # the death term
     assert dispatcher.releases >= 2  # released at reset and again at the end
     assert done[2]["episode"]["points_gained"] == 50
+
+
+def test_a_red_flash_is_one_hit_paid_once_and_counted():
+    env, game, _, _, _ = make_env([500] * 4)
+    env.reset()
+    red = np.zeros(spec.PIXELS_SHAPE, np.uint8)
+    red[..., 0] = 60
+    steps = []
+    for frame in (None, red, red, red, None, red):
+        game.frame = frame
+        _, r, _, _, info = env.step(IDLE)
+        steps.append((r, info["hit"]))
+    assert steps == [(0.0, False), (pytest.approx(-1.0), True), (0.0, False), (0.0, False), (0.0, False),
+                     (pytest.approx(-1.0), True)]
+    assert env.summary()["hits_taken"] == 2
+    game.stale = True  # the last good frame again, and it is red: not a new hit
+    assert not env.step(IDLE)[4]["hit"]
 
 
 def test_three_implausible_changes_in_a_row_truncate_as_hud_lost():
