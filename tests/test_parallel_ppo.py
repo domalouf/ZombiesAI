@@ -210,3 +210,24 @@ def test_each_machine_is_judged_on_its_own_steps_and_games():
     again = stats.flush()
     assert again["1"]["steps"] == 300 and again["1"]["round_reached_mean"] == 4.0  # games outlive the window
     assert stats.verdicts(again) == [(1, "recovered")]
+
+
+def test_a_continued_run_warms_the_critic_again_when_the_reward_changed(bc_checkpoint, tmp_path):
+    config = RLConfig(init=str(bc_checkpoint), critic_warmup_updates=1, minibatch_size=32, update_epochs=2,
+                      device="cpu", target_kl=None)
+    first = Learner(config, torch.device("cpu"))
+    for seed in range(2):
+        first.update(synthetic_segments(first, seed=seed))
+    same = tmp_path / "same.pt"
+    first.checkpoint(same, step=100)
+    assert not Learner(replace(config, init=str(same)), torch.device("cpu")).update(
+        synthetic_segments(first, seed=5))["warmup"]  # same reward: the critic already knows it
+
+    blob = torch.load(same, weights_only=False)
+    blob["rl"]["reward"] = {**blob["rl"]["reward"], "death": -1500.0}
+    changed = tmp_path / "changed.pt"
+    torch.save(blob, changed)
+    second = Learner(replace(config, init=str(changed)), torch.device("cpu"))
+    assert second.updates == 2
+    assert second.update(synthetic_segments(second, seed=6))["warmup"]  # the critic first
+    assert not second.update(synthetic_segments(second, seed=7))["warmup"]  # then the policy, as before
