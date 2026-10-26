@@ -25,12 +25,17 @@ from scipy.signal import lfilter
 from torch import nn
 
 from zombiesai import spec
+from zombiesai.demos.stats import behaviour_stats
 from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE, hud_view
 from zombiesai.reward import RewardConfig
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.encoders import precision
 from zombiesai.rl.segments import Segment
+
+# What the hands did, from demos/stats.py behaviour_stats, logged every update as act_<name> beside the human's
+# (`human_rates`): a policy pressing buttons four times as often as its person did is invisible in the return.
+ACTION_RATES = ("fire_duty", "sprint_duty", "ads_duty", "button_any_frac", "yaw_still_frac")
 
 # Observations per forward pass where no gradient is kept (values, reference logits): a 7-frame stack of 512
 # is ~100 MB of uint8 on the device, and large enough that the GPU is busy rather than waiting on launches.
@@ -155,7 +160,9 @@ def prepare_init(config: RLConfig, run_dir: str | Path) -> RLConfig:
 
     run_dir = Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
-    bc_config = bc.BCConfig(frame_offsets=FRESH_OFFSETS, use_audio=True, use_hud_view=True, seed=config.seed)
+    # No loss has touched it, so there is nothing to calibrate: focal_gamma and class_balance say so.
+    bc_config = bc.BCConfig(frame_offsets=FRESH_OFFSETS, use_audio=True, use_hud_view=True, seed=config.seed,
+                            focal_gamma=0.0, class_balance=0.0)
     features = AudioFeatureConfig()
     torch.manual_seed(config.seed)
     path = run_dir / "init.pt"
@@ -197,6 +204,10 @@ class Learner:
         self.updates = int(previous.get("updates", 0))
         self.clock_start = previous.get("clock") or {}  # the training clock it stopped at (rl/clock.py)
         self.kl_coef = float(previous.get("kl_coef", config.kl_coef))
+        # How the policy is sampled (demos/bc.py policy_calibration): fixed where the chain started, and the
+        # prior it is anchored to is read through the same lens, so the KL is between the policies that play.
+        self.calibration = bc.policy_calibration(self.meta, config.calibrate)
+        bc.calibrate(self.net, self.calibration)
         # The reward the critic is fitted to. One that changed since the checkpoint (or a checkpoint from before
         # this was recorded) leaves a critic predicting the old reward, and its advantages would move the policy
         # on that: warm the critic up again from here before the policy trains.
@@ -209,6 +220,7 @@ class Learner:
         if self.kl_coef > 0:
             if previous:
                 self.ref, _, _ = bc.load(self.reference, device)
+                bc.calibrate(self.ref, self.calibration)
                 self.ref.eval()
             else:
                 self.ref = copy.deepcopy(self.net).eval()
@@ -407,10 +419,18 @@ class Learner:
         out["approx_kl"] = _mean(epoch_kl) if epoch_kl else 0.0
         var = float(np.var(ret[usable])) if len(usable) else 0.0
         out["explained_variance"] = 1.0 - float(np.var(ret[usable] - pred[usable])) / var if var > 0 else None
+        if len(usable):
+            rates = behaviour_stats(actions[usable])
+            out.update({f"act_{k}": rates[k] for k in ACTION_RATES})
         out.update({"warmup": warmup, "kl_coef": self.kl_coef, "reward_scale": scale,
                     "bad_step_frac": float(1.0 - valid.mean()) if len(valid) else 0.0,
                     "batch_steps": int(len(valid))})
         return out
+
+    def human_rates(self) -> dict[str, float]:
+        """The person the prior cloned, in ACTION_RATES (a BC checkpoint keeps them, and so does every RL one)."""
+        human = self.meta.get("human_behaviour") or {}
+        return {k: float(human[k]) for k in ACTION_RATES if k in human}
 
     def checkpoint(self, path: Path, step: int, extra: dict | None = None) -> None:
         """A BC-format checkpoint (everything that plays a BC policy plays this) with an `rl` section."""
@@ -421,6 +441,7 @@ class Learner:
             "model": {k: v.detach().cpu() for k, v in self.net.state_dict().items()},
             "rl": {"init": self.config.init, "reference": self.reference, "kl_coef": self.kl_coef,
                    "updates": self.updates, "step": step, "env": self.config.env_name, "reward": self.reward,
+                   "calibration": self.calibration,
                    "config": asdict(self.config), **(extra or {})},
         })
         torch.save(blob, tmp)

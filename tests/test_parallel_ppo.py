@@ -212,6 +212,33 @@ def test_each_machine_is_judged_on_its_own_steps_and_games():
     assert stats.verdicts(again) == [(1, "recovered")]
 
 
+def test_a_chain_from_bc_samples_at_the_human_rates_and_keeps_that_choice(bc_checkpoint, tmp_path):
+    config = RLConfig(init=str(bc_checkpoint), critic_warmup_updates=0, minibatch_size=32, update_epochs=1,
+                      device="cpu", target_kl=None)
+    learner = Learner(config, torch.device("cpu"))
+    assert learner.calibration == {"focal_gamma": 1.0, "class_weights": None}  # the fixture's BC loss
+    assert learner.net.calibration is not None and learner.ref.calibration is not None
+    stats = learner.update(synthetic_segments(learner))
+    assert stats["kl_ref"] < 1e-3  # one update from its prior, read through the same lens
+    assert 0.0 <= stats["act_fire_duty"] <= 1.0 and 0.0 <= stats["act_button_any_frac"] <= 1.0
+    assert learner.human_rates() == {"fire_duty": 0.1}
+    path = tmp_path / "calibrated.pt"
+    learner.checkpoint(path, step=100)
+    again = Learner(replace(config, init=str(path), calibrate=False), torch.device("cpu"))
+    assert again.calibration == learner.calibration and again.ref.calibration is not None  # the chain's choice
+    assert BCAgent(path).net.calibration is not None  # and played as it trained
+
+    # A chain started before calibration existed has no record of it, and goes on as it was.
+    blob = torch.load(path, weights_only=False)
+    del blob["rl"]["calibration"]
+    old = tmp_path / "old.pt"
+    torch.save(blob, old)
+    before = Learner(replace(config, init=str(old)), torch.device("cpu"))
+    assert before.calibration is None and before.net.calibration is None and before.ref.calibration is None
+    assert BCAgent(old).net.calibration is None
+    assert Learner(replace(config, calibrate=False), torch.device("cpu")).calibration is None
+
+
 def test_a_continued_run_warms_the_critic_again_when_the_reward_changed(bc_checkpoint, tmp_path):
     config = RLConfig(init=str(bc_checkpoint), critic_warmup_updates=1, minibatch_size=32, update_epochs=2,
                       device="cpu", target_kl=None)

@@ -262,6 +262,7 @@ def test_a_fresh_start_hears_trains_and_plays(tmp_path):
     assert bc_config.use_hud_view and net.hud_encoder is not None  # and it looks at the HUD corner
     learner = Learner(config, torch.device("cpu"))
     assert learner.ref is None and learner.audio_shape == AUDIO and learner.uses_hud_view
+    assert learner.calibration is None  # no loss shaped it, so there is nothing to undo
     for seed in range(2):
         stats = learner.update(make_segments(learner.net, learner.offsets, audio=True, lengths=(40, 25), seed=seed,
                                              hud=True))

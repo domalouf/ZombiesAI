@@ -59,6 +59,15 @@ def main() -> None:
         print(f"  {mark} {key:>20}: policy {policy.get(key, float('nan')):.3f} "
               f"vs human {human.get(key, float('nan')):.3f}  ({ratio:.1f}x)")
     print(f"  -> {'within 2x on every statistic' if divergence['passed'] else 'diverged'}")
+    if "calibrated" in behaviour:
+        # What RL and play_real sample: the same logits with the focal loss's flattening undone (losses.FocalInverse).
+        calibrated, divergence = behaviour["calibrated"], report["held_out"]["divergence_calibrated"]
+        print("calibrated, as RL samples it:")
+        for key, ratio in divergence["ratios"].items():
+            mark = "ok " if ratio <= divergence["factor"] else "OFF"
+            print(f"  {mark} {key:>20}: policy {calibrated.get(key, float('nan')):.3f} "
+                  f"vs human {human.get(key, float('nan')):.3f}  ({ratio:.1f}x)")
+        print(f"  -> {'within 2x on every statistic' if divergence['passed'] else 'diverged'}")
     inertia = report["held_out"]["inertia"]
     print(f"  copy rate {inertia['policy']['copy_joint']:.2f} joint vs human {inertia['human']['copy_joint']:.2f}"
           + ("" if inertia["passed"] else f"; inert heads: {', '.join(inertia['inert_heads'])}"))

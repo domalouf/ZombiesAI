@@ -38,9 +38,12 @@ class BCAgent:
         deterministic: bool = False,
         device: str = "cpu",
         temperature: float = 1.0,
+        calibrate: bool = True,
     ):
         self.device = torch.device(device)
         self.net, self.config, self.meta = bc.load(checkpoint, self.device)
+        # Played as RL samples it: a BC checkpoint at its human's rates, an RL one as its chain trained.
+        bc.calibrate(self.net, bc.policy_calibration(self.meta, calibrate))
         # The feature config it was trained on: what a live audio source must compute for it. None if deaf.
         self.audio_features = None
         if self.config.use_audio:

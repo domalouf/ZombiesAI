@@ -137,6 +137,16 @@ per-round cap, and the repair-share gate on the dashboard.
 - **A KL anchor to the BC policy**, `kl_coef * KL(pi || pi_BC)` over the action heads, decaying from 0.2 to
   0.02 -- VPT's recipe for fine-tuning a behavioural prior with RL without forgetting it. `kl_ref` on the
   dashboard is how far it has moved from BC.
+- **The prior sampled at its human's rates** (`--calibrate`, on by default). BC is trained with a focal,
+  class-weighted loss, which is right for balanced accuracy and wrong for sampling: it flattens every head.
+  Where the person pressed a button on 5% of decisions, the focal-optimal policy says ~19%; it fires on ~25%
+  where they fired on 12%, and sprints (which stops it shooting) on ~31% where they did on 20%. Through rl10-rl18
+  every chain sampled that and was anchored to it. The flattening is exactly invertible from the probabilities
+  (`demos/losses.py` `FocalInverse`), so a chain that starts from a BC checkpoint samples, trains and anchors
+  through the inverse, and records that in its checkpoints; a chain started before this has no record and goes
+  on as it was. `act_fire_duty`, `act_button_any_frac`, `act_sprint_duty`, ... in `metrics.jsonl` (and fire,
+  button and sprint on each log line) are what the policy's hands did that update, against the human's printed
+  at the start. `scripts/eval_bc.py` reports a BC checkpoint's behaviour both ways.
 - Bad steps stay in the GAE chain (time passed) but are masked out of the losses (nobody chose them).
 - Rewards are scaled by a running estimate of the discounted return's spread.
 - An actor that crashes -- a game that died, a reset that failed -- is restarted, up to 20 times each.
