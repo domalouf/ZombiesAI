@@ -121,10 +121,15 @@ a door or the debris, 200/600/1200 a wall gun). **Repairs are the one thing the 
 both are +10 -- so the actor's own actions decide it: a small gain within ~1.3 s of pressing use, with the
 trigger untouched, is a plank. That keeps `PLAN.md`'s board-farming defences working: the 0.2 weight, the
 per-round cap, and the repair-share gate on the dashboard. **Hits are not on the HUD at all**, so `realgame/damage.py` reads them off the
-observation frame: a zombie's hit floods the screen dark red for ~0.4 s, scored by how far red stands above
-green and blue *and* how alike those two are (Nacht's orange-lit rooms are as warm as a hit, but orange). One
-flash is one hit, -1 (`damage_event`); the episode summary counts them as `hits_taken`. On the five demos and
-every run's films, every flash it fired on was a hit (22-37), and nothing else scored above 17.
+observation frame. A hit lays a red tint over the *whole* picture at once: a hard one floods it dark red for
+~0.4 s, but the first hit at full health only warms it for a step or two -- live, in the spawn room's blue light,
+never as red as a warm room is. So a hit is either the frame getting redder in every cell of a 3x4 grid at once,
+with green and blue moving together (a power-up's green glow fading out raises "red above green" everywhere
+too, by dropping green against blue), or the frame's level of red -- hue-aware, so Nacht's orange-lit rooms
+don't count -- crossing a line. One hit is -1 (`damage_event`); the episode summary counts them as
+`hits_taken`. Over the five demos, every run's films and two idle games on the fleet, every firing checked by eye
+was a hit (a self-inflicted grenade among them), and the faint first hit of the live game was caught -- by the
+rise alone.
 
 **`rl/parallel_ppo.py` — the learner.**
 
