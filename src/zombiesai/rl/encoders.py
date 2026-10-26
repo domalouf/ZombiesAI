@@ -165,6 +165,9 @@ class PixelActorCritic(nn.Module):
         self.aux = nn.ModuleDict(
             {name: layer_init(nn.Linear(hidden, dim), std=0.01) for name, dim in (aux_heads or {}).items()}
         )
+        # What turns the actor's logits into the ones that are sampled: None, or demos/bc.py `calibrate`'s
+        # FocalInverse for a policy cloned under a focal loss. Never trained and never in the state_dict.
+        self.calibration: nn.Module | None = None
 
     def features(
         self,
@@ -203,10 +206,14 @@ class PixelActorCritic(nn.Module):
     ):
         h = self.features(pixels, vector, audio, audio_mask, hud)
         aux = {name: head(h) for name, head in self.aux.items()}
-        return self.actor(h), self.critic(h).squeeze(-1), aux
+        return self.policy_logits(h), self.critic(h).squeeze(-1), aux
+
+    def policy_logits(self, h: torch.Tensor) -> torch.Tensor:
+        logits = self.actor(h)
+        return logits if self.calibration is None else self.calibration(logits)
 
     def dist(self, pixels: torch.Tensor, vector: torch.Tensor | None = None) -> FactoredCategorical:
-        return FactoredCategorical(self.actor(self.features(pixels, vector)), self.nvec)
+        return FactoredCategorical(self.policy_logits(self.features(pixels, vector)), self.nvec)
 
     def value(self, pixels: torch.Tensor, vector: torch.Tensor | None = None) -> torch.Tensor:
         return self.critic(self.features(pixels, vector)).squeeze(-1)

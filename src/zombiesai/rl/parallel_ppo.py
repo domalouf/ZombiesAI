@@ -287,6 +287,12 @@ def train(config: RLConfig, run_dir: str | Path, *, say=print, fleet_token: str 
     for i in range(config.n_actors):
         spawn(i)
     say(f"learner on {learner.device}, {config.n_actors} {config.env_name} actors here from {config.init}")
+    calibration = learner.calibration
+    say("sampled as cloned (no calibration)" if calibration is None else
+        f"sampled at the human's rates: focal gamma {calibration['focal_gamma']:g} undone"
+        + (", and class weights" if calibration.get("class_weights") is not None else ""))
+    if human := learner.human_rates():
+        say("the human it cloned: " + ", ".join(f"{k} {v:.3f}" for k, v in human.items()))
     machines = None
     if fleet is not None:
         from zombiesai.rl.fleet import ACTOR_BLOCK
@@ -463,6 +469,9 @@ def _print_row(row: dict, say) -> None:
         parts.append(f"ent {row.get('entropy', float('nan')):.2f} kl {row['approx_kl']:.4f} "
                      + (f"kl_bc {kl_ref:.3f} " if isinstance(kl_ref, float) and math.isfinite(kl_ref) else "")
                      + f"clip {row.get('clipfrac', float('nan')):.2f} ev {'-' if ev is None else f'{ev:.2f}'}")
+    if "act_button_any_frac" in row:
+        parts.append(f"fire {row['act_fire_duty']:.0%} button {row['act_button_any_frac']:.0%} "
+                     f"sprint {row['act_sprint_duty']:.0%}")
     if row.get("bad_step_frac"):
         parts.append(f"bad {row['bad_step_frac']:.1%}")
     say(" | ".join(parts))

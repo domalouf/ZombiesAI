@@ -13,9 +13,10 @@ from zombiesai.demos.agent import BCAgent
 from zombiesai.demos.clips import DPOINTS_EDGES, ClipWriter, load_clip, monte_carlo_returns
 from zombiesai.demos.dataset import ClipDataset, DataConfig
 from zombiesai.demos.inputs import InputConfig
-from zombiesai.demos.losses import factored_cross_entropy, head_confidence, head_predictions
+from zombiesai.demos.losses import FocalInverse, factored_cross_entropy, head_confidence, head_predictions
 from zombiesai.demos.recorder import RecorderConfig, record
 from zombiesai.reward import REWARD_TERMS
+from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.synthetic import ScriptedPlayer, SyntheticConfig, SyntheticSource, SyntheticWorld
 
 STEPS = 160
@@ -114,6 +115,14 @@ def test_behavioural_cloning_produces_a_policy_that_plays(demos, tmp_path):
     assert len(taken) > 1
     assert set(stats.behaviour_stats(np.stack(taken))) >= {"fire_duty", "abs_yaw_deg_per_s", "copy_joint"}
 
+    # It keeps the loss's class weights, plays at its human's rates, and says what those rates would be.
+    meta = torch.load(checkpoint, weights_only=True)
+    assert [len(w) for w in meta["class_weights"]] == list(spec.ACTION_NVEC)
+    assert bc.policy_calibration(meta) == {"focal_gamma": config.focal_gamma, "class_weights": meta["class_weights"]}
+    assert agent.net.calibration is not None and BCAgent(checkpoint, calibrate=False).net.calibration is None
+    report = json.loads((tmp_path / "bc" / "report.json").read_text())["final"]
+    assert "calibrated" in report["behaviour"] and "ratios" in report["divergence_calibrated"]
+
 
 def test_a_bc_policy_refuses_observations_without_pixels(demos, tmp_path):
     config = bc.BCConfig(frame_stack=2, hidden=32, epochs=1, batch_size=16, max_batches_per_epoch=2,
@@ -180,3 +189,53 @@ def test_bc_trains_the_value_and_auxiliary_heads_when_the_clips_carry_them(tmp_p
         net, bc.batch_tensors(data_without.batch(data_without.index[:16]), config, torch.device("cpu")), config, None
     )
     assert "value" not in parts_without and "policy" in parts_without
+
+
+def focal_optimum(p: np.ndarray, w: np.ndarray, gamma: float) -> np.ndarray:
+    """The head's output that factored_cross_entropy's weighted focal loss is minimised by, labels drawn from p."""
+    z = torch.zeros(len(p), dtype=torch.float64, requires_grad=True)
+    p_t, w_t = torch.as_tensor(p), torch.as_tensor(w, dtype=torch.float64)
+    opt = torch.optim.LBFGS([z], max_iter=500, tolerance_grad=1e-14, tolerance_change=1e-16)
+
+    def loss():
+        opt.zero_grad()
+        q = z.softmax(0)
+        value = -(p_t * w_t * (1 - q) ** gamma * q.log()).sum()
+        value.backward()
+        return value
+
+    for _ in range(5):
+        opt.step(loss)
+    return z.softmax(0).detach().numpy()
+
+
+@pytest.mark.parametrize("gamma", [0.0, 0.5, 1.0, 2.0])
+def test_the_focal_inverse_gives_back_the_rates_the_loss_was_fitted_to(gamma):
+    """A button pressed on 5% of decisions: the focal loss's answer says ~19%, the inverse says 5% again."""
+    rng = np.random.default_rng(int(gamma * 10))
+    heads = [np.array([0.95, 0.025, 0.01, 0.007, 0.002, 0.006]), np.array([0.88, 0.12]), rng.dirichlet(np.ones(9))]
+    weights = [rng.uniform(0.5, 3.0, len(p)) for p in heads]
+    q = [focal_optimum(p, w, gamma) for p, w in zip(heads, weights)]
+    if gamma >= 1:
+        assert q[0][0] < heads[0][0] - 0.05  # the flattening this exists to undo
+    nvec = tuple(len(p) for p in heads)
+    logits = torch.as_tensor(np.log(np.concatenate(q)), dtype=torch.float32)[None]
+    out = FocalInverse(nvec, gamma, weights)(logits)[0]
+    for head, p in zip(torch.split(out, nvec), heads):
+        np.testing.assert_allclose(head.softmax(-1).numpy(), p, atol=1e-4)
+
+
+def test_a_calibration_changes_what_is_sampled_and_nothing_that_is_saved():
+    config = bc.BCConfig(frame_stack=2, hidden=32)
+    net = bc.build_net(config).eval()
+    keys = set(net.state_dict())
+    pixels = torch.zeros((2, 2, *spec.PIXELS_SHAPE), dtype=torch.uint8)
+    raw, _, _ = net(pixels)
+    bc.calibrate(net, {"focal_gamma": 1.0, "class_weights": None})
+    calibrated, _, _ = net(pixels)
+    assert set(net.state_dict()) == keys and not torch.allclose(raw, calibrated)
+    torch.testing.assert_close(calibrated, FocalInverse(spec.ACTION_NVEC, 1.0)(raw))
+    assert bc.calibrate(net, None).calibration is None
+    unweighted = FocalInverse(spec.ACTION_NVEC, 0.0)(raw)  # gamma 0, no weights: the same policy
+    torch.testing.assert_close(FactoredCategorical(unweighted, spec.ACTION_NVEC).log_probs,
+                               FactoredCategorical(raw, spec.ACTION_NVEC).log_probs)

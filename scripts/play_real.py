@@ -77,6 +77,8 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="run everything but send no input")
     parser.add_argument("--deterministic", action="store_true", help="take each head's most likely action")
     parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument("--no-calibrate", dest="calibrate", action="store_false",
+                        help="sample a BC checkpoint's raw focal-loss logits, not its human's rates")
     parser.add_argument("--look", choices=("mean", "sample"), default="mean",
                         help="turn by the smoothed mean look (default) or a fresh sample every tick")
     parser.add_argument("--smoothness", type=float, default=0.08,
@@ -111,7 +113,7 @@ def main() -> None:
 
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     agent = BCAgent(args.checkpoint, deterministic=args.deterministic, device=device,
-                    temperature=args.temperature)
+                    temperature=args.temperature, calibrate=args.calibrate)
     bindings = json.loads(args.bindings.read_text()) if args.bindings.exists() else dict(DEFAULT_BINDINGS)
     dispatch_config = DispatchConfig(counts_per_degree=args.counts_per_degree, bindings=bindings)
     config = PlayConfig(max_seconds=args.minutes * 60, kill_key=args.kill_key.lower(),

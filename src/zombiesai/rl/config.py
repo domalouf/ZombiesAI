@@ -12,6 +12,10 @@ import torch
 @dataclass
 class RLConfig:
     init: str = ""  # the BC checkpoint RL starts from
+    # Sample a BC start the way the person it cloned played: undo the focal loss (and class weights) that
+    # flatten its every head -- buttons ~4x as often as the human, twice the firing, half again the sprinting
+    # (demos/losses.py FocalInverse). Decided where a chain starts; a continued run keeps its chain's choice.
+    calibrate: bool = True
     env: str = "real"  # "real": the game instances of a fleet; "synthetic": no game, a rehearsal of the plumbing
     n_actors: int = 4
     total_steps: int = 2_000_000

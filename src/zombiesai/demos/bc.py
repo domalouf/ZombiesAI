@@ -43,7 +43,7 @@ from zombiesai.demos.dataset import ClipDataset, DataConfig, class_weights, spli
 from zombiesai.demos.hearing import DEFAULT_CACHE, AudioFeatureConfig, clip_features, feature_config
 from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE
 from zombiesai.demos.idm import resolve_device
-from zombiesai.demos.losses import factored_cross_entropy, head_predictions, split_heads
+from zombiesai.demos.losses import FocalInverse, factored_cross_entropy, head_predictions, split_heads
 from zombiesai.rl.distributions import FactoredCategorical
 from zombiesai.rl.encoders import PixelActorCritic, vector_dim
 
@@ -201,32 +201,44 @@ def compute_loss(net: PixelActorCritic, t: dict[str, torch.Tensor], config: BCCo
 
 
 @torch.no_grad()
-def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device: torch.device) -> dict:
+def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device: torch.device,
+             calibration: nn.Module | None = None) -> dict:
     """The plan's first three evaluation levels, on held-out clips.
 
     Per-frame accuracy is reported against the majority baseline; the behaviour comparison uses *sampled*
     actions, because that is what the policy will actually do in the game -- an argmax policy systematically
     under-fires whenever firing is the minority label.
+
+    Accuracy and the plain behaviour are the network's own logits', whatever is attached to it. With a
+    `calibration` (by default the one the network plays with, `calibrate`), the report also has what the
+    calibrated policy would do: `behaviour.calibrated` and `divergence_calibrated`.
     """
     was_training = net.training
+    attached, net.calibration = net.calibration, None
+    calibration = attached if calibration is None else calibration
     net.eval()
-    predicted, sampled, target, nll = [], [], [], []
+    predicted, sampled, calibrated, target, nll = [], [], [], [], []
     rng = np.random.default_rng(0)
-    for rows in data.epoch(max(32, config.batch_size), rng, shuffle=False, drop_last=False):
-        t = batch_tensors(data.batch(rows), config, device)
-        logits, _, _ = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"), t.get("hud_view"))
-        nll.append(head_nll(logits, t["action"]).cpu().numpy())
-        predicted.append(head_predictions(logits).cpu().numpy())
-        sampled.append(FactoredCategorical(logits, spec.ACTION_NVEC).sample().cpu().numpy())
-        target.append(t["action"].cpu().numpy())
-    net.train(was_training)
+    try:
+        for rows in data.epoch(max(32, config.batch_size), rng, shuffle=False, drop_last=False):
+            t = batch_tensors(data.batch(rows), config, device)
+            logits, _, _ = net(t["pixels"], t.get("vector"), t.get("audio"), t.get("audio_mask"), t.get("hud_view"))
+            nll.append(head_nll(logits, t["action"]).cpu().numpy())
+            predicted.append(head_predictions(logits).cpu().numpy())
+            sampled.append(FactoredCategorical(logits, spec.ACTION_NVEC).sample().cpu().numpy())
+            if calibration is not None:
+                calibrated.append(FactoredCategorical(calibration(logits), spec.ACTION_NVEC).sample().cpu().numpy())
+            target.append(t["action"].cpu().numpy())
+    finally:
+        net.calibration = attached
+        net.train(was_training)
     if not predicted:
         return {}
     predicted, sampled, target = np.concatenate(predicted), np.concatenate(sampled), np.concatenate(target)
     human = stats.behaviour_stats(target)
     policy = stats.behaviour_stats(sampled)
     nll = np.concatenate(nll).mean(axis=0)
-    return {
+    report = {
         "accuracy": stats.accuracy_report(predicted, target),
         # Plain per-head cross-entropy -- no class weights, no focal term: a proper score, comparable between
         # runs whatever their training loss was.
@@ -235,6 +247,10 @@ def evaluate(net: PixelActorCritic, data: ClipDataset, config: BCConfig, device:
         "divergence": stats.divergence_report(policy, human),
         "inertia": stats.inertia_report(sampled, target),
     }
+    if calibrated:
+        report["behaviour"]["calibrated"] = stats.behaviour_stats(np.concatenate(calibrated))
+        report["divergence_calibrated"] = stats.divergence_report(report["behaviour"]["calibrated"], human)
+    return report
 
 
 def head_nll(logits: torch.Tensor, actions: torch.Tensor) -> torch.Tensor:
@@ -306,6 +322,8 @@ def train(
             for w in class_weights(train_data.actions(), config.class_balance, config.class_balance_power)
         ]
     net = build_net(config, audio_features).to(device)
+    calibration = (FocalInverse(spec.ACTION_NVEC, config.focal_gamma, weights).to(device)
+                   if config.focal_gamma or weights is not None else None)
     opt = torch.optim.AdamW(net.parameters(), lr=config.lr, weight_decay=config.weight_decay)
     (run_dir / "config.json").write_text(
         json.dumps(
@@ -342,7 +360,7 @@ def train(
             losses.append(parts)
             seen += len(rows)
         mean = {k: float(np.mean([p[k] for p in losses if k in p])) for k in {k for p in losses for k in p}}
-        report = evaluate(net, val_data, config, device) if len(val_data) else {}
+        report = evaluate(net, val_data, config, device, calibration) if len(val_data) else {}
         row = {"epoch": epoch, "steps": seen, "loss": mean, "seconds": round(time.time() - start, 1), "val": report}
         log.write(json.dumps(row) + "\n")
         balanced = report.get("accuracy", {}).get("mean_balanced", float("nan"))
@@ -355,16 +373,16 @@ def train(
         score = balanced if np.isfinite(balanced) else -mean.get("policy", 0.0)
         if score >= best:
             best = score
-            save(checkpoint, net, config, epoch, report, human, audio_features)
+            save(checkpoint, net, config, epoch, report, human, audio_features, weights)
     log.close()
     if not checkpoint.exists():
-        save(checkpoint, net, config, config.epochs, report, human, audio_features)
+        save(checkpoint, net, config, config.epochs, report, human, audio_features, weights)
     (run_dir / "report.json").write_text(json.dumps({"human": human, "final": report}, indent=2))
     return checkpoint
 
 
 def save(path: Path, net: PixelActorCritic, config: BCConfig, epoch: int, report: dict, human: dict,
-         audio: AudioFeatureConfig | None = None) -> None:
+         audio: AudioFeatureConfig | None = None, class_weights=None) -> None:
     tmp = path.with_suffix(".tmp")
     torch.save(
         {
@@ -378,6 +396,8 @@ def save(path: Path, net: PixelActorCritic, config: BCConfig, epoch: int, report
             "human_behaviour": human,
             # Only in checkpoints that hear; `load` builds a deaf network when it is missing.
             **({"audio_features": asdict(audio)} if config.use_audio and audio is not None else {}),
+            # The loss's per-head class weights, so `policy_calibration` can undo them as well as the focal term.
+            **({"class_weights": [[float(x) for x in w] for w in class_weights]} if class_weights is not None else {}),
         },
         tmp,
     )
@@ -394,3 +414,30 @@ def load(path: str | Path, device: torch.device | str = "cpu") -> tuple[PixelAct
     net.load_state_dict(checkpoint["model"])
     net.eval()
     return net.to(device), config, checkpoint
+
+
+def policy_calibration(meta: dict, enabled: bool = True) -> dict | None:
+    """How the policy in a checkpoint is sampled: None (its logits as they are), or the focal gamma and class
+    weights its logits are to be un-flattened by (losses.FocalInverse).
+
+    An RL checkpoint plays the way its chain trained -- the record it keeps, absent (None) in every chain
+    started before calibration existed, so those continue exactly as they were. A BC checkpoint (where a chain
+    starts, and what play_real plays) is calibrated by the loss it was trained with when `enabled`: its focal
+    gamma always, its class weights when it saved them (checkpoints from before they were saved have the
+    focal term undone, which is most of it; the weights saturate at ~1000 samples a class)."""
+    if meta.get("rl"):
+        return meta["rl"].get("calibration")
+    config = meta.get("config") or {}
+    gamma, weights = float(config.get("focal_gamma", 0.0)), meta.get("class_weights")
+    if not enabled or (not gamma and weights is None):
+        return None
+    return {"focal_gamma": gamma, "class_weights": weights}
+
+
+def calibrate(net: PixelActorCritic, calibration: dict | None) -> PixelActorCritic:
+    """Attach `policy_calibration`'s answer to the network: every forward then gives the calibrated logits."""
+    net.calibration = None
+    if calibration is not None:
+        inverse = FocalInverse(net.nvec, calibration["focal_gamma"], calibration.get("class_weights"))
+        net.calibration = inverse.to(next(net.parameters()).device)
+    return net

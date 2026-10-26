@@ -146,6 +146,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
 
     device = torch.device(config.actor_device)
     net, bc_config, meta = bc.load(config.init, device)
+    bc.calibrate(net, bc.policy_calibration(meta, config.calibrate))  # as the learner samples it
     net.eval()
     audio_features = None
     if bc_config.use_audio:
