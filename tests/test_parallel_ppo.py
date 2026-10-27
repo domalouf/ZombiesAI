@@ -258,3 +258,17 @@ def test_a_continued_run_warms_the_critic_again_when_the_reward_changed(bc_check
     assert second.updates == 2
     assert second.update(synthetic_segments(second, seed=6))["warmup"]  # the critic first
     assert not second.update(synthetic_segments(second, seed=7))["warmup"]  # then the policy, as before
+
+
+def test_a_term_the_game_starts_detecting_is_a_changed_reward(bc_checkpoint, tmp_path):
+    config = RLConfig(init=str(bc_checkpoint), critic_warmup_updates=1, minibatch_size=32, update_epochs=2,
+                      device="cpu", target_kl=None)
+    first = Learner(config, torch.device("cpu"))
+    first.update(synthetic_segments(first, seed=0))
+    path = tmp_path / "before_damage.pt"
+    first.checkpoint(path, step=100)
+    blob = torch.load(path, weights_only=False)
+    blob["rl"]["reward"] = {**blob["rl"]["reward"], "undetected": ["ammo", "damage"]}  # hits paid nothing then
+    torch.save(blob, path)
+    second = Learner(replace(config, init=str(path)), torch.device("cpu"))
+    assert second.update(synthetic_segments(second, seed=1))["warmup"]
