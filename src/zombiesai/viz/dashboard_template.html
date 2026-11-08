@@ -920,21 +920,41 @@ function groupRow() {
 
 function filterRow() {
   // These chips are the legend as well as the filter: identity is never left to colour alone.
-  const chips = inGroup().map((r) => {
-    const chip = el("button", { class: "chip", type: "button", "aria-pressed": "true" }, [
+  const shown = inGroup();
+  // Each chip says what state.visible says, so a page rebuilt by a live refresh keeps a hidden run looking hidden.
+  const chips = shown.map((r) => {
+    const chip = el("button", { class: "chip", type: "button", "aria-pressed": String(state.visible.has(r.name)) }, [
       el("span", { class: "key", style: `background:${r.color}` }),
       el("span", { text: r.name }),
       el("span", { class: "state", text: r.status }),
     ]);
     chip.addEventListener("click", () => {
-      const on = chip.getAttribute("aria-pressed") === "true";
-      chip.setAttribute("aria-pressed", String(!on));
-      if (on) state.visible.delete(r.name); else state.visible.add(r.name);
-      for (const draw of charts) draw();
+      if (state.visible.has(r.name)) state.visible.delete(r.name); else state.visible.add(r.name);
+      sync();
     });
     return chip;
   });
   if (chips.length < 2) return el("div", { class: "filters" }, [el("span", { class: "caption", text: "Runs:" }), ...chips]);
+  // Every run in the group at once, either way: "Hide all" while any is shown, "Show all" once none is.
+  const allToggle = el("button", { class: "chip", type: "button" });
+  allToggle.addEventListener("click", () => {
+    const anyShown = shown.some((r) => state.visible.has(r.name));
+    for (const r of shown) if (anyShown) state.visible.delete(r.name); else state.visible.add(r.name);
+    sync();
+  });
+  // Runs are newest-first, so the newest is the group's first.
+  const newestOnly = el("button", { class: "chip", type: "button", text: "Newest only" });
+  newestOnly.addEventListener("click", () => {
+    for (const r of shown) state.visible.delete(r.name);
+    state.visible.add(shown[0].name);
+    sync();
+  });
+  function sync() {
+    shown.forEach((r, i) => chips[i].setAttribute("aria-pressed", String(state.visible.has(r.name))));
+    allToggle.textContent = shown.some((r) => state.visible.has(r.name)) ? "Hide all" : "Show all";
+    for (const draw of charts) draw();
+  }
+  allToggle.textContent = shown.some((r) => state.visible.has(r.name)) ? "Hide all" : "Show all";
   // Runs are trained one after another, each from step 0: laid end to end they read as one long line.
   const modes = [[false, "Each from 0"], [true, "Back to back"]].map(([on, label]) => {
     const button = el("button", { class: "chip seg", type: "button", "aria-pressed": String(state.chained === on), text: label });
@@ -946,7 +966,7 @@ function filterRow() {
     });
     return button;
   });
-  return el("div", { class: "filters" }, [el("span", { class: "caption", text: "Runs:" }), ...chips,
+  return el("div", { class: "filters" }, [el("span", { class: "caption", text: "Runs:" }), allToggle, newestOnly, ...chips,
     el("span", { class: "x-mode" }, [el("span", { class: "caption", text: "Steps:" }), ...modes])]);
 }
 
