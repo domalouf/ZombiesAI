@@ -168,6 +168,9 @@ def main() -> None:
                         help="the game window to capture, by title or 0x id (it runs under XWayland)")
     parser.add_argument("--no-hud", action="store_true",
                         help="don't save full-resolution HUD crops (~7.4 GB per 20 minutes at 1440p while recording, ~0.4 GB once packed as video)")
+    parser.add_argument("--no-scene", action="store_true",
+                        help="do not keep the whole picture at quarter size beside the HUD boxes (640x360 at "
+                             "1440p; ~12 GB per 20 minutes until it is packed as video when the session ends)")
     parser.add_argument("--keep-raw-hud", action="store_true",
                         help="don't pack the HUD crops as video when the session ends (~17x smaller, verified)")
     parser.add_argument("--mark-key", default=MARK_KEY,
@@ -212,12 +215,16 @@ def main() -> None:
     window = args.window
     if isinstance(window, str) and window.startswith("0x"):
         window = int(window, 16)
-    from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
+    from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE, RECORD_REGIONS, RECORD_SCALES
+
+    # The HUD boxes, and the whole scene at a quarter of the capture: what a sharper view for the policy can
+    # later be cut from (demos/hud_crops.py). A clip's regions are fixed for its life, so this is decided here.
+    regions = None if args.no_hud else (HUD_REGIONS if args.no_scene else RECORD_REGIONS)
 
     def open_capture() -> ScreenCapture:
         return ScreenCapture(
             tuple(args.region) if args.region else None, window=window,
-            hud_regions=None if args.no_hud else HUD_REGIONS, hud_scale=HUD_SCALE,
+            hud_regions=regions, hud_scale=HUD_SCALE, hud_scales=RECORD_SCALES,
         )
 
     # Only a window that isn't there yet is worth waiting for. No X display, or the wrong depth, stays an

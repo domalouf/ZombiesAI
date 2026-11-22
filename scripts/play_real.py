@@ -107,7 +107,7 @@ def main() -> None:
     from zombiesai.demos.capture import FollowWindow, ScreenCapture
     from zombiesai.demos.clips import ClipWriter
     from zombiesai.demos.evdev_input import EvdevInput
-    from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
+    from zombiesai.demos.hud_crops import HUD_SCALE, RECORD_REGIONS, RECORD_SCALES
     from zombiesai.realgame.dispatch import ActionDispatcher, DispatchConfig, FakeSink
     from zombiesai.realgame.play import HumanWatch, HyprlandFocus, play
 
@@ -126,7 +126,9 @@ def main() -> None:
     print(f"policy {args.checkpoint} on {device}; {'DRY RUN: no input will be sent' if args.dry_run else 'LIVE'}")
     # Follows the window by title: WaW's intro window dies and the real one replaces it, and a player that held
     # the first one crashed the moment it was handed the controls.
-    capture = FollowWindow(lambda: ScreenCapture(window=args.window, hud_regions=HUD_REGIONS, hud_scale=HUD_SCALE))
+    # The regions a demo keeps, the whole scene among them: a correction is training data like any demo step.
+    capture = FollowWindow(lambda: ScreenCapture(window=args.window, hud_regions=RECORD_REGIONS, hud_scale=HUD_SCALE,
+                                                 hud_scales=RECORD_SCALES))
     hearing = None
     if agent.audio_features is not None and not args.deaf:
         from zombiesai.demos.audio import PulseMonitorStream

@@ -48,6 +48,16 @@ HUD_REGIONS: dict[str, tuple[float, float, float, float]] = {
 }
 HUD_SCALE = 0.5
 
+# Not HUD at all, but kept by the same machinery, beside the HUD boxes of every recording a person makes: the
+# whole picture at a quarter of the capture -- 640x360 at 1440p, five times the policy frame's 128x72 each way.
+# At 128x72 a zombie's head ten metres off is one or two pixels, and a clip that kept only that can never be
+# given more; with this one, a sharper view for the policy (a crop round the crosshair, a bigger frame) can be
+# cut from recordings already made, whatever shape it turns out to want. 691 KB a decision raw (~12 GB per 20
+# minutes, while recording), packed as video with the rest when the session ends; 2.4 ms of the 67 ms tick.
+SCENE = "scene"
+RECORD_REGIONS: dict[str, tuple[float, float, float, float]] = {**HUD_REGIONS, SCENE: (0.0, 0.0, 1.0, 1.0)}
+RECORD_SCALES: dict[str, float] = {SCENE: 0.25}  # the HUD boxes at HUD_SCALE
+
 # The policy's own look at the HUD corner (`hud_view`): at 128x72 the points, the gun's name, the grenade count
 # and the magazine marks are a smear of a few pixels, so a policy built with `use_hud_view` also gets this --
 # the points_ammo crop from the points line down to the reserve, halved again. It is the screen's pixels, not
@@ -86,14 +96,16 @@ def hud_view(points_ammo: np.ndarray | None) -> np.ndarray:
 
 
 def crop_regions(
-    frame: np.ndarray, regions: dict = HUD_REGIONS, scale: float = HUD_SCALE, *, channels=None
+    frame: np.ndarray, regions: dict = HUD_REGIONS, scale: float = HUD_SCALE, *, channels=None,
+    scales: dict[str, float] | None = None,
 ) -> dict[str, np.ndarray]:
-    """Every HUD region of one full-resolution frame, area-downsampled by `scale`, as RGB crops that own their
-    memory. `frame` is RGB, or BGRX with `channels=frames.BGRX` (see `frames.area_resize`)."""
+    """Every HUD region of one full-resolution frame, area-downsampled by `scale` -- or by its own entry in
+    `scales` (`RECORD_SCALES`) -- as RGB crops that own their memory. `frame` is RGB, or BGRX with
+    `channels=frames.BGRX` (see `frames.area_resize`)."""
     height, width = frame.shape[:2]
     out = {}
     for name, frac in regions.items():
         left, top, w, h = region_box(height, width, frac)
-        out_h, out_w, _ = crop_shape(height, width, frac, scale)
+        out_h, out_w, _ = crop_shape(height, width, frac, (scales or {}).get(name, scale))
         out[name] = area_resize(frame[top : top + h, left : left + w], out_h, out_w, channels=channels)
     return out

@@ -136,3 +136,17 @@ def test_the_recorder_saves_each_steps_hud_from_the_same_grab_as_its_frame(tmp_p
     np.testing.assert_array_equal(clip.frames[:, 0, 0, 0], np.arange(7))
     np.testing.assert_array_equal(clip.hud("points_ammo")[:, 0, 0, 0], np.arange(7))
     np.testing.assert_array_equal(clip.hud("round")[:, 0, 0, 0], np.arange(7))
+
+
+def test_a_recording_keeps_the_whole_scene_at_a_quarter_beside_the_hud_boxes():
+    from zombiesai.demos.hud_crops import HUD_SCALE, RECORD_REGIONS, RECORD_SCALES, SCENE
+
+    frame = np.random.default_rng(0).integers(0, 255, (1440, 2560, 3), dtype=np.uint8)
+    crops = crop_regions(frame, RECORD_REGIONS, HUD_SCALE, scales=RECORD_SCALES)
+    assert set(crops) == set(HUD_REGIONS) | {SCENE}
+    # five times the policy frame each way, as exact 4x4 means of the capture
+    assert crops[SCENE].shape == (360, 640, 3)
+    assert crops[SCENE][0, 0, 0] == int(np.rint(frame[:4, :4, 0].mean()))
+    # the HUD boxes are what they were without it
+    alone = crop_regions(frame, HUD_REGIONS, HUD_SCALE)
+    assert all(np.array_equal(crops[name], alone[name]) for name in HUD_REGIONS)
