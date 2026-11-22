@@ -85,6 +85,12 @@ from zombiesai.demos.inputs import InputConfig
 requantize("data/demos/demo_0000", InputConfig(counts_per_degree=6.9))
 ```
 
+After a change to the spec's look bins, `scripts/requantize.py data/demos` re-labels every recording with the
+counts per degree, bindings and mark key it was made with. The labels it replaces stay beside the new ones as
+`labels.<old spec>.npz`. It did this for the half- and one-degree look bins (2026-11: yaw
+±30/14/6/2/1/0.5/0, pitch ±6/2/1/0.5/0). Before them, the ~28% of decisions with a mouse move under a degree
+were all labelled "no turn".
+
 **Tap F8 when you stop playing, and again when you start.** Menus, the pause screen, loading, the game-over
 card, alt-tabbing out: tap the mark key (`--mark-key`, F8 by default, which World at War leaves unbound) on
 the way in and on the way out, and the terminal says `NOT PLAYING` / `playing again`. A step is marked if any
@@ -219,7 +225,14 @@ measure about 1.3 and 6, which is invisible, digits included. About 20x smaller:
 of ~7.4. `clip.hud(name)` then returns a `HudVideo` that indexes like the raw array and decodes on demand.
 Packing takes about half a minute and never runs during the recording; Ctrl-C leaves the raw crops, and
 `scripts/pack_hud.py data/demos` packs anything left raw, including recordings from before this existed.
-`--keep-raw-hud` skips it. `--no-hud` turns them off. The boxes are screen fractions placed on a 16:9 capture; another
+`--keep-raw-hud` skips it. `--no-hud` turns them off.
+
+Recordings since 2026-11 also keep a fifth region, `scene`: the whole picture at a quarter of the capture
+(640×360 at 1440p, `hud_crops.RECORD_REGIONS`). At 128×72 a zombie's head ten metres off is a pixel or two,
+and a clip that kept only that can never be given more. With `scene`, a sharper view for the policy (a crop
+round the crosshair, a bigger frame) can be cut later from recordings already made. It costs ~12 GB per
+20 minutes while recording and is packed as video with the HUD boxes when the session ends. `--no-scene`
+skips it. No model reads it yet, and packing it has not been checked on real footage. The boxes are screen fractions placed on a 16:9 capture; another
 aspect ratio needs new ones.
 
 Frames and labels are versioned separately on purpose. A spec change that touches the HUD layout must not
@@ -253,10 +266,13 @@ predicts the eight action heads. Details that are decisions rather than defaults
   per-step embeddings (hidden state carried and reset at segment starts) tied the 4-stack. Re-run the
   comparison when there are hours of data, not minutes.
 
-- **Class-balanced, focal cross-entropy.** `button` is `none` ~95% of the time; plain cross-entropy answers
-  that by never reloading. `class_balance_power` controls how hard the correction is; the default softens it
-  to square-root inverse frequency, because full correction overshoots on the look heads and produces a
-  policy that turns constantly.
+- **Plain cross-entropy, sampled** (the default since 2026-11). `button` is `none` ~99% of the time, so the
+  *argmax* of a cross-entropy policy never reloads. But nothing plays the argmax: the live agent and RL
+  sample every head, and a sampled cross-entropy policy presses at the person's own rate. The checkpoint
+  kept is the one with the lowest held-out NLL, which comes after 2-4 epochs on an hour of play. The old
+  class-balanced focal loss is still there (`focal_gamma 1`, `class_balance 0.999`, what every checkpoint
+  before 2026-11 used). It buys balanced argmax accuracy by flattening every head, which RL then has to
+  undo (`--calibrate`, docs/rl.md).
 - **A value head fitted to Monte-Carlo returns, plus auxiliary heads for "did I just score" and "am I being
   hit."** They cost nothing at BC time, they hand M7's RL run a critic that is already worth something, and
   they force the encoder to represent exactly what a value function needs. They train only on the clips whose
@@ -330,7 +346,7 @@ A few failures and what they usually mean:
 
 | Symptom | Likely cause |
 |---|---|
-| `button_any_frac` far above the human's | class weighting overshooting — lower `class_balance_power`, or sample below temperature 1 |
+| `button_any_frac` far above the human's | a focal / class-weighted checkpoint sampled uncalibrated; or, with plain CE, overfitting (check `val.nll`) |
 | every head at its majority baseline | not enough data, or `min_confidence` threw most of it away |
 | yaw balanced accuracy near chance, raw accuracy high | it predicts "no turn" always; check the IDM's own yaw accuracy first |
 | copy rate far above the human's | action inertia — train without `--prev-actions` |
