@@ -23,7 +23,9 @@ Episode ends, and why they are what they are:
 Reset is an explicit state machine, never a blind sleep. It releases every key, types the start command into
 the game's console (`map nazi_zombie_prototype`), and waits for the HUD to show a *settled* 500 points on a live
 picture. A try that does not get there within `start_timeout_s` is repeated; after `reset_attempts` of them
-the game is relaunched (`restart`, which the instance manager provides), and the wait starts over.
+the game is relaunched (`restart`, which the instance manager provides), and the wait starts over. With
+`skip_opening_s` the reset then fast-forwards the empty start of round 1 through the console's `timescale`, so
+the first step comes nearer the first zombie; `seconds` counts from there, and `skipped_s` says how much went.
 
 The episode summary also carries an estimate of how well it shoots, for the stream overlay (viz/stream.py):
 `shots` are the magazine marks that went away between two good reads while the fire button was held, and
@@ -117,6 +119,18 @@ class EnvConfig:
     # spring's pull. Pitch is tracked exactly (XTEST counts are exact, and every map load starts level).
     pitch_spring_s: float | None = 2.0
     pitch_limit_deg: float = 85.0  # where the engine stops the view
+    # Fast-forward the first `skip_opening_s` game-seconds of every game, before its first step: round 1's
+    # zombies take ~45 s to reach the windows, and an idle player's first hit comes at ~70-78 s. The game runs
+    # at `skip_timescale` (cheat-protected: `sv_cheats 1` goes first, which a LAN `map` game takes from the
+    # console) with the frame cap lifted, because each frame advances game time by at most ~70 ms -- at 30 fps
+    # timescale 8 runs no faster than 2. The wait is `skip_opening_s / skip_timescale` of wall time, so a game
+    # slowed by load skips less than asked, never more. Then timescale 1 and the cap back at
+    # `skip_restore_maxfps` (the fleet's com_maxfps). The policy never acts during it. 0 turns it off.
+    skip_opening_s: float = 0.0
+    skip_timescale: float = 4.0
+    skip_maxfps: int = 0  # the frame cap during the skip; 0 is none
+    skip_restore_maxfps: int = 30
+    skip_restore_tries: int = 10  # a game left fast-forwarded is no game to train on: past this, ResetFailed
     signals: SignalConfig = field(default_factory=SignalConfig)
     damage: DamageConfig = field(default_factory=DamageConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
@@ -186,6 +200,8 @@ class RealGameEnv:
         self._deadline = 0.0
         self._needs_restart = False  # set after the first reset: from then on every reset starts a new game
         self._ended_by_death = False
+        self.skipped_s = 0.0  # game-seconds of this game's opening fast-forwarded (`skip_opening_s`)
+        self._stop_s = 1.0  # wall time the last skip took to stop: the game is still fast while it is typed
         self.episodes = 0
         self.resets = {"console": 0, "quick": 0, "relaunch": 0}
         self._reset_episode_counters()
@@ -281,6 +297,9 @@ class RealGameEnv:
             tries += 1
         obs = self._clear_after_start(obs)
         self._needs_restart = True  # every later reset must start a new game
+        self.skipped_s = 0.0
+        if self.config.skip_opening_s > 0 and self.console is not None:
+            obs = self._skip_opening(obs)
         self._down_run = 0
         self._next_clear = 0.0
         self.pitch = 0.0  # a map load starts level
@@ -307,6 +326,44 @@ class RealGameEnv:
             obs, _, _ = self._observe()
             if self.downed is None:
                 break
+        return obs
+
+    def skip_commands(self) -> tuple[str, str, str]:
+        """The console lines that start the fast-forward, stop it, and put the frame cap back. Stopping is
+        `timescale 1` alone: the game is still fast while it is typed (~1 s, so ~4 game-seconds), and the cap
+        can wait for a second trip at normal speed."""
+        c = self.config
+        return (f"sv_cheats 1;com_maxfps {c.skip_maxfps};timescale {c.skip_timescale:g}", "timescale 1",
+                f"com_maxfps {c.skip_restore_maxfps}")
+
+    def _type_until_taken(self, command: str) -> None:
+        for _ in range(self.config.skip_restore_tries):
+            if self._type(command):
+                return
+            self._pump_for(0.5)
+        raise ResetFailed(f"the game is still fast-forwarded: {command!r} was not taken")
+
+    def _skip_opening(self, obs):
+        """Fast-forward the opening (`skip_opening_s`). Returns the observation after it. A skip the console
+        did not take is said and dropped -- the game simply starts at normal speed -- but one that cannot be
+        ended raises `ResetFailed`.
+
+        The game runs fast from the moment the first line is entered until the second is, typing included, so
+        the wait is the skip's wall time less what stopping took last time; `skipped_s` is what it came to, in
+        game-seconds at the full timescale -- a ceiling, since a loaded game runs slower than asked."""
+        fast, stop, cap = self.skip_commands()
+        scale = self.config.skip_timescale
+        if not self._type(fast):
+            self.say("  reset: the console did not take the fast-forward; playing the opening")
+            return obs
+        start = self.clock()
+        self._pump_for(max(0.0, self.config.skip_opening_s / scale - self._stop_s))
+        stopping = self.clock()
+        self._type_until_taken(stop)
+        self._stop_s = self.clock() - stopping
+        self.skipped_s = (self.clock() - start) * scale
+        self._type_until_taken(cap)
+        obs, _, _ = self._observe()
         return obs
 
     def _look(self, action) -> tuple[float, float] | None:
@@ -485,6 +542,7 @@ class RealGameEnv:
             "return": self.return_,
             "length": self.steps,
             "seconds": self.clock() - self.t_start,
+            "skipped_s": self.skipped_s,
             "round_reached": max(self.signals.round, 1),
             "points_gained": self.signals.points_gained,
             "shots": self.shots,

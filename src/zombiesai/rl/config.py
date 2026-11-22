@@ -53,6 +53,10 @@ class RLConfig:
     # burst per decision. 0 sends each decision's turn as sub-moves inside its tick.
     look_smoothing_s: float = 0.08
     bindings: str = "configs/waw_bindings.json"
+    # Fast-forward this many game-seconds of every game's opening at `skip_timescale`, before the policy's first
+    # step (realgame/env.py, EnvConfig.skip_opening_s): round 1's zombies reach the windows ~45 s in. 0: off
+    skip_opening_s: float = 0.0
+    skip_timescale: float = 4.0
     record_every: int = 0  # record every k-th episode of each actor as a clip (0: never)
     # Film every game and keep the run's best -- highest round, then most kills, then most points -- as
     # best/best.mp4 in the run's directory (rl/best_episode.py)

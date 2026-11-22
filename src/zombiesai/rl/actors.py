@@ -79,12 +79,21 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
                        console_open=shows_console,
                        downed=lambda: scoreboard_shown((capture.last_hud or {}).get("scores")),
                        end_screen=end_screen,
-                       hearing=hearing, say=lambda m: print(f"[actor {index}] {m}", flush=True))
+                       hearing=hearing, config=env_config(config, fleet),
+                       say=lambda m: print(f"[actor {index}] {m}", flush=True))
     # The sink this game alone plays into, for the best game's film to have its sound; a fleet started without
     # sinks of its own plays into the desktop's, mixed with every other game, so its films stay silent.
     env.sound_monitor = instance.spec.monitor if fleet.audio_sinks else None
     env.end_frames = end_frames
     return env
+
+
+def env_config(config: RLConfig, fleet):
+    """The env's settings from the run's: the opening fast-forward, which restores the fleet's own frame cap."""
+    from zombiesai.realgame.env import EnvConfig
+
+    return EnvConfig(skip_opening_s=config.skip_opening_s, skip_timescale=config.skip_timescale,
+                     skip_restore_maxfps=int(fleet.dvars.get("com_maxfps", EnvConfig.skip_restore_maxfps)))
 
 
 # What --counts-per-degree defaulted to before it was derived: sensitivity 5 x m_yaw 0.022, the demos' settings.
