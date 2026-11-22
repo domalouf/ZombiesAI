@@ -19,7 +19,20 @@ uv run python scripts/record_demo.py --counts-per-degree 6.4 --minutes 20 \
 
 # On the Linux machine, with its standing settings (window, bindings, counts per degree, --wait, --audio):
 scripts/record_waw.sh 20 "camping the help room, deliberately bad positioning after round 8"
+
+# The same, on the fleet's own game (recommended since 2026-11):
+scripts/record_lan.sh 20 "camping the help room, deliberately bad positioning after round 8"
 ```
+
+**Record on Plutonium when you can.** The fleet trains on Plutonium T4's LAN co-op Nacht, which has last
+stand, and plays with the fleet's config.cfg. Steam's solo game has no last stand. `scripts/record_lan.sh` starts
+that game on your desktop (`scripts/desktop_game.py up`; `realgame/desktop.py` explains each choice) and
+records it. The game runs offline in a loopback-only network namespace, with its own copies of Plutonium and
+the prefix under `runs/desktop/` and its own sound sink. That sink is looped to your speakers, so the
+recording's audio is the game alone. **At the main menu press F9 to start Nacht**, and again after each game
+over: in LAN mode the menu cannot start a co-op game, so the launcher binds `map nazi_zombie_prototype` to F9
+(the console, `~`, takes it too). The game stays open when a recording ends. `uv run python
+scripts/desktop_game.py down` quits it.
 
 ### What to play: one strategy, many situations
 
