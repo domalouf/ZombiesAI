@@ -23,7 +23,8 @@ def test_synthesize_and_quantize_round_trip_every_action():
     np.testing.assert_array_equal(labels.actions, np.array(actions, dtype=np.uint8))
 
 
-@pytest.mark.parametrize("counts_per_degree", [1.0, 6.4, 400.0])
+# From 2 counts a degree: the half-degree bin is one count there, and a mouse cannot send half of one.
+@pytest.mark.parametrize("counts_per_degree", [2.0, 6.4, 400.0])
 def test_look_labels_survive_any_sensitivity(counts_per_degree):
     config = inputs.InputConfig(counts_per_degree=counts_per_degree)
     actions = [spec.make_action(yaw=y, pitch=p) for y in spec.YAW_BINS_DEG for p in spec.PITCH_BINS_DEG]

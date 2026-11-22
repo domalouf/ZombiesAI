@@ -19,8 +19,13 @@ ACTION_HEADS = ("strafe", "forward", "yaw", "pitch", "fire", "ads", "sprint", "b
 STRAFE, FORWARD, YAW, PITCH, FIRE, ADS, SPRINT, BUTTON = range(len(ACTION_HEADS))
 STRAFE_VALUES = (-1, 0, 1)
 FORWARD_VALUES = (-1, 0, 1)
-YAW_BINS_DEG = (-30.0, -14.0, -6.0, -2.0, 0.0, 2.0, 6.0, 14.0, 30.0)
-PITCH_BINS_DEG = (-6.0, -2.0, 0.0, 2.0, 6.0)
+# Degrees per decision. The half- and one-degree bins are what aiming is made of: a person's mouse moves under
+# a degree on ~28% of decisions (the correction onto a target), and with 2 as the smallest turn those were all
+# labelled "no turn" -- a tenth of all the yaw in the demos, and half of all the pitch, which is why a cloned
+# policy drifted to the floor and never looked back up. A label is the nearest bin, so a move under a quarter
+# of a degree (two mouse counts at 9 counts a degree) is still "no turn".
+YAW_BINS_DEG = (-30.0, -14.0, -6.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 6.0, 14.0, 30.0)
+PITCH_BINS_DEG = (-6.0, -2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0, 6.0)
 BUTTONS = ("none", "use", "reload", "melee", "grenade", "swap")
 HOLD_HEADS = ("fire", "ads", "sprint")
 ACTION_NVEC = (

@@ -547,7 +547,9 @@ class BestEpisodeRecorder:
 
 def write_brain(path: Path, notes: list[dict], header: dict) -> None:
     """A film's sidecar: a header line, then one line per frame noted (`BestEpisodeRecorder.note`), `s` being
-    where in the film it falls (scripts/overlay.py reads it)."""
+    where in the film it falls (scripts/overlay.py reads it). The header says what the look bins were: a note's
+    action is bin indices, and the bins are the spec's, which has changed before."""
+    header = {**header, "look_bins": {"yaw": list(spec.YAW_BINS_DEG), "pitch": list(spec.PITCH_BINS_DEG)}}
     with open(path, "w") as out:
         out.write(json.dumps({"header": header}, default=str) + "\n")
         for line in notes:

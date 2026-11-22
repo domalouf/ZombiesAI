@@ -391,9 +391,10 @@ def with_play_marks(flags: np.ndarray, not_playing: np.ndarray) -> np.ndarray:
     return flags
 
 
-def load_clip(path: str | Path, *, require_labels: bool = False) -> Clip:
+def load_clip(path: str | Path, *, require_labels: bool = False, any_label_spec: bool = False) -> Clip:
     """Load a clip, refusing frames written under a different frame contract and labels written under a
-    different SPEC_VERSION -- the labels are bin indices, and bins are spec."""
+    different SPEC_VERSION -- the labels are bin indices, and bins are spec. `any_label_spec` loads them
+    whatever they were written under: for `recorder.requantize`, which keeps their flags and replaces the rest."""
     path = Path(path)
     manifest = json.loads((path / "clip.json").read_text())
     if manifest.get("frame_contract") != frame_contract():
@@ -409,7 +410,8 @@ def load_clip(path: str | Path, *, require_labels: bool = False) -> Clip:
         )
     labels = None
     if (path / "labels.npz").exists():
-        spec.require_spec_version(manifest["spec_version"], f"{path} labels")
+        if not any_label_spec:
+            spec.require_spec_version(manifest["spec_version"], f"{path} labels")
         labels = dict(np.load(path / "labels.npz"))
         if len(labels["action"]) != len(frames):
             n = min(len(labels["action"]), len(frames))  # a crash between the frame write and the label flush

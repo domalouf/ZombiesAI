@@ -89,9 +89,15 @@ def _bar(x: float, y: float, w: float, h: float, share: float, colour: str) -> l
     return [_rect(x, y, w, h, INK, "40"), _rect(x, y, max(1.0, w * share), h, colour)]
 
 
-def _keys(action: list[int], x: float, y: float, u: float) -> list[str]:
+# The look bins of every film made before sidecars said theirs (`look_bins`, 2026-11): a film's actions are
+# indices into the bins of its day, not today's.
+LEGACY_LOOK_BINS = {"yaw": (-30.0, -14.0, -6.0, -2.0, 0.0, 2.0, 6.0, 14.0, 30.0), "pitch": (-6.0, -2.0, 0.0, 2.0, 6.0)}
+
+
+def _keys(action: list[int], x: float, y: float, u: float, look_bins: dict | None = None) -> list[str]:
     """What it pressed, on a panel at (x, y) `KEYS_W` key sizes wide: the movement keys as a WASD cluster lit
-    where pressed; to their right the turn it chose and, under it, the held buttons."""
+    where pressed; to their right the turn it chose and, under it, the held buttons. `look_bins` are the
+    film's own (its sidecar's header); without them, today's."""
     strafe = spec.STRAFE_VALUES[action[spec.STRAFE]]
     forward = spec.FORWARD_VALUES[action[spec.FORWARD]]
     pad = 0.3 * u
@@ -101,8 +107,9 @@ def _keys(action: list[int], x: float, y: float, u: float) -> list[str]:
         bx, by = x + kx * 1.1 * u, y + ky * 1.1 * u
         out.append(_rect(bx, by, u, u, AMBER if lit else INK, "00" if lit else "50"))
         out.append(_text(bx + u / 2, by + u / 2, 5, u * 0.6, INK if lit else CHALK_DIM, label, bold=True))
-    yaw = spec.YAW_BINS_DEG[action[spec.YAW]]
-    pitch = spec.PITCH_BINS_DEG[action[spec.PITCH]]
+    bins = look_bins or {"yaw": spec.YAW_BINS_DEG, "pitch": spec.PITCH_BINS_DEG}
+    yaw = bins["yaw"][action[spec.YAW]]
+    pitch = bins["pitch"][action[spec.PITCH]]
     look = []
     if yaw:
         look.append(("\u2192" if yaw > 0 else "\u2190") + f" {abs(yaw):g}\u00b0")
@@ -128,6 +135,7 @@ def build_ass(header: dict, lines: list[dict], width: int, height: int, start: f
     """The overlay of `lines` (a sidecar's frames) as an ASS script for a `width` x `height` film, for the
     stretch of it from `start` to `end` seconds, timed from `start`."""
     fps = float(header.get("fps") or spec.DECISION_HZ)
+    look_bins = header.get("look_bins") or LEGACY_LOOK_BINS
     frames = [line for line in lines if isinstance(line.get("s"), (int, float))]
     end = end if end is not None else (frames[-1]["s"] + 1 / fps if frames else start)
     u = height / 720  # the layout is drawn for 720 rows and scaled
@@ -163,7 +171,7 @@ def build_ass(header: dict, lines: list[dict], width: int, height: int, start: f
             parts.append(_text(px + 14 * u, ry + 7 * u, 4, 18 * u, CHALK_DIM, label))
             parts += _bar(px + 110 * u, ry, pw - 124 * u, 14 * u, share or 0.0, colour)
         if isinstance(line.get("a"), list) and len(line["a"]) == len(spec.ACTION_HEADS):
-            parts += _keys(line["a"], kx, ky, key)
+            parts += _keys(line["a"], kx, ky, key, look_bins)
         for layer, part in enumerate(parts):
             events.append(_event(a, b, part, 2 + min(layer, 3)))
 

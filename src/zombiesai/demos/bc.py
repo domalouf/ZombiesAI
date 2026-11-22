@@ -6,8 +6,10 @@ before the real-game loop exists, and it is what M7's RL run starts from rather 
 
 Three things here are the difference between a cloned policy and a policy-shaped object:
 
-* **Class-balanced, focal cross-entropy.** `button` is 'none' ~95% of the time; plain cross-entropy answers
-  that by never reloading.
+* **Plain cross-entropy, sampled.** `button` is 'none' ~99% of the time, so the *argmax* of a cross-entropy
+  policy never reloads -- but nothing here plays the argmax: the live agent and RL sample every head, and a
+  sampled cross-entropy policy presses at the person's own rate. (A class-balanced focal loss is still there,
+  `focal_gamma` / `class_balance`; it flattens every head and needs `losses.FocalInverse` to be sampled.)
 * **A value head fitted to Monte-Carlo returns, and auxiliary heads for "did I score" and "am I hit."**
   They cost nothing at BC time and they hand RL a critic that is already worth something, plus an encoder
   that already represents the two features a critic needs. Both train only on the clips whose source could
@@ -64,8 +66,12 @@ class BCConfig:
     batch_size: int = 64
     epochs: int = 10
     max_batches_per_epoch: int | None = None
-    focal_gamma: float = 1.0
-    class_balance: float = 0.999
+    # Plain cross-entropy by default: the policy is *sampled* when it plays and when RL starts from it, and
+    # cross-entropy is the loss whose optimum is the person's own rates. The focal term and class weights (set
+    # focal_gamma 1, class_balance 0.999 for what every policy before 2026-11 trained with) buy balanced
+    # *argmax* accuracy by flattening every head, which then has to be undone to sample it (losses.FocalInverse).
+    focal_gamma: float = 0.0
+    class_balance: float = 0.0
     class_balance_power: float = 0.5
     value_coef: float = 0.5
     aux_coef: float = 0.25
@@ -370,7 +376,11 @@ def train(
             f"stats {'ok' if report.get('divergence', {}).get('passed', False) else 'off'}",
             flush=True,
         )
-        score = balanced if np.isfinite(balanced) else -mean.get("policy", 0.0)
+        # The checkpoint kept is the one with the lowest held-out cross-entropy: a proper score of the sampled
+        # policy, and it turns up after 2-4 epochs on an hour of play, where balanced accuracy -- the argmax's
+        # -- went on creeping up for epochs after the policy had started memorising its recordings.
+        nll = report.get("nll", {}).get("mean", float("nan"))
+        score = -nll if np.isfinite(nll) else -mean.get("policy", 0.0)
         if score >= best:
             best = score
             save(checkpoint, net, config, epoch, report, human, audio_features, weights)

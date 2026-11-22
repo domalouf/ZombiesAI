@@ -310,7 +310,8 @@ def requantize(clip_dir: str | Path, config: InputConfig, *, dt: float | None = 
     from zombiesai.demos.clips import attach_labels, with_play_marks
 
     clip_dir = Path(clip_dir)
-    clip = load_clip(clip_dir)
+    # Labels written under another spec (other look bins) are exactly what this is for: only their flags are kept.
+    clip = load_clip(clip_dir, any_label_spec=True)
     if clip.is_play_run:
         # Its steps are the loop's polls, not t0 + k*dt (standby is not written), and most of them are the
         # policy's: re-quantizing would stamp the human's log over every one of them and drop the actor column.
