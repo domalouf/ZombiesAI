@@ -24,7 +24,6 @@ shift 2
 
 cd "$(dirname "$0")/.."
 args=(
-  --source screen
   --window "${ZOMBIESAI_WINDOW:-Call of Duty}"
   --wait
   --counts-per-degree "${ZOMBIESAI_CPD:-9.09}"

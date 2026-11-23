@@ -34,8 +34,11 @@ DESKTOP_ROOT = "runs/desktop"
 SINK = "zai_desktop"
 START_KEY = "F9"
 # The fleet's dvars without its frame cap and vsync choice: those are for 7 games sharing a PC, not for you.
+# Aim assist off: Plutonium's LAN game has it on for the mouse too (Steam's does not), and aiming down sights
+# then pulls the view onto the nearest zombie -- a turn no mouse count records, so the labels would not match
+# the picture. sv_allowAimAssist is the server's half: the LAN game is its own server.
 DESKTOP_DVARS = {"r_fullscreen": "1", "com_introplayed": "1", "monkeytoy": "0", "cl_mouseAccel": "0",
-                 "m_filter": "0"}
+                 "m_filter": "0", "cg_aimAssistEnabled": "0", "sv_allowAimAssist": "0"}
 
 
 def desktop_config(fleet_root: str | Path = "runs/instances", *, root: str | Path = DESKTOP_ROOT,

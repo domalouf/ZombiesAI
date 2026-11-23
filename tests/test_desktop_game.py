@@ -20,6 +20,8 @@ def test_the_desktop_game_is_the_fleets_client_and_settings_without_its_frame_ca
     assert (config.game_dir, config.proton, config.plutonium_dir) == (fleet.game_dir, fleet.proton, fleet.plutonium_dir)
     assert (config.width, config.height) == (2560, 1440)
     assert "com_maxfps" not in config.dvars and config.dvars["cl_mouseAccel"] == "0"
+    # no aim assist: it turns the view with no mouse input, which no label records
+    assert config.dvars["cg_aimAssistEnabled"] == config.dvars["sv_allowAimAssist"] == "0"
     # its own sink, which a fleet shutdown (session.remove_sinks: zombiesai_*) leaves alone
     assert config.extra_env["PULSE_SINK"] == "zai_desktop" and not config.audio_sinks
     assert desktop.desktop_config(tmp_path / "no-fleet", root=tmp_path / "d", sink=None).extra_env == {}

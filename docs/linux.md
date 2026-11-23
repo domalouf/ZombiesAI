@@ -112,7 +112,7 @@ uv run python scripts/spike_capture.py --window "World at War" --latency --video
 
 # Then record yourself playing, with the number S4 gave you. --wait holds the start until the game is
 # on screen, then counts down 3 s (--countdown), so it can be launched from a terminal on another workspace.
-uv run python scripts/record_demo.py --source screen --counts-per-degree 6.4 --minutes 20 --wait \
+uv run python scripts/record_demo.py --counts-per-degree 6.4 --minutes 20 --wait \
     --notes "varied play: camping, trains, deliberate bad positioning"
 ```
 
