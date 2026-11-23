@@ -72,6 +72,11 @@ profile at every launch, so the instances play with the settings the demos were 
   profile" -- a local save profile despite the name -- that LAN mode cannot create). The same `map` typed into
   the console loads and stays, so the reset types it, then taps Enter through "Click to Start the Mission".
   From launch to a settled 500 takes ~1-4 minutes at 1440p; later resets are just the map load.
+- **Plutonium's LAN game has aim assist on, for the mouse too** (`cg_aimAssistEnabled 1`,
+  `sv_allowAimAssist 1`). Steam's game, where the demos were recorded, doesn't. Aiming down sights then pulls
+  the view onto the nearest zombie, a turn no action asked for. Every game gets both set to 0
+  (`instances.PARITY_DVARS`, added to whatever a fleet.json lists) since 2026-11-22. rl8-rl20 played with it
+  on, so their ADS kills and accuracy aren't comparable with later runs.
 - **The HUD reads at 2560x1440, not 1280x720**: the glyph atlas is 1440p text at half scale, and natively
   rendered 720p text does not match it. The fleet defaults to 1440p.
 

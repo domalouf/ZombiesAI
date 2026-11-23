@@ -20,8 +20,6 @@ def test_the_desktop_game_is_the_fleets_client_and_settings_without_its_frame_ca
     assert (config.game_dir, config.proton, config.plutonium_dir) == (fleet.game_dir, fleet.proton, fleet.plutonium_dir)
     assert (config.width, config.height) == (2560, 1440)
     assert "com_maxfps" not in config.dvars and config.dvars["cl_mouseAccel"] == "0"
-    # no aim assist: it turns the view with no mouse input, which no label records
-    assert config.dvars["cg_aimAssistEnabled"] == config.dvars["sv_allowAimAssist"] == "0"
     # its own sink, which a fleet shutdown (session.remove_sinks: zombiesai_*) leaves alone
     assert config.extra_env["PULSE_SINK"] == "zai_desktop" and not config.audio_sinks
     assert desktop.desktop_config(tmp_path / "no-fleet", root=tmp_path / "d", sink=None).extra_env == {}
@@ -35,6 +33,9 @@ def test_it_launches_offline_on_your_display_with_a_key_that_starts_nacht(tmp_pa
     assert "-lan" in command and command[-4:] == ["+bind", "F9", "map", NACHT]
     assert ["+set", "r_mode", "2560x1440"] == command[command.index("r_mode") - 1:command.index("r_mode") + 2]
     assert cwd == spec.plutonium.resolve()
+    # no aim assist: it turns the view with no mouse input, which no label records
+    sets = {command[i + 1]: command[i + 2] for i in range(len(command) - 2) if command[i] == "+set"}
+    assert sets["cg_aimAssistEnabled"] == sets["sv_allowAimAssist"] == "0"
     env = desktop.game_env(config, spec, base={"DISPLAY": ":5", "WAYLAND_DISPLAY": "wayland-1", "HOME": "/h"})
     assert env["DISPLAY"] == ":0" and "WAYLAND_DISPLAY" not in env and env["PULSE_SINK"] == "zai_desktop"
     assert desktop.profile_config(config) == spec.plutonium / desktop.PLUTONIUM_PROFILE / "config.cfg"
