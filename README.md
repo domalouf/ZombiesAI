@@ -49,7 +49,8 @@ Linux is [`docs/linux.md`](./docs/linux.md).
 - `src/zombiesai/session.py` — `./zai start | status | stop`: a training session's games, trainer and
   cleanup in one command each.
 - `src/zombiesai/viz/` — the Training Room dashboard, the live site, the
-  supervision page and the stream overlay.
+  supervision page and the stream overlay; `viz/control.py` is the API the desktop app uses.
+- `app/` — Zombies, the native desktop dashboard (C++/Qt Quick) for Omarchy.
 - `src/zombiesai/synthetic.py` — a stand-in for the game when there is no game:
   first-person frames that answer to the agent's actions, on the interfaces the
   real game has. It keeps the recorder, BC, the actors, the learner and the fleet
@@ -121,6 +122,11 @@ tail -f runs/rl<N>.log                           # one line per PPO update and p
 uv run python scripts/view_instances.py          # the games themselves, on workspace 9
 uv run python scripts/supervise.py               # the supervision page: curves, games, start and stop
 ```
+
+**Zombies**, the desktop app (`app/`, Qt Quick, in the Omarchy launcher once installed with `app/bin/install`),
+does all of this from one window: record demos, start runs and BC training with any setting and saved presets,
+stop them, watch their curves, browse the demo library, and run the games. It drives the same server as the
+supervision page; `app/README.md` has the details.
 
 The run's best game so far is kept as `runs/rl<N>/best/best.mp4`.
 

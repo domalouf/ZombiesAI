@@ -1,0 +1,21 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="Main.qml">Main.qml</file>
+        <file alias="Panel.qml">Panel.qml</file>
+        <file alias="AccentButton.qml">AccentButton.qml</file>
+        <file alias="StatTile.qml">StatTile.qml</file>
+        <file alias="Meter.qml">Meter.qml</file>
+        <file alias="LineChart.qml">LineChart.qml</file>
+        <file alias="WeekBars.qml">WeekBars.qml</file>
+        <file alias="SettingField.qml">SettingField.qml</file>
+        <file alias="SettingsForm.qml">SettingsForm.qml</file>
+        <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="OverviewPage.qml">OverviewPage.qml</file>
+        <file alias="RecordPage.qml">RecordPage.qml</file>
+        <file alias="RunsPage.qml">RunsPage.qml</file>
+        <file alias="LaunchPage.qml">LaunchPage.qml</file>
+        <file alias="DemosPage.qml">DemosPage.qml</file>
+        <file alias="GamesPage.qml">GamesPage.qml</file>
+        <file alias="i18n/en.json">i18n/en.json</file>
+    </qresource>
+</RCC>

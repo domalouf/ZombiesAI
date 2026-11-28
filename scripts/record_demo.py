@@ -155,6 +155,9 @@ class LiveStatus:
         from zombiesai.viz.live_bus import Publisher, bus_dir, bus_path
 
         self.publisher = Publisher(bus_path("record"))
+        # The same messages for the dashboard (viz/control.py): a datagram socket has one reader, and the
+        # overlay is already it.
+        self.dashboard = Publisher(bus_path("record-status"))
         self.base = {"kind": "recorder", "limit_s": limit_s, "mark_key": mark_key}
         self.process = None
         if not enabled:
@@ -177,7 +180,9 @@ class LiveStatus:
         print(f"overlay: on screen over the game (not in the recording); log in {log.name}")
 
     def send(self, state: str, **fields) -> None:
-        self.publisher.send({**self.base, "t": time.monotonic(), "state": state, **fields})
+        message = {**self.base, "t": time.monotonic(), "unix": time.time(), "state": state, **fields}
+        self.publisher.send(message)
+        self.dashboard.send(message)
 
     def step(self, status: dict) -> None:
         self.send("recording", **status)
@@ -185,6 +190,7 @@ class LiveStatus:
     def close(self, linger: bool = True) -> None:
         """Let the overlay show the 'saved' card and quit on its own (`linger`), or stop it now."""
         self.publisher.close()
+        self.dashboard.close()
         if self.process is not None and self.process.poll() is None and not linger:
             self.process.terminate()
 

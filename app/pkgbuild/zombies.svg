@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#FFD60A"/>
+  <!-- a skull with a crosshair: the game, and the aim it is learning -->
+  <path d="M32 13c-10.5 0-18 7.3-18 17 0 5.6 2.6 9.6 6 12v6.5c0 1.4 1.1 2.5 2.5 2.5h19c1.4 0 2.5-1.1 2.5-2.5V42c3.4-2.4 6-6.4 6-12 0-9.7-7.5-17-18-17z" fill="#16161a"/>
+  <circle cx="24.5" cy="31" r="4.6" fill="#FFD60A"/>
+  <circle cx="39.5" cy="31" r="4.6" fill="#FFD60A"/>
+  <path d="M30 41.5l2-4 2 4z" fill="#FFD60A"/>
+  <rect x="27" y="47" width="2.4" height="4" fill="#FFD60A"/>
+  <rect x="34.6" y="47" width="2.4" height="4" fill="#FFD60A"/>
+  <circle cx="39.5" cy="31" r="1.6" fill="#16161a"/>
+</svg>
