@@ -27,6 +27,7 @@ from torch import nn
 from zombiesai import spec
 from zombiesai.demos.stats import behaviour_stats
 from zombiesai.demos.hud_crops import HUD_VIEW_SHAPE, hud_view
+from zombiesai.realgame.hud_reward import UNDETECTED_TERMS
 from zombiesai.reward import RewardConfig
 from zombiesai.rl.config import RLConfig
 from zombiesai.rl.distributions import FactoredCategorical
@@ -210,8 +211,10 @@ class Learner:
         bc.calibrate(self.net, self.calibration)
         # The reward the critic is fitted to. One that changed since the checkpoint (or a checkpoint from before
         # this was recorded) leaves a critic predicting the old reward, and its advantages would move the policy
-        # on that: warm the critic up again from here before the policy trains.
-        self.reward = asdict(RewardConfig())
+        # on that: warm the critic up again from here before the policy trains. What the real game cannot see
+        # yet is part of the reward too -- a term that starts being detected changes what is paid as surely as
+        # a new weight does (damage, 2026-10-26).
+        self.reward = {**asdict(RewardConfig()), "undetected": list(UNDETECTED_TERMS)}
         self.warmup_until = config.critic_warmup_updates
         if previous and previous.get("reward") != self.reward:
             self.warmup_until = self.updates + config.critic_warmup_updates

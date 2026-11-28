@@ -9,7 +9,8 @@ own compute (a policy forward is ~0.5 ms on a CPU thread) happens between two ca
 
 The reward is `reward.RewardShaper` on signals from `hud_reward.HudSignals`, which reads the settled events of
 `hud/track.HudTracker` -- so a misread digit never becomes a reward, it becomes a rejected change, and three
-in a row become `hud_lost`, which ends the episode.
+in a row become `hud_lost`, which ends the episode. Hits are the one signal not on the HUD: `damage.py` sees
+the red flash in the observation frame itself.
 
 Episode ends, and why they are what they are:
 
@@ -28,6 +29,7 @@ The episode summary also carries an estimate of how well it shoots, for the stre
 `shots` are the magazine marks that went away between two good reads while the fire button was held, and
 `hits` the settled non-repair gains -- every one of those is at least one bullet that landed, but a counter
 still rolling from one hit when the next lands settles as a single gain, so `hits / shots` is a floor.
+`hits_taken` is the other way round: the zombies' hits on the player, as `damage.py` saw them.
 
 An episode that ends in a death also carries the game's own count, off the game-over scoreboard
 (realgame/end_screen.py): `end_points`, `end_kills` and `end_headshots`. They are looked at for up to
@@ -45,6 +47,7 @@ from zombiesai.demos.hud_crops import hud_view
 from zombiesai.hud.parse import ABSENT, OK
 from zombiesai.hud.track import START_POINTS, HudTracker
 from zombiesai.hud.weapons import WEAPONS
+from zombiesai.realgame.damage import DamageConfig, DamageDetector
 from zombiesai.realgame.hud_reward import HudSignals, SignalConfig
 from zombiesai.realgame.instances import NACHT
 from zombiesai.reward import REWARD_TERMS, RewardConfig, RewardShaper
@@ -115,6 +118,7 @@ class EnvConfig:
     pitch_spring_s: float | None = 2.0
     pitch_limit_deg: float = 85.0  # where the engine stops the view
     signals: SignalConfig = field(default_factory=SignalConfig)
+    damage: DamageConfig = field(default_factory=DamageConfig)
     reward: RewardConfig = field(default_factory=RewardConfig)
 
     @property
@@ -177,6 +181,7 @@ class RealGameEnv:
         self.tracker = HudTracker()
         self._hud_view = None  # the last good HUD-corner view, repeated while the grab is stale
         self.signals = HudSignals(self.config.signals)
+        self.damage = DamageDetector(self.config.damage)
         self.shaper = RewardShaper(self.config.reward)
         self._deadline = 0.0
         self._needs_restart = False  # set after the first reset: from then on every reset starts a new game
@@ -281,6 +286,7 @@ class RealGameEnv:
         self.pitch = 0.0  # a map load starts level
         self._ended_by_death = False
         self.signals.reset()
+        self.damage.reset()
         self.shaper.reset()
         self.episodes += 1
         self._reset_episode_counters()
@@ -400,6 +406,10 @@ class RealGameEnv:
             tracked.points_event, tracked.points_delta, tracked.round_changed = "", 0, False
             tracked.weapon_changed = False
         signals = self.signals.step(tracked, action)
+        # A stale grab is the last good frame again: no new flash can start on it.
+        hit = not stale and self.damage.step(obs["pixels"])
+        if hit:
+            signals = replace(signals, damage_event=True)
         self._count_shots(reading, action)
         shown = self.downed is not None and self.downed()
         if shown and self.clock() - self.t_start < self.config.down_grace_s:
@@ -439,7 +449,7 @@ class RealGameEnv:
                 "weapon": WEAPONS[tracked.weapon].key if tracked.weapon >= 0 else None, **ammo_info(reading),
                 # this step's settled points change, for the moments the actor films (rl/moments.py)
                 "points_event": tracked.points_event, "points_delta": tracked.points_delta,
-                "repair": signals.repair_points > 0}
+                "repair": signals.repair_points > 0, "hit": hit}
         if terminated or truncated:
             self.dispatcher.release_all()
             self._ended_by_death = terminated
@@ -480,6 +490,7 @@ class RealGameEnv:
             "shots": self.shots,
             "hits": self.signals.events["gain"],
             "kills": self.signals.events["kill"],
+            "hits_taken": self.damage.hits,
             "end_points": end.points if end else None,
             "end_kills": end.kills if end else None,
             "end_headshots": end.headshots if end else None,

@@ -67,10 +67,9 @@ actors do not each load torch (~600 MB each). Not done at all: the BC data-loade
 ## Next
 
 1. Finish the per-PC inference process; speed up the BC data loader.
-2. A damage detector (the red vignette) so being hit costs something before it kills.
-3. The prompt reader (door / weapon / ammo prices) for ammo rebuys and affordance signals.
-4. The eval gate on the real game: `round_reached` of the frozen policy over 20 games against BC's.
-5. Memory beyond the frame stack (a recurrent core) once the feed-forward policy plateaus.
+2. The prompt reader (door / weapon / ammo prices) for ammo rebuys and affordance signals.
+3. The eval gate on the real game: `round_reached` of the frozen policy over 20 games against BC's.
+4. Memory beyond the frame stack (a recurrent core) once the feed-forward policy plateaus.
 
 ## Risks
 

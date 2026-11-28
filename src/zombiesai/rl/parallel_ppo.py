@@ -81,8 +81,8 @@ from zombiesai.rl.weights import WeightFollower, publish  # noqa: F401
 
 # What episodes.jsonl keeps of an actor's episode summary: the numbers, not the per-term breakdowns.
 EPISODE_FIELDS = ("actor", "episode", "reason", "return", "length", "seconds", "round_reached", "shots", "hits",
-                  "points_gained", "kills", "end_points", "end_kills", "end_headshots", "bad_steps", "repair_share",
-                  "bonus_share", "longest_without_kill_s")
+                  "points_gained", "kills", "hits_taken", "end_points", "end_kills", "end_headshots", "bad_steps",
+                  "repair_share", "bonus_share", "longest_without_kill_s")
 
 
 class MachineStats:
