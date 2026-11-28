@@ -29,7 +29,10 @@ its clip.json under `gamepad`):
 
 The bridge runs on its own thread at `rate_hz` (250 by default), on absolute monotonic deadlines like the
 recorder, and never catches up: a late tick is simply the next tick. It grabs the pad (EVIOCGRAB) so the game
-cannot also read it and turn twice; see docs/linux.md for what a grab does not cover (hidraw). The virtual
+cannot also read it and turn twice. A grab covers one evdev node, not the pad's hidraw node or its sibling
+devices, so the launchers also start the game with every node of every pad masked (`pad_nodes`, passed to
+`realgame.instances.offline_wrapper`), and the recorder warns when a Wine process holds one anyway
+(`game_holders`: a pad plugged in after the game started). The virtual
 device is `zombiesai-pad-bridge`, which `EvdevInput` skips like every `zombiesai` device: its events reach the
 log straight from the bridge (`PadInput`), each exactly once, stamped with the monotonic time it was sent.
 
@@ -45,6 +48,7 @@ import fcntl
 import json
 import math
 import os
+import stat
 import struct
 import threading
 import time
@@ -351,6 +355,77 @@ def parse_pads(text: str) -> list[PadInfo]:
 
 def find_pads() -> list[PadInfo]:
     return parse_pads(Path("/proc/bus/input/devices").read_text())
+
+
+# Device nodes a game could read a pad through, by the name sysfs lists them under (/dev/input/<name>).
+INPUT_NODE_PREFIXES = ("event", "js", "mouse")
+
+
+def pad_nodes(pads: list[PadInfo] | None = None, sys_root: str | Path = "/sys") -> list[str]:
+    """Every device node a game could read these pads through, not only the event node the bridge grabs.
+
+    EVIOCGRAB covers one evdev node. The device behind a pad has more: its hidraw node, which Proton's winebus
+    and SDL open past any grab (a DualSense was read that way on 2026-11-27, with PROTON_ENABLE_HIDRAW=0 and
+    SDL_JOYSTICK_HIDAPI=0 both set), and the nodes of its sibling input devices (a DualSense is four: the pad,
+    its motion sensors, its touchpad and its headset jack). This is all of them, for each pad: the hidraw
+    nodes of the device the pad's input device hangs off (a HID device, or a USB interface for xpad), and the
+    event/js/mouse nodes of every input device under it. `realgame.instances.offline_wrapper(mask=...)` hides
+    them from the game. A pad sysfs does not know (gone since `find_pads`) contributes nothing."""
+    pads = find_pads() if pads is None else pads
+    sys_root = Path(sys_root)
+    nodes: set[str] = set()
+    for pad in pads:
+        try:
+            device = (sys_root / "class" / "input" / Path(pad.path).name / "device").resolve(strict=True)
+            parent = (device / "device").resolve(strict=True)
+        except OSError:
+            continue
+        hidraw = parent / "hidraw"
+        if hidraw.is_dir():
+            nodes.update(f"/dev/{p.name}" for p in hidraw.iterdir() if p.name.startswith("hidraw"))
+        inputs = {p.resolve() for p in (parent / "input").glob("input*")} if (parent / "input").is_dir() else set()
+        for input_dir in inputs | {device}:
+            try:
+                names = [p.name for p in input_dir.iterdir()]
+            except OSError:
+                continue
+            nodes.update(f"/dev/input/{n}" for n in names if n.startswith(INPUT_NODE_PREFIXES))
+    return sorted(nodes)
+
+
+def game_holders(nodes: list[str], proc: str | Path = "/proc") -> list[tuple[int, str, str]]:
+    """(pid, program, node) for each Wine process -- anything whose name or argv[0] ends in .exe -- that has one
+    of `nodes` open: a game reading the pad itself, past the bridge. Only Wine counts: Steam keeps a pad's
+    hidraw open and the compositor its touchpad, and neither is the game. Compared by device number, so a node
+    the game opened under another path (a by-id link, a node masked to /dev/null in its namespace) is matched
+    for what it really is. Processes we may not look into are skipped."""
+    wanted = {}
+    for node in nodes:
+        try:
+            wanted[os.stat(node).st_rdev] = node
+        except OSError:
+            continue
+    held = []
+    for pid_dir in Path(proc).iterdir():
+        if not pid_dir.name.isdigit():
+            continue
+        try:
+            comm = (pid_dir / "comm").read_text().strip()
+            argv0 = (pid_dir / "cmdline").read_bytes().split(b"\0")[0].decode(errors="replace")
+            fds = list((pid_dir / "fd").iterdir())
+        except OSError:
+            continue
+        if not (comm.lower().endswith(".exe") or argv0.lower().endswith(".exe")):
+            continue
+        for fd in fds:
+            try:
+                st = os.stat(fd)
+            except OSError:
+                continue
+            if stat.S_ISCHR(st.st_mode) and st.st_rdev in wanted:
+                program = argv0.replace("\\", "/").rsplit("/", 1)[-1] or comm
+                held.append((int(pid_dir.name), program, wanted[st.st_rdev]))
+    return sorted(set(held))
 
 
 def resolve_axes(axes: dict | str, abs_codes: frozenset[int]) -> dict[str, int]:
@@ -826,6 +901,19 @@ class PadSession:
         self.exclude_path = info.path
         axes = ", ".join(f"{k} {v}" for k, v in self.bridge.describe()["axes"].items())
         say(f"gamepad {info.name!r} at {info.path}, grabbed; {axes}")
+        self.info = info
+
+    def game_warning(self) -> str | None:
+        """What to tell the player when the game holds this pad itself -- reading it natively as well as through
+        the bridge, so presses can land twice and the view turn by itself. The launchers mask every pad node
+        from the game, so this means the pad came after the game did. Ask once the game's window is up: Wine
+        opens pads while it boots, which can be after the bridge is."""
+        held = game_holders(pad_nodes([self.info]))
+        if not held:
+            return None
+        who = ", ".join(sorted({f"{program} (pid {pid}) has {node}" for pid, program, node in held}))
+        return (f"the game can read the pad itself, past the bridge: {who}. Its presses may land twice. Quit the "
+                f"game and launch it again with the pad plugged in, so it starts with the pad hidden from it.")
 
     def devices(self) -> list:
         """The mice and keyboards for EvdevInput, without the pad (grabbed, it would read nothing anyway)."""

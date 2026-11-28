@@ -10,6 +10,10 @@ and the fleet's games the same game. This starts it the way `instances.py` start
   profile's), copied over the profile each launch, so your bindings and sensitivity are the fleet's.
 * **Offline**: a network namespace with loopback only (`instances.offline_wrapper`). The X socket and the
   sound server are files, which a network namespace does not hide.
+* **No gamepad of its own**: every node of every pad plugged in at launch is masked to /dev/null in the game's
+  namespace (`demos.gamepad.pad_nodes`), hidraw included, so a pad reaches the game only as the mouse and keys
+  the recorder's bridge turns it into. Plug the pad in before launching: one that comes later is not hidden
+  (the recorder says so when it starts).
 * **Its own sound**: a null sink with a loopback to your speakers, so a recording's audio is the game alone
   (`zai_desktop.monitor`) and not the whole desktop. Not named `zombiesai_*`: a fleet shutdown removes those.
 * **A key that starts Nacht** (F9): in LAN mode the menu cannot start a co-op game and a `+map` on the command
@@ -27,7 +31,7 @@ from pathlib import Path
 
 from zombiesai.realgame.instances import (
     NACHT, PLUTONIUM_PROFILE, FleetConfig, Instance, InstanceSpec, game_command, game_config, game_env,
-    load_fleet, offline_wrapper, prepare_plutonium, prepare_prefix, sync_plutonium_profile,
+    load_fleet, offline_wrapper, pads_to_hide, prepare_plutonium, prepare_prefix, sync_plutonium_profile,
 )
 
 DESKTOP_ROOT = "runs/desktop"
@@ -53,7 +57,9 @@ def desktop_config(fleet_root: str | Path = "runs/instances", *, root: str | Pat
         env["PULSE_SINK"] = sink
     # A gamepad is played through demos/gamepad.py's bridge, which grabs its event node and turns it into mouse
     # and keys. Proton/SDL could still read it through hidraw and turn the view a second time, so the game is
-    # told not to: it should never see a pad of its own. (A fleet config can still override either.)
+    # told not to: it should never see a pad of its own. (A fleet config can still override either.) These
+    # alone did not stop it -- Proton's winebus opened a DualSense's hidraw with both set -- so the launch also
+    # masks the pad's nodes (desktop_command); they stay as a second line for a pad plugged in later.
     env.setdefault("PROTON_ENABLE_HIDRAW", "0")
     env.setdefault("SDL_JOYSTICK_HIDAPI", "0")
     return replace(base, n=1, root=str(root), width=width or base.width, height=height or base.height,
@@ -76,9 +82,11 @@ def profile_config(config: FleetConfig) -> Path:
     return desktop_spec(config, ":0").plutonium / PLUTONIUM_PROFILE / "config.cfg"
 
 
-def desktop_command(config: FleetConfig, spec: InstanceSpec, key: str = START_KEY) -> tuple[list[str], Path]:
+def desktop_command(config: FleetConfig, spec: InstanceSpec, key: str = START_KEY,
+                    mask: list[str] | None = None) -> tuple[list[str], Path]:
+    """The launch command; `mask` is the device nodes to hide from the game, by default every pad's."""
     command, cwd = game_command(config, spec)
-    return offline_wrapper() + command + start_args(key), cwd
+    return offline_wrapper(mask=pads_to_hide() if mask is None else mask) + command + start_args(key), cwd
 
 
 # ------------------------------------------------------------------------------------------------ audio
@@ -154,7 +162,10 @@ class DesktopGame(Instance):
         copied = sync_plutonium_profile(self.spec.plutonium, source=source, say=self.say)
         if copied is not None:
             self.say(f"  config.cfg: {source}")
-        command, cwd = desktop_command(self.config, self.spec, self.key)
+        mask = pads_to_hide()
+        command, cwd = desktop_command(self.config, self.spec, self.key, mask)
+        if mask:
+            self.say(f"  hiding the gamepad from the game (it gets the pad only through the bridge): {' '.join(mask)}")
         self.spec.dir.mkdir(parents=True, exist_ok=True)
         with open(self.spec.dir / "game.log", "ab") as log:
             log.write(f"\n=== launching on {self.spec.display}: {' '.join(command)}\n".encode())

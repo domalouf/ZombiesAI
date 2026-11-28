@@ -428,3 +428,21 @@ def test_take_down_stops_every_game_and_counts_the_running_ones(tmp_path, monkey
                                                               for i in range(cfg.n)])
     assert inst.take_down(config.root, say=lambda m: None) == 2
     assert log == [("down", 0), ("down", 1), ("down", 2)]
+
+
+def test_masked_nodes_are_dev_null_to_the_game_and_untouched_outside(tmp_path):
+    node = tmp_path / "hidraw7"
+    node.write_text("the pad")
+    gone = tmp_path / "unplugged"
+    wrapper = inst.offline_wrapper(mask=[str(node), str(gone)])
+    assert "--mount" in wrapper and "--mount" not in inst.offline_wrapper()
+    probe = f"stat -c %t:%T {node}; id -u"
+    try:
+        run = subprocess.run(wrapper + ["sh", "-c", probe], capture_output=True, text=True, timeout=20)
+    except FileNotFoundError:
+        pytest.skip("no unshare")
+    if run.returncode and "unshare" in run.stderr:
+        pytest.skip(f"no user namespaces here: {run.stderr.strip()}")
+    assert run.stdout.split() == ["1:3", str(os.getuid())], run.stderr  # /dev/null's numbers, as ourselves
+    assert "could not hide" not in run.stderr  # a node that is gone is skipped quietly
+    assert node.read_text() == "the pad"
