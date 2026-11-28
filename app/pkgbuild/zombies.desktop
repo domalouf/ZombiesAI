@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Zombies
+Comment=ZombiesAI dashboard: record demos, start and stop training runs
+Exec=zombies
+Icon=zombies
+Terminal=false
+Categories=Utility;Development;
+StartupWMClass=zombies

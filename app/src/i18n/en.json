@@ -1,0 +1,26 @@
+{
+  "%n runs": {
+    "one": "%n run",
+    "other": "%n runs"
+  },
+  "%n games": {
+    "one": "%n game",
+    "other": "%n games"
+  },
+  "%n demos": {
+    "one": "%n demo",
+    "other": "%n demos"
+  },
+  "%n trainers running": {
+    "one": "%n trainer running",
+    "other": "%n trainers running"
+  },
+  "%n settings": {
+    "one": "%n setting",
+    "other": "%n settings"
+  },
+  "This machine is best at about %n games": {
+    "one": "This machine is best at about %n game",
+    "other": "This machine is best at about %n games"
+  }
+}
