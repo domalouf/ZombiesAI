@@ -117,7 +117,8 @@ def test_release_all_lets_go_of_everything():
     assert down == up
 
 
-@pytest.mark.parametrize("counts_per_degree", [1.0, 6.4, 400.0])
+# From 2 counts a degree: the half-degree bin is one count there, and a mouse cannot send half of one.
+@pytest.mark.parametrize("counts_per_degree", [2.0, 6.4, 400.0])
 def test_what_the_agent_sends_is_what_a_recording_reads_back(counts_per_degree):
     """The symmetry the whole project rests on: the agent's output and a human's input are the same units,
     so a demonstration and a rollout are the same kind of data."""

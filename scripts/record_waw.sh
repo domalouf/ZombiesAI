@@ -12,6 +12,10 @@
 #                      config.cfg disagrees; replace with calibrate_mouse.py's number once measured)
 #   ZOMBIESAI_WINDOW   the game window's title
 #   ZOMBIESAI_AUDIO    set to 0 to record without audio
+#   ZOMBIESAI_OVERLAY  set to 0 for no live overlay (REC / time / F8 state and your keys, drawn over the game;
+#                      never in the recording -- scripts/record_overlay.py)
+#   ZOMBIESAI_PAD      play with a gamepad: "auto" for the first one found, or /dev/input/eventN
+#                      (demos/gamepad.py; docs/demos.md "Recording with a gamepad")
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
@@ -24,7 +28,6 @@ shift 2
 
 cd "$(dirname "$0")/.."
 args=(
-  --source screen
   --window "${ZOMBIESAI_WINDOW:-Call of Duty}"
   --wait
   --counts-per-degree "${ZOMBIESAI_CPD:-9.09}"
@@ -33,4 +36,8 @@ args=(
   --notes "$notes"
 )
 [[ "${ZOMBIESAI_AUDIO:-1}" != 0 ]] && args+=(--audio)
+[[ "${ZOMBIESAI_OVERLAY:-1}" != 0 ]] && args+=(--overlay)
+if [[ -n "${ZOMBIESAI_PAD:-}" ]]; then
+  if [[ "$ZOMBIESAI_PAD" == auto ]]; then args+=(--pad); else args+=(--pad "$ZOMBIESAI_PAD"); fi
+fi
 exec uv run python scripts/record_demo.py "${args[@]}" "$@"

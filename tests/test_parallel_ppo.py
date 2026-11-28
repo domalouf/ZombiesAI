@@ -28,7 +28,7 @@ OFFSETS = (0, 1, 3)
 
 @pytest.fixture
 def bc_checkpoint(tmp_path):
-    config = bc.BCConfig(frame_offsets=OFFSETS, hidden=32)
+    config = bc.BCConfig(frame_offsets=OFFSETS, hidden=32, focal_gamma=1.0)  # a focal prior: calibrated when sampled
     torch.manual_seed(0)
     path = tmp_path / "bc.pt"
     bc.save(path, bc.build_net(config), config, 0, {}, {"fire_duty": 0.1})

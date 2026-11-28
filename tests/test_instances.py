@@ -77,6 +77,18 @@ def test_game_args_set_the_resolution_console_and_start_in_nacht(tmp_path):
     assert args[-2:] == ["+map", "nazi_zombie_prototype"]
 
 
+def test_every_game_has_aim_assist_off_even_from_a_fleet_saved_before_it_was(tmp_path):
+    # a fleet.json from before 2026-11-22 lists its dvars without aim assist; the game must still get it off
+    config = replace(fake_install(tmp_path), dvars={"r_fullscreen": "1", "com_maxfps": "30"})
+    args = game_args(config, specs(config)[0])
+    pairs = {args[i + 1]: args[i + 2] for i in range(len(args) - 2) if args[i] == "+set"}
+    assert pairs["cg_aimAssistEnabled"] == pairs["sv_allowAimAssist"] == "0" and pairs["com_maxfps"] == "30"
+    # a config that sets one itself wins, and each dvar is passed once
+    config = replace(config, dvars={"cg_aimAssistEnabled": "1"})
+    args = game_args(config, specs(config)[0])
+    assert args.count("cg_aimAssistEnabled") == 1 and args[args.index("cg_aimAssistEnabled") + 1] == "1"
+
+
 def test_game_env_lives_on_its_display_and_nowhere_else(tmp_path):
     config = fake_install(tmp_path)
     spec = specs(config)[2]

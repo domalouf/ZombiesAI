@@ -25,6 +25,7 @@ import json
 import math
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 from zombiesai.demos.clips import load_clip
@@ -141,6 +142,53 @@ def announce_mark(mark_key: str):
     return on_mark
 
 
+SYSTEM_PYTHON = "/usr/bin/python3"  # the live overlay needs GTK 4, which the system's Python has and the venv not
+
+
+class LiveStatus:
+    """The live overlay (scripts/record_overlay.py), and what the recorder tells it over the live bus
+    (viz/live_bus.py): waiting, the countdown, each step's time and play marking, and the saved clip. Sending
+    is one non-blocking datagram, so the decision loop pays nothing for it, overlay or not."""
+
+    def __init__(self, *, enabled: bool, bindings: dict, counts_per_degree: float, limit_s: float,
+                 mark_key: str | None):
+        from zombiesai.viz.live_bus import Publisher, bus_dir, bus_path
+
+        self.publisher = Publisher(bus_path("record"))
+        self.base = {"kind": "recorder", "limit_s": limit_s, "mark_key": mark_key}
+        self.process = None
+        if not enabled:
+            return
+        script = Path(__file__).with_name("record_overlay.py")
+        if not Path(SYSTEM_PYTHON).exists():
+            print(f"overlay: no {SYSTEM_PYTHON}; recording without it")
+            return
+        bus_dir().mkdir(parents=True, exist_ok=True)
+        bindings_file = bus_dir() / "record_bindings.json"
+        bindings_file.write_text(json.dumps(bindings))
+        log = open(bus_dir() / "record_overlay.log", "w")
+        import os
+
+        self.process = subprocess.Popen(
+            [SYSTEM_PYTHON, str(script), "--bindings", str(bindings_file),
+             "--counts-per-degree", f"{counts_per_degree:g}", "--parent-pid", str(os.getpid())],
+            stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+        print(f"overlay: on screen over the game (not in the recording); log in {log.name}")
+
+    def send(self, state: str, **fields) -> None:
+        self.publisher.send({**self.base, "t": time.monotonic(), "state": state, **fields})
+
+    def step(self, status: dict) -> None:
+        self.send("recording", **status)
+
+    def close(self, linger: bool = True) -> None:
+        """Let the overlay show the 'saved' card and quit on its own (`linger`), or stop it now."""
+        self.publisher.close()
+        if self.process is not None and self.process.poll() is None and not linger:
+            self.process.terminate()
+
+
 def next_dir(root: Path, prefix: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     existing = [p.name for p in root.glob(f"{prefix}_*")]
@@ -168,6 +216,9 @@ def main() -> None:
                         help="the game window to capture, by title or 0x id (it runs under XWayland)")
     parser.add_argument("--no-hud", action="store_true",
                         help="don't save full-resolution HUD crops (~7.4 GB per 20 minutes at 1440p while recording, ~0.4 GB once packed as video)")
+    parser.add_argument("--no-scene", action="store_true",
+                        help="do not keep the whole picture at quarter size beside the HUD boxes (640x360 at "
+                             "1440p; ~12 GB per 20 minutes until it is packed as video when the session ends)")
     parser.add_argument("--keep-raw-hud", action="store_true",
                         help="don't pack the HUD crops as video when the session ends (~17x smaller, verified)")
     parser.add_argument("--mark-key", default=MARK_KEY,
@@ -181,6 +232,14 @@ def main() -> None:
                                                "(pactl list short sources); default: the default sink's")
     parser.add_argument("--audio-raw", action="store_true", help="keep audio as raw PCM, skip FLAC compression")
     parser.add_argument("--notes", default="", help="what you were trying to do -- camping, training, dying early")
+    parser.add_argument("--overlay", action="store_true",
+                        help="show the live overlay over the game while recording: REC / time / not-playing "
+                             "state and your keys and mouse (scripts/record_overlay.py; never in the frames)")
+    parser.add_argument("--pad", nargs="?", const="auto", default=None, metavar="/dev/input/eventN",
+                        help="play with a gamepad: it drives a virtual mouse and keyboard, and the recording logs "
+                             "exactly what it sent (demos/gamepad.py); with no value, the first pad found")
+    parser.add_argument("--pad-config", type=Path, default=None,
+                        help="the pad's buttons and stick tuning (default: configs/pad_bindings.json)")
     args = parser.parse_args()
 
     bindings = json.loads(args.bindings.read_text()) if args.bindings else dict(DEFAULT_BINDINGS)
@@ -212,12 +271,16 @@ def main() -> None:
     window = args.window
     if isinstance(window, str) and window.startswith("0x"):
         window = int(window, 16)
-    from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE
+    from zombiesai.demos.hud_crops import HUD_REGIONS, HUD_SCALE, RECORD_REGIONS, RECORD_SCALES
+
+    # The HUD boxes, and the whole scene at a quarter of the capture: what a sharper view for the policy can
+    # later be cut from (demos/hud_crops.py). A clip's regions are fixed for its life, so this is decided here.
+    regions = None if args.no_hud else (HUD_REGIONS if args.no_scene else RECORD_REGIONS)
 
     def open_capture() -> ScreenCapture:
         return ScreenCapture(
             tuple(args.region) if args.region else None, window=window,
-            hud_regions=None if args.no_hud else HUD_REGIONS, hud_scale=HUD_SCALE,
+            hud_regions=regions, hud_scale=HUD_SCALE, hud_scales=RECORD_SCALES,
         )
 
     # Only a window that isn't there yet is worth waiting for. No X display, or the wrong depth, stays an
@@ -230,11 +293,22 @@ def main() -> None:
         capture = None
     # Raw device counts from the event devices. Cursor deltas would be useless -- the game captures and
     # re-centres the pointer.
-    inputs = EvdevInput()
+    pad = None
+    if args.pad:
+        from zombiesai.demos.gamepad import PadError, PadSession
+
+        try:
+            pad = PadSession(None if args.pad == "auto" else args.pad, args.pad_config, args.counts_per_degree,
+                             bindings)
+        except PadError as err:
+            raise SystemExit(f"--pad: {err}") from None
+    inputs = EvdevInput(pad.devices() if pad is not None else None)
     print(f"reading {', '.join(d.name for d in inputs.devices)}")
     if not inputs.monotonic:
         print("warning: this kernel would not switch the devices to CLOCK_MONOTONIC; timestamps are")
         print("         converted from wall clock, so a clock step mid-recording would shift labels.")
+    if pad is not None:
+        inputs = pad.wrap(inputs)  # the bridge runs from here, so the pad works in the menus while waiting
     audio = None
     if args.audio:
         from zombiesai.demos.audio import AudioRecorder, PulseMonitorStream
@@ -245,6 +319,8 @@ def main() -> None:
         stream.command()  # refuses anything that is not a .monitor before a second is recorded
         audio = AudioRecorder(stream, compress=not args.audio_raw)
         print(f"recording audio from {stream.device} (everything that plays through it, not only the game)")
+    live = LiveStatus(enabled=args.overlay, bindings=bindings, counts_per_degree=args.counts_per_degree,
+                      limit_s=args.minutes * 60, mark_key=mark_key)
 
     if args.wait:
         def capturable() -> bool:
@@ -253,26 +329,36 @@ def main() -> None:
                 try:
                     capture = open_capture()
                 except not_found:
+                    live.send("waiting")
                     return False
             try:
-                return capture.is_capturable()
+                ok = capture.is_capturable()
+                if not ok:
+                    live.send("waiting")
+                return ok
             except gone:
                 # The window found was the game's start-up window, since destroyed (WaW opens one for its
                 # intro, then the real one): let it go and look for the title again next time.
                 capture.close()
                 capture = None
+                live.send("waiting")
                 return False
+
+        def counting_down(message: str) -> None:
+            live.send("countdown", until=time.time() + args.countdown)
+            notify(message, args.countdown)
 
         try:
             ready = wait_to_start(
                 capturable, timeout=args.wait_timeout, countdown=args.countdown,
-                discard=inputs.drain, notify=lambda message: notify(message, args.countdown),
+                discard=inputs.drain, notify=counting_down,
             )
         except KeyboardInterrupt:
             ready = None
         if not ready:
             # Nothing was recorded, so there is nothing to write -- just let go of the devices and say why.
             inputs.close()
+            live.close(linger=False)
             if capture is not None:
                 capture.close()
             if ready is None:
@@ -308,13 +394,19 @@ def main() -> None:
     try:
         path = record(
             capture, inputs, out, config, audio=audio,
-            annotations={"game_settings": game_settings} if game_settings is not None else None,
+            annotations={
+                **({"game_settings": game_settings} if game_settings is not None else {}),
+                **({"gamepad": pad.annotation()} if pad is not None else {}),
+            } or None,
             on_mark=announce_mark(config.input.mark_key) if config.input.mark_key else None,
+            on_step=live.step,
         )
     except KeyboardInterrupt:
         # record() has already closed the clip; say where it is and check it, as for a full-length session.
         path = out
         print("\nstopped early")
+    live.send("done", name=Path(path).name, note="checking the recording and packing its video -- see the terminal")
+    live.close()
     print(f"wrote {path}")
     clip = load_clip(path)
     for name in clip.hud_regions:

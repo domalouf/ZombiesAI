@@ -187,10 +187,19 @@ def specs(config: FleetConfig) -> list[InstanceSpec]:
     ]
 
 
+# Dvars every game gets unless its config sets them itself, so a fleet.json saved before one was added still
+# gets it. Aim assist off: Plutonium's LAN game has it on for the mouse (Steam's game, where the first demos
+# were recorded, does not), and aiming down sights then pulls the view onto the nearest zombie. That is a turn
+# no action asked for, which the demos never show and the policy cannot see coming. sv_allowAimAssist is the
+# server's half: a LAN game is its own server. Off since 2026-11-22; rl8-rl20 played with it on.
+PARITY_DVARS = {"cg_aimAssistEnabled": "0", "sv_allowAimAssist": "0"}
+
+
 def game_args(config: FleetConfig, spec: InstanceSpec, *, start: bool = True) -> list[str]:
-    """The exe's arguments: the resolution, the dvars, then (if `start`) the command that loads Nacht."""
+    """The exe's arguments: the resolution, the dvars (PARITY_DVARS, then the config's), then (if `start`) the
+    command that loads Nacht."""
     args = ["+set", "r_mode", f"{spec.width}x{spec.height}"]
-    for name, value in config.dvars.items():
+    for name, value in {**PARITY_DVARS, **config.dvars}.items():
         args += ["+set", name, str(value)]
     if start and config.start_command:
         args += ["+" + config.start_command.split()[0], *config.start_command.split()[1:]]

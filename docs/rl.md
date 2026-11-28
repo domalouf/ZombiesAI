@@ -72,6 +72,11 @@ profile at every launch, so the instances play with the settings the demos were 
   profile" -- a local save profile despite the name -- that LAN mode cannot create). The same `map` typed into
   the console loads and stays, so the reset types it, then taps Enter through "Click to Start the Mission".
   From launch to a settled 500 takes ~1-4 minutes at 1440p; later resets are just the map load.
+- **Plutonium's LAN game has aim assist on, for the mouse too** (`cg_aimAssistEnabled 1`,
+  `sv_allowAimAssist 1`). Steam's game, where the demos were recorded, doesn't. Aiming down sights then pulls
+  the view onto the nearest zombie, a turn no action asked for. Every game gets both set to 0
+  (`instances.PARITY_DVARS`, added to whatever a fleet.json lists) since 2026-11-22. rl8-rl20 played with it
+  on, so their ADS kills and accuracy aren't comparable with later runs.
 - **The HUD reads at 2560x1440, not 1280x720**: the glyph atlas is 1440p text at half scale, and natively
   rendered 720p text does not match it. The fleet defaults to 1440p.
 
@@ -114,6 +119,19 @@ rules, and the shaper:
 - **reset** is a state machine: release every key, type `map nazi_zombie_prototype` into the console, and
   wait for the HUD to settle on 500 points on a live picture; three failed tries relaunch the game, and two
   failed relaunches raise, which restarts the actor.
+- **`--skip-opening-s N`** (off by default) fast-forwards the first N game-seconds of every game before the
+  policy's first step. Round 1's zombies reach the spawn room's windows ~45 s in, and an idle player's first
+  hit comes 50-90 s in (70-78 s typical), so most of an early agent's game is empty. The reset types
+  `sv_cheats 1;com_maxfps 0;timescale 4` (`timescale` is cheat-protected, and a LAN `map` game takes
+  `sv_cheats 1` from the console), waits N/4 s, then types `timescale 1` and puts the fleet's `com_maxfps` back.
+  The frame cap has to go during the skip: each frame advances game time by at most ~70 ms, so at 30 fps
+  timescale 8 runs no faster than timescale 2. Time spent typing the stop command counts towards the skip, so
+  N is a ceiling. `skipped_s` in episodes.jsonl records how much was skipped. `seconds` and episode length
+  count only from the first step, so they can't be compared with runs that played the opening.
+  Measured on the 7-game fleet (2026-11-22, `scripts/check_skip.py`, idle games): with 30, first hits came 19-56 s
+  after the first step, and adding back `skipped_s` put them 2-5 game-s from the no-skip games' (within noise),
+  so even all 7 games fast-forwarding at once ran the full 4x. Median wall time per game dropped from 83 s to 53 s.
+  There were no late steps in either block. With 40, one game in 3 on a single instance was hit 2.8 s in.
 
 **`realgame/hud_reward.py` — what pays.** Settled gains (a kill is one gain, not four partial reads of a
 rolling counter); a round when the tracked round goes up; death; purchases by price, novelty-gated (1000 is
@@ -146,8 +164,9 @@ rise alone.
 - **A KL anchor to the BC policy**, `kl_coef * KL(pi || pi_BC)` over the action heads, decaying from 0.2 to
   0.02 -- VPT's recipe for fine-tuning a behavioural prior with RL without forgetting it. `kl_ref` on the
   dashboard is how far it has moved from BC.
-- **The prior sampled at its human's rates** (`--calibrate`, on by default). BC is trained with a focal,
-  class-weighted loss, which is right for balanced accuracy and wrong for sampling: it flattens every head.
+- **The prior sampled at its human's rates** (`--calibrate`, on by default). BC before 2026-11 was trained
+  with a focal, class-weighted loss (a plain cross-entropy checkpoint, the default since, needs no calibration
+  and gets none), which is right for balanced accuracy and wrong for sampling: it flattens every head.
   Where the person pressed a button on 5% of decisions, the focal-optimal policy says ~19%; it fires on ~25%
   where they fired on 12%, and sprints (which stops it shooting) on ~31% where they did on 20%. Through rl10-rl18
   every chain sampled that and was anchored to it. The flattening is exactly invertible from the probabilities

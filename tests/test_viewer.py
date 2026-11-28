@@ -231,3 +231,8 @@ def test_the_sound_is_the_instances_sink_monitor_and_dies_with_the_viewer():
 
 def test_the_viewer_command_says_so_only_when_the_agent_view_is_off():
     assert viewer_command(Screen(":61", 2560, 1440), agent_view=False).endswith("--fps 30 --no-agent-view")
+
+
+def test_the_viewer_command_says_so_only_when_the_choices_are_off():
+    assert "--no-choices" not in viewer_command(Screen(":61", 2560, 1440))
+    assert viewer_command(Screen(":61", 2560, 1440), choices=False).endswith("--fps 30 --no-choices")

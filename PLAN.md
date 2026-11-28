@@ -64,6 +64,13 @@ aside while someone is gaming.
 Still on its own branch (`~/Projects/zai-wt/actor-runtime`, early, not wired in): one inference process per PC so
 actors do not each load torch (~600 MB each). Not done at all: the BC data-loader speedups.
 
+November 2026: rl8-rl20 all stalled in round 1 (~1.05 rounds). Measured on 2026-11-10, BC is the
+bottleneck. On 1.13 h of demos its yaw, pitch, fire, sprint and button heads are no better than the
+majority label. The response so far: finer look bins (13 yaw / 9 pitch, a new SPEC_VERSION; the demos were
+re-labelled from their raw logs, `scripts/requantize.py`), plain cross-entropy BC, a 640×360 scene crop in
+every new recording, and `--skip-opening-s` to fast-forward round 1's empty opening on the fleet. What helps
+most is more recorded play, especially past round 1.
+
 ## Next
 
 1. Finish the per-PC inference process; speed up the BC data loader.

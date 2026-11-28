@@ -393,3 +393,43 @@ def test_an_end_that_is_not_a_death_does_not_look_for_the_scoreboard():
         if truncated:
             break
     assert truncated and not terminated and info["episode"]["end_kills"] is None
+
+
+def test_the_opening_is_fast_forwarded_for_its_wall_time_then_put_back_to_normal_speed():
+    config = EnvConfig(skip_opening_s=40.0, skip_timescale=4.0, skip_restore_maxfps=30)
+    env, game, dispatcher, typed, clock = make_env([500] * 4, config=config)
+    env.reset()
+    assert typed == ["sv_cheats 1;com_maxfps 0;timescale 4", "timescale 1", "com_maxfps 30"]
+    # 40 game-seconds at 4x: 10 s of wall time, less the 1 s stopping is expected to take -- which typing
+    # here does not (the fake console is instant), so this one comes in under and the next waits the full 10
+    assert env.skipped_s == pytest.approx(36.0) and env.t_start >= 100.0 + 9.0
+    game.points = [None, 500, 500, 500, 500]  # the next game: a fast_restart's reload, then a fresh 500
+    env.reset()
+    assert env.skipped_s == pytest.approx(40.0) and typed[-3:] == typed[:3]
+    assert not dispatcher.applied  # the policy plays no part in it
+    _, _, _, _, info = env.step(IDLE)
+    assert env.summary()["skipped_s"] == 40.0 and env.summary()["seconds"] < 1.0
+
+
+def test_no_skip_by_default_and_a_skip_the_console_refuses_is_dropped():
+    env, _, _, typed, _ = make_env([500] * 4)
+    env.reset()
+    assert typed == [] and env.skipped_s == 0.0
+    env, _, _, typed, _ = make_env([500] * 4, config=EnvConfig(skip_opening_s=40.0))
+    env.console = lambda command: (typed.append(command), False)[1]
+    env.reset()
+    assert len(typed) == 1 and env.skipped_s == 0.0  # the fast-forward never took, so nothing to undo
+
+
+def test_a_game_that_cannot_be_put_back_to_normal_speed_fails_the_reset():
+    env, _, _, typed, _ = make_env([500] * 4, config=EnvConfig(skip_opening_s=40.0, skip_restore_tries=3))
+    env.console = lambda command: (typed.append(command), command.startswith("sv_cheats"))[1]
+    with pytest.raises(ResetFailed):
+        env.reset()
+    assert typed[1:] == ["timescale 1"] * 3
+
+
+def test_semicolons_can_be_typed_into_the_console():
+    from zombiesai.realgame.xtest import CHAR_KEYS
+
+    assert CHAR_KEYS[";"] == ("semicolon", False)

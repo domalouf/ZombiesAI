@@ -1,5 +1,5 @@
 """Draw what the policy was thinking over a kept film (viz/overlay.py): its value estimate, how sure it was,
-what it pressed, and each points change.
+what it pressed, the choices it had (viz/choices.py: every head's distribution), and each points change.
 
     uv run python scripts/overlay.py runs/video/firsts/box.mp4
     uv run python scripts/overlay.py runs/rl9/best/best.mp4 --from 120 --to 180 --out best-2min.mp4

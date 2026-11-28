@@ -239,6 +239,7 @@ CHAR_KEYS.update({c.upper(): (c, True) for c in "abcdefghijklmnopqrstuvwxyz"})
 CHAR_KEYS.update({
     " ": ("space", False), "_": ("minus", True), "-": ("minus", False), ".": ("dot", False),
     "/": ("slash", False), "\n": ("enter", False), '"': ("apostrophe", True), "=": ("equal", False),
+    ";": ("semicolon", False),
 })
 
 

@@ -11,9 +11,10 @@ from zombiesai.viz.overlay import build_ass, film_size, render
 needs_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
 
 
-def frames(n=45):
+def frames(n=45, yaw=7):
+    """A film's notes. Yaw 7 is 14 degrees right in the bins of the films made before sidecars named theirs."""
     action = [0] * len(spec.ACTION_HEADS)
-    action[spec.FORWARD], action[spec.FIRE], action[spec.YAW] = 2, 1, 7  # forward, firing, turning right
+    action[spec.FORWARD], action[spec.FIRE], action[spec.YAW] = 2, 1, yaw  # forward, firing, turning right
     lines = [{"s": i / spec.DECISION_HZ, "v": i / 10, "sure": 0.5, "fire": 0.9, "a": action, "r": 0.0}
              for i in range(n)]
     lines[20].update(ev="gain", d=60)
@@ -31,6 +32,14 @@ def test_the_overlay_has_the_clock_the_keys_and_the_points_change():
     assert "+60" not in build_ass(header, frames(), 1280, 720, start=2.0, end=3.0)
 
 
+def test_a_films_turns_are_read_in_the_look_bins_it_was_made_with():
+    header = {"fps": 15, "look_bins": {"yaw": list(spec.YAW_BINS_DEG), "pitch": list(spec.PITCH_BINS_DEG)}}
+    ass = build_ass(header, frames(yaw=spec.YAW_BINS_DEG.index(0.5)), 1280, 720)
+    assert "\u2192 0.5\u00b0" in ass
+    # the same index in a film from before the fine bins was a turn of 14 degrees
+    assert "\u2192 14\u00b0" in build_ass({"fps": 15}, frames(yaw=7), 1280, 720)
+
+
 @needs_ffmpeg
 def test_the_overlay_is_burned_into_a_copy_of_the_film(tmp_path):
     film = tmp_path / "f.mp4"
@@ -42,3 +51,13 @@ def test_the_overlay_is_burned_into_a_copy_of_the_film(tmp_path):
     grab = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-ss", "1.5", "-i", str(out), "-frames:v", "1",
                            "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
     assert np.frombuffer(grab, np.uint8).std() > 5  # not the flat grey it was
+
+
+def test_the_choices_are_drawn_from_a_sidecar_that_kept_them_and_left_out_of_one_that_did_not():
+    lines = frames()[:3]
+    assert "CHOICES" not in build_ass({"fps": 15}, lines, 1280, 720)  # films from before `p`
+    probs = [[round(1 / n, 3)] * n for n in spec.ACTION_NVEC]
+    for line in lines:
+        line["p"] = probs
+    ass = build_ass({"fps": 15}, lines, 1280, 720)
+    assert ass.count("CHOICES") == 3 and "TURN" in ass and "grenade" in ass

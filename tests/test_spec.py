@@ -5,7 +5,7 @@ from zombiesai import spec
 
 # Changing anything hashed in spec.py must be a deliberate act: update this value in the same commit,
 # knowing that every checkpoint and episode recorded under the old version stops loading.
-GOLDEN_SPEC_VERSION = "bea67a6feccbf23a"
+GOLDEN_SPEC_VERSION = "85aeefb4e5a5a73e"
 
 
 def test_spec_version_is_pinned():
@@ -13,15 +13,15 @@ def test_spec_version_is_pinned():
 
 
 def test_space_shapes():
-    assert spec.ACTION_NVEC == (3, 3, 9, 5, 2, 2, 2, 6)
-    assert spec.ACT_ENC_DIM == 32
-    assert int(np.prod(spec.ACTION_NVEC)) == 19_440
+    assert spec.ACTION_NVEC == (3, 3, 13, 9, 2, 2, 2, 6)
+    assert spec.ACT_ENC_DIM == 40
+    assert int(np.prod(spec.ACTION_NVEC)) == 50_544
     assert spec.HUD_DIM == 16
     assert spec.STATE_DIM == 50
     state = spec.observation_space("state")
     assert state["state"].shape == (50,)
     assert state["hud"].shape == (16,)
-    assert state["prev_actions"].shape == (64,)
+    assert state["prev_actions"].shape == (80,)
     render = spec.observation_space("render")
     assert render["pixels"].shape == (72, 128, 3) and render["pixels"].dtype == np.uint8
     assert "state" not in render.spaces
@@ -34,7 +34,7 @@ def test_audio_is_an_opt_in_key():
 
 def test_neutral_action():
     assert spec.NEUTRAL_ACTION == tuple(spec.make_action().tolist())
-    assert spec.NEUTRAL_ACTION == (1, 1, 4, 2, 0, 0, 0, 0)
+    assert spec.NEUTRAL_ACTION == (1, 1, 6, 4, 0, 0, 0, 0)
 
 
 def test_compact_profile_round_trips():
@@ -59,7 +59,7 @@ def test_projection_keeps_buttons():
     )
 
 
-@pytest.mark.parametrize("bad", [(1, 1, 4, 2, 0, 0, 0), (1, 1, 9, 2, 0, 0, 0, 0), (1.0, 1, 4, 2, 0, 0, 0, 0)])
+@pytest.mark.parametrize("bad", [(1, 1, 6, 4, 0, 0, 0), (1, 1, 13, 4, 0, 0, 0, 0), (1.0, 1, 6, 4, 0, 0, 0, 0)])
 def test_invalid_actions_rejected(bad):
     with pytest.raises(ValueError):
         spec.action_tuple(np.array(bad))
@@ -105,7 +105,7 @@ def test_hud_raw_requires_every_field():
 def test_prev_actions_one_hot():
     a = spec.make_action(forward=1, yaw=-30, fire=1, button="use")
     enc = spec.encode_prev_actions([tuple(a.tolist()), spec.NEUTRAL_ACTION])
-    assert enc.shape == (64,)
+    assert enc.shape == (80,)
     assert enc.sum() == 2 * len(spec.ACTION_NVEC)
     first = enc[: spec.ACT_ENC_DIM]
     offsets = np.concatenate(([0], np.cumsum(spec.ACTION_NVEC)[:-1]))

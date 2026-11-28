@@ -95,7 +95,7 @@ def test_the_idm_labels_video_it_has_never_seen(idm_checkpoint, demos, tmp_path)
 def test_behavioural_cloning_produces_a_policy_that_plays(demos, tmp_path):
     config = bc.BCConfig(
         frame_stack=2, hidden=64, epochs=1, batch_size=16, max_batches_per_epoch=4,
-        val_fraction=0.34, device="cpu", seed=0,
+        val_fraction=0.34, device="cpu", seed=0, class_balance=0.999,  # weighted: the checkpoint keeps the weights
     )
     checkpoint = bc.train(demos, config, tmp_path / "bc")
     assert (tmp_path / "bc" / "config.json").exists() and (tmp_path / "bc" / "report.json").exists()

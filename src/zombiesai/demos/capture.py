@@ -59,6 +59,7 @@ class ScreenCapture:
         display: str | None = None,
         hud_regions: dict | None = None,
         hud_scale: float = 1.0,
+        hud_scales: dict[str, float] | None = None,
         bars: tuple[int, int, int, int] | None = None,
         video_height: int | None = None,
     ):
@@ -67,7 +68,8 @@ class ScreenCapture:
         self.region, self.fit, self.monitor, self.bars = region, fit, monitor, bars
         self.window, self.display = window, display
         # Full-resolution HUD crops, cut from the same grab as each policy frame (see demos/hud_crops.py).
-        self.hud_regions, self.hud_scale = hud_regions, hud_scale
+        # `hud_scales` gives a region a scale of its own (the whole scene, kept smaller: hud_crops.RECORD_SCALES).
+        self.hud_regions, self.hud_scale, self.hud_scales = hud_regions, hud_scale, hud_scales
         self.last_hud: dict[str, np.ndarray] | None = None
         # A watchable copy of each good grab, BGRX at most `video_height` tall, for filming the game (the run's
         # best game: rl/best_episode.py). None: not kept.
@@ -148,7 +150,8 @@ class ScreenCapture:
         if self.hud_regions:
             from zombiesai.demos.hud_crops import crop_regions
 
-            self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale, channels=fr.BGRX)
+            self.last_hud = crop_regions(frame, self.hud_regions, self.hud_scale, channels=fr.BGRX,
+                                         scales=self.hud_scales)
         if self.video_height:
             from zombiesai.rl.best_episode import video_frame
 
@@ -180,7 +183,8 @@ class ScreenCapture:
     def describe(self) -> dict:
         out = {"kind": "screen", "backend": self.backend, "region": self.region, "fit": self.fit, "box": self._box}
         if self.hud_regions:
-            out["hud"] = {"regions": {k: list(v) for k, v in self.hud_regions.items()}, "scale": self.hud_scale}
+            out["hud"] = {"regions": {k: list(v) for k, v in self.hud_regions.items()}, "scale": self.hud_scale,
+                          **({"scales": dict(self.hud_scales)} if self.hud_scales else {})}
         out["source"] = self._grabber.describe()
         return out
 

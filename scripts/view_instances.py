@@ -7,7 +7,9 @@
     uv run python scripts/view_instances.py 62 --no-audio --run runs/rl9
 
 Over each picture: what the agent sees (its 128x72 view), the Twitch overlay's numbers for the run training now
-(the newest `runs/*/episodes.jsonl`, or --run), and the HUD regions the reward reads with what it reads there.
+(the newest `runs/*/episodes.jsonl`, or --run), the HUD regions the reward reads with what it reads there, and
+the choices the policy had on the step it just played -- every turn, move, button and hold it could have chosen
+and how much it wanted each, the one it took picked out (--no-choices leaves them out).
 Watching one game plays its sound too (--audio/--no-audio to choose; a grid is silent unless asked).
 
 The viewers only read each instance's picture; closing them, or never opening them, changes nothing for the
@@ -47,6 +49,8 @@ def main() -> None:
                         help="at most this many frames a second per viewer (default: 30; 0: every frame)")
     parser.add_argument("--agent-view", action=argparse.BooleanOptionalAction, default=True,
                         help="inset what the agent sees -- the policy's 128x72 view -- in each (default: on)")
+    parser.add_argument("--choices", action=argparse.BooleanOptionalAction, default=True,
+                        help="draw the policy's choices on each step, live from its actor (default: on)")
     parser.add_argument("--run", type=Path, default=None,
                         help="the run whose numbers to show (default: the newest runs/*/episodes.jsonl)")
     parser.add_argument("--audio", action=argparse.BooleanOptionalAction, default=None,
@@ -68,7 +72,7 @@ def main() -> None:
     run_dir = args.run or newest_run()
     opened = show(screens, workspace=args.workspace, fps=args.fps, agent_view=args.agent_view,
                   run_dir=str(run_dir) if run_dir else None, sinks=fleet_sinks() if audio else None,
-                  focus=not args.stay)
+                  focus=not args.stay, choices=args.choices)
     print(f"watching {opened} of {', '.join(s.display for s in screens)} on workspace {args.workspace}")
 
 
