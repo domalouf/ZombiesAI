@@ -1,0 +1,37 @@
+{
+  "_about": "Gamepad -> virtual mouse and keyboard for recording demos (src/zombiesai/demos/gamepad.py). Buttons are the kernel's positional gamepad names (south = Xbox A / Cross, east = B / Circle, west = X / Square, north = Y / Triangle; xpad swaps north and west, check with `uv run python -m zombiesai.demos.gamepad --watch`). Values are the key names configs/waw_bindings.json uses. lt/rt work for analog and digital triggers; left_stick_* are the left stick past move.press.",
+  "rate_hz": 250,
+  "look": {
+    "deadzone": 0.12,
+    "exponent": 2.0,
+    "max_yaw_deg_s": 240,
+    "max_pitch_deg_s": 80,
+    "invert_pitch": false
+  },
+  "move": {"deadzone": 0.2, "press": 0.5, "release": 0.4},
+  "trigger": {"press": 0.35, "release": 0.25},
+  "axes": "auto",
+  "buttons": {
+    "left_stick_up": "w",
+    "left_stick_down": "s",
+    "left_stick_left": "a",
+    "left_stick_right": "d",
+    "rt": "mouse1",
+    "lt": "mouse2",
+    "l3": "shift",
+    "r3": "v",
+    "lb": "v",
+    "rb": "g",
+    "west": "r",
+    "east": "f",
+    "north": "1",
+    "south": "space",
+    "start": "escape",
+    "select": "tab",
+    "dpad_down": "f8"
+  },
+  "toggles": {
+    "l3": "left_stick_up"
+  },
+  "publish_hz": 60
+}

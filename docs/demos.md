@@ -34,6 +34,44 @@ over: in LAN mode the menu cannot start a co-op game, so the launcher binds `map
 (the console, `~`, takes it too). The game stays open when a recording ends. `uv run python
 scripts/desktop_game.py down` quits it.
 
+### The live overlay, and watching a session back with your inputs
+
+`record_waw.sh` and `record_lan.sh` put an overlay over the game while you record (`record_demo.py
+--overlay`; `ZOMBIESAI_OVERLAY=0` leaves it off). It is `scripts/record_overlay.py`, a GTK 4 layer-shell
+surface on the compositor's overlay layer. It sits above the fullscreen game, never takes focus, and lets
+every click through. It has two panels:
+
+- **Top centre, the recorder's state.** Waiting for the window, the countdown, then `REC 03:12 / 20:00
+  PLAYING`. While F8 has the session marked as not playing, a wide amber **NOT PLAYING, press F8 when you're
+  back in the game** banner stays up. A capture outage (the window not on screen) shows in red. At the end it
+  shows the saved clip's name for five seconds, then closes.
+- **Left, your inputs.** The keys around WASD, the mouse buttons and wheel, and a look meter showing which way
+  the mouse is turning and how fast, in degrees a second. A key bound to a control lights amber and is labelled
+  with that control. A key that is not a control (space, ctrl, c) lights grey: the game sees it, the labels do
+  not. With `--pad`, the gamepad's sticks, triggers and buttons appear under it.
+
+**It never reaches the training frames.** The recorder grabs the game's own XWayland window, and the overlay is
+a Wayland surface the X server never sees. A screen recorder such as OBS does see it. The recorder publishes its
+state over a Unix datagram socket (`viz/live_bus.py`, `$XDG_RUNTIME_DIR/zombiesai/record.sock`), which costs
+the decision loop one non-blocking send per step whether or not the overlay is open. The overlay reads the keys
+straight off the event devices, as the recorder does, so the display keeps up with your hand rather than with
+the 15 Hz decisions. It runs under the system Python (`/usr/bin/python3`, which has GTK 4 and
+gtk4-layer-shell; the venv has neither). To see it without recording:
+`/usr/bin/python3 scripts/record_overlay.py --demo`. Its log is `$XDG_RUNTIME_DIR/zombiesai/record_overlay.log`.
+
+To watch a recorded session back with the same input display burned in:
+
+```sh
+uv run python scripts/render_inputs.py data/demos/demo_0005                       # -> demo_0005/inputs.mp4
+uv run python scripts/render_inputs.py data/demos/demo_0005 --from 300 --to 360 --out fight.mp4
+```
+
+The picture is the clip's 640x360 scene crop, scaled to 1280x720. Clips from before the scene crop use the
+128x72 policy frames, blown up. The game's audio is included when it was recorded. Keys light at the input
+log's own timestamps, so a tap shorter than a decision still shows. The look meter shows each decision's
+mouse motion. The F8 not-playing stretches carry the same amber banner (`viz/input_video.py`). A 30 s
+stretch renders in about 2 s.
+
 ### What to play: one strategy, many situations
 
 Behavioural cloning learns the *average* of what you did in moments that look alike. If you sometimes go
@@ -379,3 +417,52 @@ A few failures and what they usually mean:
 - **The IDM is trained per-game, not per-project.** An IDM fit to your sensitivity and your bindings labels
   your footage. Someone else's video, at a different sensitivity, needs its own `counts_per_degree` at
   minimum — and, if the difference is large, its own IDM.
+
+## Recording with a gamepad
+
+`--pad` records with a controller instead of (or as well as) the mouse and keyboard. The pad does not go to
+the game: `demos/gamepad.py` turns it into a virtual mouse and keyboard (`zombiesai-pad-bridge`), and the
+recording logs exactly the counts and keys that device sent. The labels are therefore made the same way as
+a mouse demo's, through the same `--bindings` and `--counts-per-degree`: no stick model, no second
+calibration, no controller aim assist. The mouse and keyboard keep working beside it and are logged as usual.
+
+```sh
+uv run python -m zombiesai.demos.gamepad --watch         # which pad, and what each control is called
+scripts/record_lan.sh 20 "pad, training in the courtyard" --pad
+scripts/record_lan.sh 20 "pad" --pad /dev/input/event21 --pad-config configs/my_pad.json
+```
+
+Setup (once): the Hyprland flat-acceleration block for `zombiesai-pad-bridge`, and if the pad is a
+PlayStation or Switch one, hidraw kept away from the game (docs/linux.md, steps 4 and 4b).
+
+The default layout (`configs/pad_bindings.json`). Buttons are named by position: south is Xbox A /
+PlayStation Cross, and so on. The xpad driver swaps north and west, so on an Xbox pad check with `--watch` and
+swap the two lines if Y reloads.
+
+| Pad | Sends | Control |
+|---|---|---|
+| left stick | W / A / S / D past half tilt | forward, back, left, right |
+| right stick | mouse movement, up to 240°/s yaw and 80°/s pitch | look |
+| RT / LT | mouse1 / mouse2 | fire / aim |
+| L3 (click) | shift, held until you click again or stop pushing forward | sprint |
+| R3, LB | v | melee |
+| RB | g | grenade |
+| west (X / Square) | r | reload |
+| east (B / Circle) | f | use (buy, open, rebuild) |
+| north (Y / Triangle) | 1 | swap |
+| south (A / Cross) | space | jump (unlabelled: the policy cannot jump) |
+| start / select | escape / tab | pause / scoreboard (unlabelled) |
+| d-pad down | f8 | the mark key: not playing / playing again |
+
+Tuning, all in the JSON: `look.deadzone` (radial), `look.exponent` (2 is gentle near the centre for fine aim,
+1 is linear), `look.max_yaw_deg_s` and `look.max_pitch_deg_s` (real degrees a second at full tilt, whatever
+the in-game sensitivity), `look.invert_pitch`, the stick and trigger press/release thresholds, and `toggles`.
+Keep yaw under 450°/s and pitch under 90°/s: one decision at full tilt then still fits the widest look bin
+(30° and 6°). The recorder warns at the start if not. Every recording stamps the pad, the axes it used and the
+whole config into clip.json under `gamepad`, so a pad demo can always be told from a mouse one.
+
+The pad's live state (sticks, triggers, buttons, the keys it holds) goes to the live recording overlay
+(`--overlay`) on the record bus.
+
+What it does not do: the policy still turns in per-decision mouse bins, so a pad demo teaches the same kind of
+turns as a mouse one, only smoother and slower. Rumble is not forwarded, and the pad's own gyro is ignored.

@@ -22,7 +22,9 @@ def test_the_desktop_game_is_the_fleets_client_and_settings_without_its_frame_ca
     assert "com_maxfps" not in config.dvars and config.dvars["cl_mouseAccel"] == "0"
     # its own sink, which a fleet shutdown (session.remove_sinks: zombiesai_*) leaves alone
     assert config.extra_env["PULSE_SINK"] == "zai_desktop" and not config.audio_sinks
-    assert desktop.desktop_config(tmp_path / "no-fleet", root=tmp_path / "d", sink=None).extra_env == {}
+    # No sink: nothing but keeping the game off a gamepad, which the recorder's bridge plays as mouse and keys.
+    assert desktop.desktop_config(tmp_path / "no-fleet", root=tmp_path / "d", sink=None).extra_env == {
+        "PROTON_ENABLE_HIDRAW": "0", "SDL_JOYSTICK_HIDAPI": "0"}
 
 
 def test_it_launches_offline_on_your_display_with_a_key_that_starts_nacht(tmp_path):

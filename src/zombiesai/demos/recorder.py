@@ -86,8 +86,13 @@ def record(
     audio=None,
     annotations: dict | None = None,
     on_mark=None,
+    on_step=None,
 ) -> Path:
     """Record one demo into `out_dir`. `stop()` may return True to end early (a hotkey, a finished game).
+
+    `on_step(status)` is called after every step with where the recording is (`step`, `elapsed_s`, `playing`,
+    `stale`, `overruns`, `stale_steps`), for the live overlay; like `on_mark` it runs inside the loop and must
+    not block.
 
     `audio` is an optional `demos.audio.AudioRecorder`; without it the clip is exactly what it always was.
     `annotations` are extra top-level clip.json entries (the game's settings), written before the first step
@@ -200,6 +205,9 @@ def record(
             resumed = outage_run > 0 and not stale
             outage_run = outage_run + 1 if stale else 0
             pending, pending_hud, pending_stale = frame, getattr(frame_source, "last_hud", None), stale
+            if on_step is not None:
+                on_step({"step": k, "elapsed_s": k * dt, "playing": marker.playing, "stale": stale,
+                         "overruns": int(overruns), "stale_steps": int(stale_steps)})
             if progress_every and k % progress_every == 0:
                 print(f"  {k} decisions ({k * dt:.0f}s), {overruns} overruns, {stale_steps} stale", flush=True)
             if outage_run and outage_run * dt >= config.max_outage_seconds:

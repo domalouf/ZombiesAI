@@ -3,6 +3,7 @@
 #
 #   scripts/record_lan.sh 20 "camping the help room, bad positioning after round 8"
 #   scripts/record_lan.sh 2 "smoke test" --no-scene      # anything after the notes goes to record_demo.py
+#   ZOMBIESAI_PAD=auto scripts/record_lan.sh 20 "pad session"   # with a gamepad (see record_waw.sh)
 #
 # Starts the game if it is not running (scripts/desktop_game.py up), then records it as record_waw.sh does.
 # At the main menu press F9 to start Nacht, and again after each game over. F8 marks menus, pauses, deaths
@@ -14,7 +15,7 @@
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 minutes=$1

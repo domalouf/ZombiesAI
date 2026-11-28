@@ -51,6 +51,11 @@ def desktop_config(fleet_root: str | Path = "runs/instances", *, root: str | Pat
     env = dict(base.extra_env)
     if sink:
         env["PULSE_SINK"] = sink
+    # A gamepad is played through demos/gamepad.py's bridge, which grabs its event node and turns it into mouse
+    # and keys. Proton/SDL could still read it through hidraw and turn the view a second time, so the game is
+    # told not to: it should never see a pad of its own. (A fleet config can still override either.)
+    env.setdefault("PROTON_ENABLE_HIDRAW", "0")
+    env.setdefault("SDL_JOYSTICK_HIDAPI", "0")
     return replace(base, n=1, root=str(root), width=width or base.width, height=height or base.height,
                    client="plutonium", offline=True, audio_sinks=False, dvars=dict(DESKTOP_DVARS),
                    extra_env=env)

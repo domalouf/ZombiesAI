@@ -71,6 +71,42 @@ device {
 Do the same for your real mouse while recording demos, and turn off in-game mouse smoothing and
 acceleration. The agent and the human have to live in the same units.
 
+Recording with a gamepad (`record_demo.py --pad`, docs/demos.md) adds a second virtual device,
+`zombiesai-pad-bridge`, which the pad drives. It needs the same block, or its stick turns are accelerated
+on the way to the game while the recording logs them unaccelerated:
+
+```
+device {
+    name = zombiesai-pad-bridge
+    accel_profile = flat
+    sensitivity = 0
+}
+```
+
+It is a separate device from `zombiesai-virtual-input` on purpose: the input service owns that one for the
+whole session and play runs look it up by name, and the bridge's comes and goes with each recording.
+
+### 4b. A gamepad (optional, for recording demos with one)
+
+Nothing to install: a pad is read off its event node like the mouse (step 2 covers the permission), and
+`uv run python -m zombiesai.demos.gamepad --watch` lists the pads found and prints each control's name as
+you press it. The bridge **grabs** the pad (`EVIOCGRAB`) while it records, so the game cannot read it too
+and turn the view twice. A grab only covers the evdev node, though:
+
+- **hidraw.** Wine/Proton (through SDL) can open a DualShock 4, a DualSense or a Switch Pro pad through
+  `/dev/hidraw*` instead, which a grab does not stop. If the view moves on its own while you aim, or the
+  game shows controller prompts, launch the game with `PROTON_ENABLE_HIDRAW=0` and
+  `SDL_JOYSTICK_HIDAPI=0` in its environment, or keep the pad unreadable for your user except through its
+  event node.
+- **Steam Input.** Steam running in the background grabs pads itself (and then the bridge's grab fails with a
+  clear message): quit Steam, or turn Steam Input off for that pad.
+- **The game's own pad support.** Whatever controller support the game or Plutonium has, it should see no
+  pad at all: with the pad grabbed (and hidraw off) Wine finds none, so no native stick turning and no
+  controller aim assist. If the game shows controller button prompts, it is still reading the pad.
+
+Bluetooth pads go to sleep: one that drops mid-recording costs only itself -- every key the bridge held is
+released, the mouse and keyboard keep recording, and the pad is picked up again when it reconnects.
+
 ### 5. The game
 
 Run World at War through Proton. Solo Nazi Zombies is the good case; multiplayer is not what this needs.
@@ -277,3 +313,5 @@ cheaper exact step is to keep MIT-SHM but grab only what is read -- it is alread
 | S4 R² below 0.98 | in-game mouse smoothing or acceleration is on, or libinput is still accelerating the virtual device |
 | clean shutdown leaves keys held | something bypassed `ActionDispatcher.release_all()`; it is also what the watchdog must call first |
 | `PermissionError` on `/dev/input/event*` or `/dev/uinput` | steps 2 and 3 above, and log out and back in for the group to take effect |
+| `--pad: cannot grab` | Steam (or another mapper) holds the pad: quit it or turn Steam Input off for the pad |
+| with `--pad`, the view also moves by itself / doubles | the game reads the pad through hidraw past the grab: step 4b |
