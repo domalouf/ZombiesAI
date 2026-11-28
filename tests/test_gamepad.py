@@ -416,3 +416,55 @@ def test_a_real_uinput_pad_is_grabbed_read_and_bridged():
         if fd is not None:
             fcntl.ioctl(fd, UI_DEV_DESTROY)
             os.close(fd)
+
+
+# ------------------------------------------------------------------------------------------------ hiding the pad
+
+
+def a_dualsense_in_sysfs(root: Path) -> gp.PadInfo:
+    """A DualSense laid out as sysfs has it: one HID device with a hidraw node and four input devices (pad,
+    motion sensors, touchpad, headset jack), each reached from /sys/class/input/eventN/device."""
+    hid = root / "devices/usb1/1-2/1-2:1.3/0003:054C:0CE6.0008"
+    (hid / "hidraw/hidraw7").mkdir(parents=True)
+    nodes = {"input46": ["event24", "js1"], "input47": ["event25", "js2"], "input48": ["event26", "mouse2"],
+             "input49": ["event27"]}
+    (root / "class/input").mkdir(parents=True)
+    for name, children in nodes.items():
+        input_dir = hid / "input" / name
+        (input_dir / "power").mkdir(parents=True)
+        (input_dir / "device").symlink_to(hid)
+        for child in children:
+            (input_dir / child).mkdir()
+            (root / "class/input" / child).mkdir()
+            (root / "class/input" / child / "device").symlink_to(input_dir)
+    return gp.PadInfo("/dev/input/event24", "DualSense", frozenset({0, 1}), frozenset({gp.BTN_SOUTH}))
+
+
+def test_every_node_of_the_pads_device_is_hidden_not_only_the_grabbed_one(tmp_path):
+    pad = a_dualsense_in_sysfs(tmp_path)
+    assert gp.pad_nodes([pad], sys_root=tmp_path) == [
+        "/dev/hidraw7", "/dev/input/event24", "/dev/input/event25", "/dev/input/event26", "/dev/input/event27",
+        "/dev/input/js1", "/dev/input/js2", "/dev/input/mouse2"]
+    # a pad sysfs no longer has (unplugged since it was listed) hides nothing, and breaks nothing
+    gone = gp.PadInfo("/dev/input/event99", "gone", frozenset(), frozenset())
+    assert gp.pad_nodes([gone], sys_root=tmp_path) == []
+
+
+def a_process(proc: Path, pid: int, comm: str, argv0: str, *held: str) -> None:
+    d = proc / str(pid)
+    (d / "fd").mkdir(parents=True)
+    (d / "comm").write_text(comm + "\n")
+    (d / "cmdline").write_bytes(argv0.encode() + b"\0--flag\0")
+    for i, target in enumerate(held):
+        (d / "fd" / str(3 + i)).symlink_to(target)
+
+
+def test_only_wine_holding_a_pad_node_counts_as_the_game_reading_the_pad(tmp_path):
+    proc = tmp_path / "proc"
+    # /dev/null stands in for the pad's node: what matters is the device number behind each fd
+    a_process(proc, 100, "winedevice.exe", "C:\\windows\\system32\\winedevice.exe", "/dev/null")
+    a_process(proc, 200, "steam", "/usr/lib/steam/steam", "/dev/null")  # Steam keeps a pad's hidraw open
+    a_process(proc, 300, "plutonium-boots", "S:\\x\\plutonium-bootstrapper-win32.exe", "/dev/zero")
+    (proc / "self").mkdir()
+    assert gp.game_holders(["/dev/null"], proc=proc) == [(100, "winedevice.exe", "/dev/null")]
+    assert gp.game_holders(["/dev/does-not-exist"], proc=proc) == []

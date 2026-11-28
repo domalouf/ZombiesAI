@@ -28,10 +28,12 @@ Nothing here touches the desktop's own X server, your mouse, or your keyboard.
 
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
@@ -252,13 +254,40 @@ def prepare_plutonium(config: FleetConfig, spec: InstanceSpec, *, say=print) -> 
     return target
 
 
-def offline_wrapper() -> list[str]:
+def offline_wrapper(mask: Sequence[str] = ()) -> list[str]:
     """A command prefix that runs the rest with loopback and nothing else. Two user namespaces: the outer maps
     us to root just long enough to bring `lo` up, the inner maps us back to our own uid, so Wine and the
-    prefix see the same owner as always."""
-    return ["unshare", "--user", "--map-root-user", "--net", "sh", "-c",
-            f'ip link set lo up && exec unshare --user --map-user={os.getuid()} --map-group={os.getgid()} -- "$@"',
+    prefix see the same owner as always.
+
+    `mask`: device nodes the game must not open -- a gamepad's (`demos.gamepad.pad_nodes`), which the
+    recorder's bridge plays as mouse and keys and which Proton would otherwise read too, through hidraw, past
+    the bridge's grab. The outer namespace then gets a mount namespace of its own and binds /dev/null over
+    each, so to the game they are /dev/null: they open, but no HID or evdev ioctl works, and Wine and SDL pass
+    them over. Made by the outer namespace's root, they are locked for the inner one, which cannot unmount
+    them; pressure-vessel's own /dev is a recursive bind of this one and keeps them. Nothing changes outside.
+    A node that has gone (the pad unplugged meanwhile) is skipped, and one that cannot be masked is reported
+    in game.log rather than keeping the game from starting."""
+    hide = "".join(
+        f'{{ [ ! -e {shlex.quote(node)} ] || mount --bind /dev/null {shlex.quote(node)} || '
+        f'echo "zombiesai: could not hide {node} from the game" >&2; }}; '
+        for node in mask
+    )
+    return ["unshare", "--user", "--map-root-user", "--net", *(["--mount"] if mask else []), "sh", "-c",
+            f'{hide}ip link set lo up && exec unshare --user --map-user={os.getuid()} --map-group={os.getgid()} -- "$@"',
             "sh"]
+
+
+
+def pads_to_hide() -> list[str]:
+    """The device nodes of every gamepad plugged in now, for `offline_wrapper(mask=...)`: no game of ours should
+    read a pad itself (the recorder's bridge plays one as mouse and keys, and a fleet game must take input from
+    its policy alone). Empty when there is no pad, or nothing can be listed."""
+    from zombiesai.demos.gamepad import pad_nodes
+
+    try:
+        return pad_nodes()
+    except OSError:
+        return []
 
 
 def game_config(fleet_root: str | Path) -> Path | None:
@@ -577,7 +606,7 @@ class Instance:
             sync_plutonium_profile(self.spec.plutonium, source=game_config(self.config.root), say=self.say)
         command, cwd = game_command(self.config, self.spec)
         if self.config.offline:
-            command = offline_wrapper() + command
+            command = offline_wrapper(mask=pads_to_hide()) + command
         self.spec.dir.mkdir(parents=True, exist_ok=True)
         log = open(self.spec.dir / "game.log", "ab")
         log.write(f"\n=== {time.ctime()} launching: {' '.join(command)}\n".encode())

@@ -373,6 +373,8 @@ def main() -> None:
                 f"gave up after {args.wait_timeout:.0f}s: no capturable window titled {args.window!r}. "
                 "It has to be on the visible workspace and wholly on screen."
             )
+    if pad is not None and (warning := pad.game_warning()):
+        print(f"  WARNING {warning}")
     out = next_dir(args.out, "demo")
     print(f"recording to {out} -- play; ctrl-c to stop early")
     if mark_key:

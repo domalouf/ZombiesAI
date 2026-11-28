@@ -93,15 +93,18 @@ Nothing to install: a pad is read off its event node like the mouse (step 2 cove
 you press it. The bridge **grabs** the pad (`EVIOCGRAB`) while it records, so the game cannot read it too
 and turn the view twice. A grab only covers the evdev node, though:
 
-- **hidraw.** Wine/Proton (through SDL) can open a DualShock 4, a DualSense or a Switch Pro pad through
-  `/dev/hidraw*` instead, which a grab does not stop. If the view moves on its own while you aim, or the
-  game shows controller prompts, launch the game with `PROTON_ENABLE_HIDRAW=0` and
-  `SDL_JOYSTICK_HIDAPI=0` in its environment, or keep the pad unreadable for your user except through its
-  event node.
+- **hidraw.** Wine/Proton can open a DualShock 4, a DualSense or a Switch Pro pad through `/dev/hidraw*`
+  instead, which a grab does not stop -- and `PROTON_ENABLE_HIDRAW=0` with `SDL_JOYSTICK_HIDAPI=0` did not
+  stop it either (Proton's winebus held a DualSense's hidraw with both set). So `desktop_game.py` (and the
+  fleet) start the game with **every node of every pad masked**: in the game's namespace the pad's hidraw,
+  event, js and mouse nodes are bound to /dev/null (`gamepad.pad_nodes`, `instances.offline_wrapper`), and
+  the launcher prints which. Only pads plugged in *before* the game starts are hidden: plug the pad in
+  first. If one comes later, the recorder warns when it starts (`WARNING the game can read the pad
+  itself...`) -- relaunch the game.
 - **Steam Input.** Steam running in the background grabs pads itself (and then the bridge's grab fails with a
   clear message): quit Steam, or turn Steam Input off for that pad.
 - **The game's own pad support.** Whatever controller support the game or Plutonium has, it should see no
-  pad at all: with the pad grabbed (and hidraw off) Wine finds none, so no native stick turning and no
+  pad at all: with the pad grabbed and its nodes masked Wine finds none, so no native stick turning and no
   controller aim assist. If the game shows controller button prompts, it is still reading the pad.
 
 Bluetooth pads go to sleep: one that drops mid-recording costs only itself -- every key the bridge held is
@@ -314,4 +317,4 @@ cheaper exact step is to keep MIT-SHM but grab only what is read -- it is alread
 | clean shutdown leaves keys held | something bypassed `ActionDispatcher.release_all()`; it is also what the watchdog must call first |
 | `PermissionError` on `/dev/input/event*` or `/dev/uinput` | steps 2 and 3 above, and log out and back in for the group to take effect |
 | `--pad: cannot grab` | Steam (or another mapper) holds the pad: quit it or turn Steam Input off for the pad |
-| with `--pad`, the view also moves by itself / doubles | the game reads the pad through hidraw past the grab: step 4b |
+| with `--pad`, the view also moves by itself / doubles | the game reads the pad past the grab, usually because it was plugged in after the game started: relaunch the game with the pad in (step 4b) |
