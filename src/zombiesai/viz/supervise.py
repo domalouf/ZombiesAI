@@ -22,6 +22,12 @@ The machine itself -- CPU, memory, GPU, temperatures, disks, network and the bus
 them -- is sampled every 2 s for as long as the server runs (viz/system.py), so the last half hour is on the page
 the moment it opens.
 
+It also serves the native dashboard app (app/, `zombies`): recording (`/api/record`), the demo library
+(`/api/demos`), BC training (`/api/bc`), saved presets (`/api/presets`), the desktop game (`/api/desktop`), a light
+summary of every run (`/api/summary`) and the events worth a notification (`/api/events`), all in viz/control.py,
+whose docstring lists every endpoint. Its watch thread notices runs ending, recordings saved and jobs done, and
+sends each as a desktop notification whether or not the app is open.
+
 It listens on 127.0.0.1 only, answers only requests addressed to it by name (no DNS rebinding), and takes
 commands only with an `X-Supervise` header, which no other page can send without a preflight it would refuse.
 """
@@ -627,6 +633,11 @@ class Supervisor:
         except (OSError, ValueError):
             self.deadlines = {}
         threading.Thread(target=self._janitor, daemon=True).start()
+        from zombiesai.viz.control import Control
+
+        # The native app's endpoints (viz/control.py): recording, demos, BC, presets, events. Its watch thread is
+        # started by serve(), so a Supervisor made in a test watches nothing.
+        self.control = Control(self)
 
     # -- runs
     def payload(self) -> dict:
@@ -927,6 +938,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(s.machine())
         if path == "/api/fleet":
             return self._json(s.fleets())
+        if path == "/api/summary":
+            return self._json(s.control.summary())
+        if path == "/api/record":
+            return self._json(s.control.record_payload())
+        if path == "/api/demos":
+            return self._json(s.control.demos_payload())
+        if path == "/api/bc":
+            return self._json(s.control.bc_payload())
+        if path == "/api/presets":
+            return self._json({"presets": s.control.presets.list()})
+        if path == "/api/events":  # ?since=<seq>: only what the app has not seen
+            since = re.fullmatch(r"since=(\d+)", query)
+            return self._json(s.control.events.since(int(since[1]) if since else 0))
         if m := re.fullmatch(r"/thumb/(\d+)\.png", path):
             try:
                 return self._send((s.state_dir / f"{m[1]}.png").read_bytes(), "image/png")
@@ -969,6 +993,11 @@ class Handler(BaseHTTPRequestHandler):
             result = s.start(str(body.get("tree", "")), str(body.get("init", "")), actors,
                              str(body.get("name", "")).strip(), str(body.get("extra", "")), settings=settings,
                              env=str(body.get("env", "real")), stop_after_min=stop_after_min)
+            if result.get("ok"):
+                try:
+                    s.control.note_launch(str(body.get("tree", "")), result["run"], body)
+                except OSError:
+                    pass  # the run started; only the note of how it was started is lost
             return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
         if self.path == "/api/fleet":
             try:
@@ -984,12 +1013,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "pid must be a number"}, HTTPStatus.BAD_REQUEST)
             result = s.stop(pid, force=bool(body.get("force")))
             return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
+        control = {
+            "/api/record": lambda: s.control.record(body),
+            "/api/record/stop": lambda: s.control.stop_recording(),
+            "/api/desktop": lambda: s.control.desktop(str(body.get("action", ""))),
+            "/api/demos/render": lambda: s.control.render(str(body.get("name", ""))),
+            "/api/bc": lambda: s.control.start_bc(body, s.live()["trainers"]),
+            "/api/presets": lambda: s.control.presets.save(str(body.get("name", "")), str(body.get("kind", "")),
+                                                           body.get("request")),
+            "/api/presets/delete": lambda: s.control.presets.delete(str(body.get("name", ""))),
+        }.get(self.path)
+        if control is not None:
+            result = control()
+            return self._json(result, HTTPStatus.OK if result.get("ok") else HTTPStatus.CONFLICT)
         self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
 def serve(repo: Path, port: int, state_dir: Path, *, idle_s: float = 20.0, ready=None) -> None:
     system = SystemSampler().start()
     supervisor = Supervisor(repo, state_dir, idle_s=idle_s, system=system)
+    supervisor.control.start()
     handler = type("BoundHandler", (Handler,), {"supervisor": supervisor, "port": port})
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     if ready:

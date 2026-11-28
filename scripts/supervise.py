@@ -11,6 +11,11 @@ It reads runs/ in the main checkout and every worktree, the trainers' processes 
 servers. It changes things only when you press a button: the viewer windows; a new run (scripts/train_rl.py in
 the checkout you pick, as a process of its own that outlives the dashboard); and stopping one (SIGINT, as
 Ctrl-C: its actors stop and it writes its checkpoint).
+
+The same server is the backend of the native dashboard app (app/, `zombies`), which adds recording a demo, the
+demo library and its input videos, training BC, saved run presets and the desktop game; viz/control.py lists every
+endpoint. While it runs it also sends a desktop notification when a run finishes, stops or crashes, a recording
+is saved, or a render or the game's start finishes.
 """
 
 import argparse
