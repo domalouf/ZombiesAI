@@ -34,6 +34,11 @@ Drawn over the picture by mpv, through its IPC socket (`Overlay`), not into it:
   is told from a hit, and why the count is a lower bound).
 - **what the reward reads**: the HUD regions the env crops for its reward -- points and round -- outlined,
   and what the HUD parser reads in them right now. The policy never sees these crops; the reward does.
+- **the choices it had** (`--no-choices` leaves them out), on the right under the inset: every head's whole
+  distribution on the step it just played, with the option it took picked out (viz/choices.py). The actor
+  playing this display publishes each step on its brain feed (viz/live_bus.py, `brain-60.sock` for :60) and
+  the viewer draws the newest; an actor with no viewer listening skips building the message altogether. Over
+  a second without one (a game loading, the learner restarting) and the panel gives way to "policy not acting".
 
 **Sound** (`--sink`): the instance's own PulseAudio null sink, the one the agent hears, looped to your default
 output by `pw-loopback` for as long as the viewer is open.
@@ -131,12 +136,14 @@ def grid(n: int, area: Box, aspect: float, gap: int = GAP) -> list[Box]:
 
 
 def viewer_command(screen: Screen, fps: float = 30, agent_view: bool = True, run_dir: str | None = None,
-                   sink: str | None = None) -> str:
+                   sink: str | None = None, choices: bool = True) -> str:
     """What Hyprland runs for one viewer: this module, with the venv's own Python, so no `uv` is needed."""
     command = (f"{sys.executable} -m zombiesai.realgame.viewer --watch {screen.display} --title {screen.title} "
                f"--fps {fps:g}")
     if not agent_view:
         command += " --no-agent-view"
+    if not choices:
+        command += " --no-choices"
     if run_dir:
         command += f" --run {Path(run_dir).resolve()}"
     if sink:
@@ -146,7 +153,7 @@ def viewer_command(screen: Screen, fps: float = 30, agent_view: bool = True, run
 
 def show(screens: list[Screen], *, workspace: str = "9", fps: float = 30, agent_view: bool = True,
          run_dir: str | None = None, sinks: dict[str, str] | None = None, focus: bool = True,
-         run=subprocess.run, say=print) -> int:
+         choices: bool = True, run=subprocess.run, say=print) -> int:
     """Lay out a viewer for every screen on `workspace`, then (if `focus`) switch there. Any viewers already
     open are closed first, so rerunning after more instances come up lays them all out afresh. Returns how many
     Hyprland launched."""
@@ -157,7 +164,7 @@ def show(screens: list[Screen], *, workspace: str = "9", fps: float = 30, agent_
     opened = 0
     for screen, box in zip(screens, boxes):
         rules = f"workspace {workspace} silent; float; size {box.w} {box.h}; move {box.x} {box.y}"
-        command = viewer_command(screen, fps, agent_view, run_dir, (sinks or {}).get(screen.display))
+        command = viewer_command(screen, fps, agent_view, run_dir, (sinks or {}).get(screen.display), choices)
         if hyprland_exec(command, rules, run=run):
             opened += 1
         else:
@@ -378,6 +385,55 @@ def inset_label(inset: "AgentInset", height: int) -> list[str]:
                   f"what the agent sees \u00b7 {fr.FRAME_W}\u00d7{fr.FRAME_H}", bold=True)]
 
 
+BRAIN_MAX_AGE_S = 1.0  # a brain message older than this is not the step on screen: the policy is not acting
+
+
+def choices_marks(message: dict | None, width: int, height: int, top: float) -> list[str]:
+    """The policy's choices on its latest step (viz/choices.py), right-aligned with the inset and below `top`,
+    captioned with which policy and game they are from; a dim "policy not acting" without a recent message."""
+    from zombiesai.viz.choices import caption, choices_panel, panel_size
+
+    u = height / 720
+    cw, _ = panel_size(u)
+    x, y = width - AgentInset.MARGIN - cw, top + 26 * u
+    idle = [_text(width - AgentInset.MARGIN, y - 6 * u, 3, 14 * u, CHALK_DIM, "policy not acting")]
+    if message is None:
+        return idle
+    panel = choices_panel(message.get("p"), message.get("a"), x, y, u, message.get("look_bins"))
+    if not panel:
+        return idle
+    about = [f"policy v{message['version']}" if message.get("version") is not None else "policy",
+             f"game {message['episode']}" if message.get("episode") is not None else None,
+             f"actor {message['actor']}" if message.get("actor") is not None else None]
+    return [caption(" \u00b7 ".join(a for a in about if a), x, y - 6 * u, u, CHALK)] + panel
+
+
+class BrainFeed:
+    """The brain feed of the actor playing `display` (viz/live_bus.py), bound for as long as the viewer runs.
+    A viewer that cannot bind it (another viewer has it) draws no choices rather than failing."""
+
+    def __init__(self, display: str):
+        from zombiesai.viz.live_bus import Subscriber, brain_bus
+
+        try:
+            self.sub = Subscriber(brain_bus(display))
+        except OSError:
+            self.sub = None
+
+    def latest(self) -> dict | None:
+        if self.sub is None:
+            return None
+        now = time.monotonic()
+        self.sub.poll(now)
+        return self.sub.get("brain", BRAIN_MAX_AGE_S, now)
+
+    def close(self) -> None:
+        """Let go of the socket (only removing it if no viewer opened in this one's place has rebound it)."""
+        if self.sub is not None:
+            self.sub.close()
+            self.sub = None
+
+
 class HudView:
     """The HUD crops the env's capture takes for the reward (realgame/instances.py: `Instance.capture`), cut and
     parsed the same way, from the frame the viewer shows."""
@@ -522,7 +578,7 @@ class DamageFeed:
 
 
 def watch(display: str, title: str, fps: float = 30, agent_view: bool = True, run_dir: str | None = None,
-          sink: str | None = None) -> None:
+          sink: str | None = None, choices: bool = True) -> None:
     """Pipe whole frames of `display`, at most `fps` a second, to an mpv window until either side goes away,
     with the overlay drawn over them and, with `sink`, the game's sound."""
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))  # `close()` sends it: run the cleanup below
@@ -539,13 +595,18 @@ def watch(display: str, title: str, fps: float = 30, agent_view: bool = True, ru
     sound = (subprocess.Popen(loopback_command(sink, title), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                               preexec_fn=_die_with_parent) if sink else None)
     static = inset_label(inset, feed.height) if inset is not None else []
+    brain = BrainFeed(display) if choices else None
+    # Under the inset's label when there is one, else level with the stats panel.
+    choices_top = inset.bottom + 40 * feed.height / 1080 if inset is not None else 28 * feed.height / 1080
 
     def frame() -> memoryview:
         grabbed = feed.grabber.grab_bgrx()
         reading = hud.read(grabbed)  # before the inset is drawn into it
         stats.poll(time.monotonic())
+        drawn = (choices_marks(brain.latest(), feed.width, feed.height, choices_top)
+                 if brain is not None else [])
         overlay.show(stats_panel(stats.stats, stats.name, stats.live, feed.height)
-                     + hud_marks(hud.boxes, reading, feed.height) + static)
+                     + hud_marks(hud.boxes, reading, feed.height) + static + drawn)
         return np.ascontiguousarray(inset.draw(grabbed) if inset is not None else grabbed).data
 
     try:
@@ -564,6 +625,8 @@ def watch(display: str, title: str, fps: float = 30, agent_view: bool = True, ru
             if child is not None and child.poll() is None:
                 child.terminate()
         ipc.unlink(missing_ok=True)
+        if brain is not None:
+            brain.close()
 
 
 def main() -> None:
@@ -575,8 +638,11 @@ def main() -> None:
                         help="inset the policy's 128x72 view of each frame (default: on)")
     parser.add_argument("--run", default=None, help="a run directory, for the stream's numbers")
     parser.add_argument("--sink", default=None, help="the instance's audio sink, to play its sound")
+    parser.add_argument("--choices", action=argparse.BooleanOptionalAction, default=True,
+                        help="draw the policy's choices on each step, from its actor's brain feed (default: on)")
     args = parser.parse_args()
-    watch(args.watch, args.title or f"{TITLE_PREFIX}{args.watch}", args.fps, args.agent_view, args.run, args.sink)
+    watch(args.watch, args.title or f"{TITLE_PREFIX}{args.watch}", args.fps, args.agent_view, args.run, args.sink,
+          args.choices)
 
 
 if __name__ == "__main__":

@@ -51,3 +51,13 @@ def test_the_overlay_is_burned_into_a_copy_of_the_film(tmp_path):
     grab = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-ss", "1.5", "-i", str(out), "-frames:v", "1",
                            "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
     assert np.frombuffer(grab, np.uint8).std() > 5  # not the flat grey it was
+
+
+def test_the_choices_are_drawn_from_a_sidecar_that_kept_them_and_left_out_of_one_that_did_not():
+    lines = frames()[:3]
+    assert "CHOICES" not in build_ass({"fps": 15}, lines, 1280, 720)  # films from before `p`
+    probs = [[round(1 / n, 3)] * n for n in spec.ACTION_NVEC]
+    for line in lines:
+        line["p"] = probs
+    ass = build_ass({"fps": 15}, lines, 1280, 720)
+    assert ass.count("CHOICES") == 3 and "TURN" in ass and "grenade" in ass

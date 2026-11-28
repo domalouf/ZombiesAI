@@ -10,6 +10,8 @@ and burns it into a copy of the film with ffmpeg's libass, so nothing here touch
   the policy was of its action, and how much it wanted the trigger.
 * **bottom right** -- what it pressed: the movement keys lit, the turn it chose, and fire / aim / sprint and
   the one button.
+* **right, above the keys** -- the choices it had (viz/choices.py): every head's whole distribution, from the
+  sidecar's `p`, with the option it took picked out in each. Films from before sidecars kept `p` have no panel.
 * **centre** -- each settled points change, as the reward read it, rising and fading: "+60", "-950".
 
 The value's scale is the film's own (its 2nd to 98th percentile), so the curve uses the panel's height; the
@@ -24,6 +26,7 @@ import numpy as np
 
 from zombiesai import spec
 from zombiesai.realgame.viewer import AMBER, CHALK, CHALK_DIM, GOOD, SANGUINE, _ass, _rect, _text
+from zombiesai.viz.choices import choices_panel, panel_size
 
 HISTORY_S = 6.0  # how much of the value curve the panel shows
 POPUP_S = 1.2  # how long a points change stays up
@@ -152,6 +155,8 @@ def build_ass(header: dict, lines: list[dict], width: int, height: int, start: f
     px, py, pw, ph = 24 * u, height - 190 * u, 330 * u, 166 * u  # the thinking panel
     key = 40 * u
     kx, ky = width - 24 * u - 0.3 * key - KEYS_W * key, height - 24 * u - 0.3 * key - 2.1 * key  # the keys
+    cw, ch = panel_size(u)  # the choices, right-aligned with the keys' backing and just above it
+    cx, cy = width - 24 * u - cw, ky - 0.3 * key - 12 * u - ch
     for i, line in enumerate(frames):
         t0 = line["s"]
         t1 = frames[i + 1]["s"] if i + 1 < len(frames) else t0 + 1 / fps
@@ -174,6 +179,9 @@ def build_ass(header: dict, lines: list[dict], width: int, height: int, start: f
             parts += _keys(line["a"], kx, ky, key, look_bins)
         for layer, part in enumerate(parts):
             events.append(_event(a, b, part, 2 + min(layer, 3)))
+        # Its own layers (6, 7, 8), drawn in order: panel, bars, then their text.
+        for layer, part in enumerate(choices_panel(line.get("p"), line.get("a"), cx, cy, u, look_bins)):
+            events.append(_event(a, b, part, 6 + min(layer, 2)))
 
         delta = line.get("d")
         if line.get("ev") in ("gain", "spend") and isinstance(delta, (int, float)) and delta:

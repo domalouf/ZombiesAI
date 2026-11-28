@@ -84,6 +84,7 @@ def make_real_env(config: RLConfig, index: int, audio_features=None):
     # The sink this game alone plays into, for the best game's film to have its sound; a fleet started without
     # sinks of its own plays into the desktop's, mixed with every other game, so its films stay silent.
     env.sound_monitor = instance.spec.monitor if fleet.audio_sinks else None
+    env.display = instance.spec.display  # where the live viewer listens for this game's brain feed
     env.end_frames = end_frames
     return env
 
@@ -167,6 +168,7 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
     history = FrameHistory(bc_config.offsets)
     rng = torch.Generator(device="cpu").manual_seed(config.seed * 7919 + index)
     env = make_actor_env(config, index, audio_features)
+    feed = brain_feed(env)
     episode = 0
     writer = None
     keepsakes = None
@@ -247,7 +249,13 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
                     best.add(frame, t)
                     for moment in moments:
                         best.mark(moment, t, policy_version=version, clock=follower.clock)
-                    best.note(brain_line(dist, value, action, reward, info), t)
+                live = watched(feed)
+                line = brain_line(dist, value, action, reward, info) if best is not None or live else None
+                if live:
+                    feed.send({"kind": "brain", **line, "t": time.monotonic(), "actor": index,
+                               "version": int(version), "episode": episode, "look_bins": LOOK_BINS})
+                if best is not None:
+                    best.note(line, t)
                     for frame, t in _end_frames(env):
                         best.add(frame, t)
                 history.push(obs["pixels"])
@@ -293,6 +301,8 @@ def _actor_loop(index: int, config: RLConfig, run_dir: Path, out, stop) -> None:
             writer.close(summary={"ended": "actor stopped"})
         if best is not None:
             best.close()
+        if feed is not None:
+            feed.close()
         env.close()
 
 
@@ -302,16 +312,40 @@ def keeps_films(config: RLConfig) -> bool:
 
 
 def brain_line(dist, value, action, reward, info: dict) -> dict:
-    """What the policy thought on this step, for the film's sidecar (scripts/overlay.py draws it): its value
-    estimate, how sure it was of the whole action (exp(-entropy) of each head, averaged), how much it wanted the
-    trigger, what it chose, what it was paid, and the HUD's points, round and settled change."""
-    log_probs = dist.log_probs[0]
+    """What the policy thought on this step, for the film's sidecar (scripts/overlay.py draws it) and the live
+    viewer's brain feed: its value estimate, how sure it was of the whole action (exp(-entropy) of each head,
+    averaged), how much it wanted the trigger, what it chose, what it was paid, the HUD's points, round and
+    settled change -- and `p`, every head's whole distribution (a list per spec.ACTION_HEADS head, that head's
+    width long), which viz/choices.py draws as the choices it had."""
+    log_probs = dist.log_probs[0].detach().float().cpu()  # one copy off the device, not one sync per number
     probs = log_probs.exp()
     entropy = -(probs * log_probs).sum(-1)  # per head
+    table = probs.tolist()
     return {"v": round(float(value[0]), 3), "sure": round(float(torch.exp(-entropy).mean()), 3),
             "fire": round(float(probs[spec.FIRE, 1]), 3), "a": [int(x) for x in action],
             "r": round(float(reward), 3), "pts": info.get("points"), "rnd": info.get("round"),
-            "ev": info.get("points_event") or None, "d": info.get("points_delta") or None}
+            "ev": info.get("points_event") or None, "d": info.get("points_delta") or None,
+            "p": [[round(p, 3) for p in row[:n]] for row, n in zip(table, spec.ACTION_NVEC)]}
+
+
+LOOK_BINS = {"yaw": list(spec.YAW_BINS_DEG), "pitch": list(spec.PITCH_BINS_DEG)}
+
+
+def brain_feed(env):
+    """The live viewer's feed of what this actor's policy thinks (viz/live_bus.py), for a game with a display
+    of its own; None for one without (the synthetic stand-in)."""
+    display = getattr(env, "display", None)
+    if not display:
+        return None
+    from zombiesai.viz.live_bus import Publisher, brain_bus
+
+    return Publisher(brain_bus(display))
+
+
+def watched(feed) -> bool:
+    """Whether a viewer is listening on `feed`: its socket exists. One stat a step, so an actor nobody watches
+    never builds a line only to have it dropped."""
+    return feed is not None and os.path.exists(feed.path)
 
 
 def _offer(out, item, timeout_s: float = 0.25) -> bool:

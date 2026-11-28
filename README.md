@@ -137,8 +137,10 @@ it, so a continued run adds to the same collection:
   kill.
 
 Each film has a `.brain.jsonl` beside it with what the policy thought on every frame. `scripts/overlay.py` draws
-that over a copy of the film: the critic's expected reward as a curve, how sure it was, the keys it pressed and
-each points change. Every film is stamped with the training clock ("Hour 6 · game 812"), counted across
+that over a copy of the film: the critic's expected reward as a curve, how sure it was, the keys it pressed,
+the choices it had (every turn, move, hold and button, with how much it wanted each) and each points change.
+`view_instances.py` draws the same choices live over each game, from its actor (`--no-choices` to hide them).
+Films kept before 2026-11-27 have no distributions in their sidecars, so their overlays leave the choices out. Every film is stamped with the training clock ("Hour 6 · game 812"), counted across
 continued runs (`src/zombiesai/rl/clock.py`). The learner also keeps a copy of the policy every training hour
 (`--snapshot-every-h`) in `runs/rl<N>/snapshots/`.
 
